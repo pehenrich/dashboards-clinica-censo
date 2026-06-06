@@ -1,0 +1,3 @@
+﻿from main import query
+r = query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'SLD' ORDER BY ORDINAL_POSITION")
+for x in r: print(x)

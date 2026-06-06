@@ -1,0 +1,11 @@
+{
+  "provider": "wppconnect",
+  "wppconnect_url": "http://localhost:21465",
+  "wppconnect_session": "myinstance",
+  "evolution_inst": "censo",
+  "numeros_destino": "5594981374896,5527997557517",
+  "horario_manha": "08:00",
+  "horario_tarde": "17:00",
+  "ativo": true,
+  "wppconnect_token": "$2b$10$76Qf_owhAsXiHVS7yyYwtO19BgGX4vApdrxb7veNFY3meXcTHA87m"
+}

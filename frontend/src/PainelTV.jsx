@@ -1,0 +1,550 @@
+import { useState, useEffect } from "react";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+
+const API = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PAINEL TV — TEMPO REAL
+// ══════════════════════════════════════════════════════════════════════════════
+
+function usePainelFetch(url, intervalMs = 30000) {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [tick,    setTick]    = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      fetch(`${API}${url}`)
+        .then(r => r.json())
+        .then(d => { if (alive) { setData(d); setLoading(false); } })
+        .catch(() => { if (alive) setLoading(false); });
+    };
+    load();
+    const id = setInterval(() => { if (alive) { load(); setTick(t => t+1); } }, intervalMs);
+    return () => { alive = false; clearInterval(id); };
+  }, [url]);
+
+  return { data, loading, tick };
+}
+
+function PainelTV() {
+  const META_DIARIA = 45000;
+  const [setor,    setSetor]    = useState("");
+  const [isFS,     setIsFS]     = useState(false);
+  const ref = { current: null };
+
+  const { data: resumo,  loading: lR } = usePainelFetch(
+    `/api/painel/resumo-hoje?meta_diaria=${META_DIARIA}${setor ? `&setor=${setor}` : ""}`
+  );
+  const { data: medicos,    loading: lM  } = usePainelFetch(
+    `/api/painel/medicos-ativos${setor ? `?setor=${setor}` : ""}`
+  );
+  const { data: medicosReq, loading: lMR } = usePainelFetch(
+    `/api/painel/medicos-solicitante${setor ? `?setor=${setor}` : ""}`
+  );
+  const { data: linha,   loading: lL } = usePainelFetch("/api/painel/linha-tempo");
+  const { data: evolucao             } = usePainelFetch("/api/painel/evolucao-hora");
+  const { data: setoresList           } = usePainelFetch("/api/painel/setores");
+  const [agora, setAgora] = useState(new Date());
+
+  useEffect(() => {
+    const id = setInterval(() => setAgora(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Track fullscreen state
+  useEffect(() => {
+    const handler = () => setIsFS(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
+
+  // Som e animação quando meta é atingida
+  const [metaAtingida,    setMetaAtingida]    = useState(false);
+  const [celebrando,      setCelebrando]      = useState(false);
+  const metaAtingidaRef = { current: false };
+
+  const tocarSomMeta = () => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // Fanfarra simples: sequência de notas
+      const notas = [
+        { freq:523, t:0,    dur:0.15 },  // C5
+        { freq:659, t:0.15, dur:0.15 },  // E5
+        { freq:784, t:0.30, dur:0.15 },  // G5
+        { freq:1047,t:0.45, dur:0.35 },  // C6
+        { freq:784, t:0.80, dur:0.15 },  // G5
+        { freq:1047,t:0.95, dur:0.50 },  // C6
+      ];
+      notas.forEach(({ freq, t, dur }) => {
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = freq;
+        osc.type = "sine";
+        gain.gain.setValueAtTime(0, ctx.currentTime + t);
+        gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + t + 0.01);
+        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + t + dur);
+        osc.start(ctx.currentTime + t);
+        osc.stop(ctx.currentTime + t + dur + 0.05);
+      });
+    } catch(e) { console.warn("Audio não suportado:", e); }
+  };
+
+  // Detecta quando meta é atingida pela primeira vez
+  useEffect(() => {
+    const pct = resumo?.pct_meta || 0;
+    if (pct >= 100 && !metaAtingida) {
+      setMetaAtingida(true);
+      setCelebrando(true);
+      tocarSomMeta();
+      setTimeout(() => setCelebrando(false), 5000);
+    }
+    // Reset se meta cair abaixo (ex: troca de dia)
+    if (pct < 95 && metaAtingida) {
+      setMetaAtingida(false);
+    }
+  }, [resumo?.pct_meta]);
+
+  const toggleFS = () => {
+    const el = document.getElementById("painel-tv-root");
+    if (!document.fullscreenElement) el?.requestFullscreen();
+    else document.exitFullscreen();
+  };
+
+  const brl  = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
+  const num  = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
+  const hora = agora.toLocaleTimeString("pt-BR", {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  const dataStr = agora.toLocaleDateString("pt-BR",  {weekday:"long",day:"2-digit",month:"long",year:"numeric"});
+
+  const pctMeta = resumo?.pct_meta || 0;
+  const corMeta = pctMeta >= 100 ? "#10B981" : pctMeta >= 75 ? "#3B7EF5" : pctMeta >= 50 ? "#F59E0B" : "#EF4444";
+
+  const ATEND_LABEL = { ASS:"Assistencial", PER:"Periódico", ADM:"Admissional",
+    DEM:"Demissional", RTB:"Ret. Trabalho", MDF:"Mud. Função", MOC:"Med. Ocup." };
+  const STATUS_COR  = { CONCLUIDO:"#10B981", EM_ATEND:"#3B7EF5", DEMORADO:"#EF4444" };
+  const STATUS_NOME = { CONCLUIDO:"Concluído", EM_ATEND:"Em atend.", DEMORADO:"Demorado" };
+
+  return (
+    <div id="painel-tv-root" style={{
+      minHeight:"100vh", background:"#0F172A", color:"#F1F5F9",
+      fontFamily:"'DM Sans','Helvetica Neue',sans-serif", padding:"20px 24px",
+      overflowY: isFS ? "auto" : "visible",
+      height: isFS ? "100vh" : "auto",
+      boxSizing:"border-box",
+    }}>
+
+      {/* ── HEADER ── */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+          <div style={{ width:44, height:44, borderRadius:12, background:"linear-gradient(135deg,#3B7EF5,#1D4ED8)",
+            display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, fontWeight:900, color:"#fff" }}>Px</div>
+          <div>
+            <div style={{ fontSize:22, fontWeight:800, color:"#F1F5F9", lineHeight:1 }}>Dashboard Clínica</div>
+            <div style={{ fontSize:13, color:"#64748B", marginTop:2 }}>Painel em Tempo Real · Smart Pixeon</div>
+          </div>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:16 }}>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ fontSize:38, fontWeight:900, color:"#F1F5F9", lineHeight:1, letterSpacing:"-1px", fontVariantNumeric:"tabular-nums" }}>{hora}</div>
+            <div style={{ fontSize:13, color:"#64748B", marginTop:2, textTransform:"capitalize" }}>{dataStr}</div>
+          </div>
+          <button onClick={()=>{ tocarSomMeta(); setCelebrando(true); setTimeout(()=>setCelebrando(false),5000); }}
+            style={{
+              width:44, height:44, borderRadius:10,
+              border:"1px solid #334155", background:"#1E293B",
+              cursor:"pointer", color:"#F59E0B",
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:20, flexShrink:0, transition:"all 0.2s",
+            }} title="Testar som da meta">
+            🔔
+          </button>
+          <button onClick={toggleFS} style={{
+            width:44, height:44, borderRadius:10,
+            border:`1px solid ${isFS ? "#3B7EF5" : "#334155"}`,
+            background: isFS ? "#1D4ED8" : "#1E293B",
+            cursor:"pointer", color: isFS ? "#fff" : "#94A3B8",
+            display:"flex", alignItems:"center", justifyContent:"center",
+            fontSize:18, flexShrink:0, transition:"all 0.2s",
+          }} title={isFS ? "Sair da tela cheia" : "Tela cheia"}>
+            {isFS ? "✕" : "⛶"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── FILTRO DE SETOR ── */}
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16,
+        background:"#1E293B", borderRadius:12, padding:"12px 16px" }}>
+        <span style={{ fontSize:12, color:"#64748B", fontWeight:700, flexShrink:0,
+          textTransform:"uppercase", letterSpacing:"0.07em" }}>Setor:</span>
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap", flex:1 }}>
+          <button onClick={()=>setSetor("")} style={{
+            padding:"5px 14px", borderRadius:8, fontSize:12, fontWeight:700, cursor:"pointer",
+            border:`1.5px solid ${setor===""?"#3B7EF5":"#334155"}`,
+            background:setor===""?"#1D4ED8":"transparent",
+            color:setor===""?"#fff":"#64748B", transition:"all 0.12s",
+          }}>Todos</button>
+          {(setoresList||[]).map((s,i) => (
+            <button key={s.setor_cod} onClick={()=>setSetor(setor===s.setor_cod?"":s.setor_cod)} style={{
+              padding:"5px 14px", borderRadius:8, fontSize:12, fontWeight:700, cursor:"pointer",
+              border:`1.5px solid ${setor===s.setor_cod?"#3B7EF5":"#334155"}`,
+              background:setor===s.setor_cod?"#1D4ED8":"transparent",
+              color:setor===s.setor_cod?"#fff":"#64748B", transition:"all 0.12s",
+              whiteSpace:"nowrap",
+            }}>
+              <span style={{ fontWeight:700, fontSize:12 }}>
+                {s.setor_nome ? s.setor_nome.trim() : s.setor_cod}
+              </span>
+              <span style={{ fontSize:10, opacity:.6, marginLeft:6 }}>
+                {Number(s.atendimentos||0)} pac.
+              </span>
+              {s.espera_media_min > 0 && (
+                <span style={{ fontSize:10, marginLeft:4, fontWeight:700,
+                  color: s.espera_media_min<=15?"#10B981":s.espera_media_min<=30?"#F59E0B":"#EF4444" }}>
+                  · ⏳{Math.round(s.espera_media_min)}m
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+        {setor && (
+          <button onClick={()=>setSetor("")} style={{
+            padding:"4px 10px", borderRadius:6, border:"1px solid #EF4444",
+            background:"transparent", color:"#EF4444", fontSize:11, fontWeight:700,
+            cursor:"pointer", flexShrink:0,
+          }}>✕ Limpar</button>
+        )}
+      </div>
+
+      {/* ── KPIs LINHA 1 ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)", gap:12, marginBottom:12 }}>
+        {[
+          { label:"Atendimentos (Guias)",  val:num(resumo?.total_os),        color:"#3B7EF5", icon:"📋", sub:null },
+          { label:"Pacientes Atendidos", val:num(resumo?.pacientes_unicos),color:"#8B5CF6", icon:"👥", sub:null },
+          { label:"Assistencial",
+            val: num(resumo?.assistencial),
+            color: resumo?.assistencial > 0 ? "#3B7EF5" : "#475569",
+            icon:"🩺", sub:null },
+          { label:"Ocupacional",
+            val: num(resumo?.ocupacional),
+            color: resumo?.ocupacional > 0 ? "#F59E0B" : "#475569",
+            icon:"🏭", sub: resumo?.outros > 0 ? `+${num(resumo.outros)} outros` : null },
+          { label:"Em Atend. Agora", val:num(resumo?.em_atendimento),  color:"#10B981", icon:"⚡", sub:null },
+          { label:"Tempo de Atend.",
+            val: resumo?.tempo_medio_min > 0 ? `${Math.round(resumo.tempo_medio_min)}min` : "—",
+            color:"#0891B2", icon:"⏱",
+            sub: resumo?.tempo_medio_min > 0 ? "duração do atendimento" : "sem dados" },
+        ].map((k,i) => (
+          <div key={i} style={{ background:"#1E293B", borderRadius:12, padding:"14px 16px",
+            borderTop:`3px solid ${k.color}` }}>
+            <div style={{ fontSize:18, marginBottom:3 }}>{k.icon}</div>
+            <div style={{ fontSize:10, color:"#64748B", fontWeight:700, textTransform:"uppercase",
+              letterSpacing:"0.07em", marginBottom:3 }}>{k.label}</div>
+            {lR
+              ? <div style={{ height:28, width:"60%", background:"#334155", borderRadius:6, animation:"pulse 1.5s infinite" }}/>
+              : <div style={{ fontSize:26, fontWeight:900, color:k.color, lineHeight:1, letterSpacing:"-0.5px" }}>{k.val}</div>
+            }
+            {k.sub && <div style={{ fontSize:10, color:"#64748B", marginTop:2 }}>{k.sub}</div>}
+          </div>
+        ))}
+      </div>
+
+      {/* ── TEMPO DE ESPERA ── destaque */}
+      {resumo && (
+        <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr 1fr", gap:12, marginBottom:16 }}>
+          {/* Card principal espera */}
+          <div style={{ background:"#1E293B", borderRadius:12, padding:"16px 20px",
+            borderLeft:"4px solid #F59E0B", display:"flex", alignItems:"center", gap:16 }}>
+            <div style={{ fontSize:32 }}>⏳</div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:11, color:"#64748B", fontWeight:700, textTransform:"uppercase",
+                letterSpacing:"0.07em", marginBottom:4 }}>Espera Média na Recepção</div>
+              <div style={{ display:"flex", alignItems:"baseline", gap:10 }}>
+                {lR
+                  ? <div style={{ height:36, width:80, background:"#334155", borderRadius:6, animation:"pulse 1.5s infinite" }}/>
+                  : <span style={{ fontSize:34, fontWeight:900, lineHeight:1,
+                      color: !resumo.espera_media_min ? "#475569"
+                           : resumo.espera_media_min <= 15 ? "#10B981"
+                           : resumo.espera_media_min <= 30 ? "#F59E0B" : "#EF4444" }}>
+                      {resumo.espera_media_min > 0 ? `${Math.round(resumo.espera_media_min)}min` : "—"}
+                    </span>
+                }
+                {resumo.espera_media_min > 0 && (
+                  <span style={{ fontSize:12, color:"#64748B" }}>
+                    de espera · base: {resumo.espera_total} pac.
+                  </span>
+                )}
+              </div>
+              {/* Barra semáforo */}
+              {resumo.espera_media_min > 0 && (
+                <div style={{ marginTop:8, height:6, background:"#0F172A", borderRadius:3, overflow:"hidden", width:"100%" }}>
+                  <div style={{ height:"100%", borderRadius:3, transition:"width 1s",
+                    width:`${Math.min(100,(resumo.espera_media_min/60)*100)}%`,
+                    background: resumo.espera_media_min<=15?"#10B981":resumo.espera_media_min<=30?"#F59E0B":"#EF4444"
+                  }}/>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Sub-cards espera */}
+          {[
+            { label:"Mín. de Espera",   val: resumo.espera_min_min>0 ? `${Math.round(resumo.espera_min_min)}min` : "—", color:"#10B981" },
+            { label:"Máx. de Espera",   val: resumo.espera_max_min>0 ? `${Math.round(resumo.espera_max_min)}min` : "—", color:"#EF4444" },
+            { label:"> 30min de Espera",val: resumo.espera_acima_30 > 0 ? num(resumo.espera_acima_30) : "0",
+              color: resumo.espera_acima_30 > 0 ? "#EF4444" : "#10B981",
+              sub: `de ${num(resumo.espera_total)} agendados` },
+          ].map((k,i) => (
+            <div key={i} style={{ background:"#1E293B", borderRadius:12, padding:"14px 16px",
+              borderTop:`3px solid ${k.color}` }}>
+              <div style={{ fontSize:10, color:"#64748B", fontWeight:700, textTransform:"uppercase",
+                letterSpacing:"0.07em", marginBottom:4 }}>{k.label}</div>
+              {lR
+                ? <div style={{ height:28, width:"60%", background:"#334155", borderRadius:6, animation:"pulse 1.5s infinite" }}/>
+                : <div style={{ fontSize:24, fontWeight:900, color:k.color, lineHeight:1 }}>{k.val}</div>
+              }
+              {k.sub && <div style={{ fontSize:10, color:"#64748B", marginTop:3 }}>{k.sub}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+
+      {/* ── META DO DIA ── */}
+      <div style={{ background: celebrando ? "#064E3B" : "#1E293B",
+        borderRadius:14, padding:"18px 22px", marginBottom:16,
+        transition:"background 1s",
+        boxShadow: celebrando ? "0 0 40px rgba(16,185,129,0.6)" : "none",
+        animation: celebrando ? "celebrar 0.5s ease-in-out infinite alternate" : "none",
+      }}>
+      {celebrando && (
+        <div style={{ textAlign:"center", fontSize:28, letterSpacing:4,
+          marginBottom:10, animation:"fadeInDown 0.5s ease" }}>
+          🎉 🏆 META ATINGIDA! 🏆 🎉
+        </div>
+      )}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+          <div>
+            <div style={{ fontSize:14, color:"#94A3B8", fontWeight:600, marginBottom:2 }}>META DO DIA</div>
+            <div style={{ display:"flex", alignItems:"baseline", gap:10 }}>
+              <span style={{ fontSize:32, fontWeight:900, color:corMeta }}>{brl(resumo?.faturamento)}</span>
+              <span style={{ fontSize:16, color:"#64748B" }}>de {brl(META_DIARIA)}</span>
+            </div>
+          </div>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ fontSize:44, fontWeight:900, color:corMeta, lineHeight:1 }}>{pctMeta.toFixed(1)}%</div>
+            {pctMeta < 100 && <div style={{ fontSize:13, color:"#94A3B8", marginTop:4 }}>faltam {brl(resumo?.falta_meta)}</div>}
+            {pctMeta >= 100 && <div style={{ fontSize:14, color:"#10B981", fontWeight:700, marginTop:4 }}>✓ META ATINGIDA!</div>}
+          </div>
+        </div>
+        {/* Barra de progresso */}
+        <div style={{ height:16, background:"#0F172A", borderRadius:8, overflow:"hidden" }}>
+          <div style={{ height:"100%", borderRadius:8, transition:"width 1s ease",
+            width:`${Math.min(100,pctMeta)}%`,
+            background: pctMeta>=100 ? "#10B981" : pctMeta>=75 ? "#3B7EF5" : pctMeta>=50 ? "#F59E0B" : "#EF4444",
+            boxShadow:`0 0 12px ${corMeta}80`,
+          }}/>
+        </div>
+        {/* Marcadores */}
+        <div style={{ display:"flex", justifyContent:"space-between", marginTop:6 }}>
+          {[0,25,50,75,100].map(p => (
+            <span key={p} style={{ fontSize:10, color:"#475569", fontWeight:600 }}>{p}%</span>
+          ))}
+        </div>
+      </div>
+
+      {/* ── LINHA 3: Evolução por hora + Médicos ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"2fr 3fr", gap:14, marginBottom:16 }}>
+
+        {/* Evolução por hora */}
+        <div style={{ background:"#1E293B", borderRadius:14, padding:"16px 18px" }}>
+          <div style={{ fontSize:13, color:"#94A3B8", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:12 }}>
+            📈 Atendimentos por Hora
+          </div>
+          {!evolucao?.length ? (
+            <div style={{ color:"#475569", fontSize:13, padding:"20px 0", textAlign:"center" }}>Sem dados</div>
+          ) : (
+            <div>
+              {/* Mini bar chart manual */}
+              {(() => {
+                const max = Math.max(...(evolucao||[]).map(e=>e.atendimentos||0), 1);
+                const horaAtual = agora.getHours();
+                return (
+                  <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:100 }}>
+                    {Array.from({length:18},(_,i)=>i+6).map(h => {
+                      const e   = (evolucao||[]).find(r=>r.hora===h);
+                      const qty = e?.atendimentos||0;
+                      const pct = (qty/max)*100;
+                      const isNow = h === horaAtual;
+                      return (
+                        <div key={h} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
+                          {qty>0 && <span style={{ fontSize:9, color:isNow?"#3B7EF5":"#64748B", fontWeight:700 }}>{qty}</span>}
+                          <div style={{ width:"100%", height:`${Math.max(4,pct)}%`,
+                            background:isNow?"#3B7EF5":qty>0?"#334155":"#1E293B",
+                            borderRadius:"3px 3px 0 0",
+                            border:isNow?"1px solid #3B7EF5":"none",
+                            minHeight:4 }}/>
+                          <span style={{ fontSize:8, color: isNow?"#3B7EF5":"#475569" }}>{h}h</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+
+        {/* Médicos Executante + Solicitante */}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+          {/* Executante */}
+          <div style={{ background:"#1E293B", borderRadius:14, padding:"14px 16px", overflowY:"auto", maxHeight:220 }}>
+            <div style={{ fontSize:11, color:"#94A3B8", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
+              👨‍⚕️ Médico Executante
+            </div>
+            {lM ? <div style={{ color:"#475569", fontSize:12 }}>Carregando...</div> : (
+              <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                {Object.entries(
+                  (medicos||[]).reduce((acc, m) => {
+                    const k = m.medico?.trim();
+                    if (!acc[k]) acc[k] = { medico:k, atend:0, pac:0, ativo:0, tipos:[] };
+                    acc[k].atend += m.atendimentos||0;
+                    acc[k].pac   += m.pacientes||0;
+                    acc[k].ativo += m.em_atend_agora||0;
+                    acc[k].tipos.push(m.tipo_atend);
+                    return acc;
+                  }, {})
+                ).sort((a,b)=>b[1].atend-a[1].atend).map(([nome, m], i) => {
+                  const ativo = m.ativo > 0;
+                  return (
+                    <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px",
+                      borderRadius:7, background:"#0F172A",
+                      border:`1px solid ${ativo?"#10B981":"#1E293B"}` }}>
+                      <div style={{ width:7, height:7, borderRadius:"50%", flexShrink:0,
+                        background:ativo?"#10B981":"#475569",
+                        boxShadow:ativo?"0 0 6px #10B981":"none" }}/>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:12, fontWeight:700, color:"#F1F5F9",
+                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{nome}</div>
+                      </div>
+                      <div style={{ textAlign:"right", flexShrink:0 }}>
+                        <span style={{ fontSize:15, fontWeight:900, color:"#3B7EF5" }}>{m.atend}</span>
+                        <span style={{ fontSize:10, color:"#64748B", marginLeft:4 }}>guias</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Solicitante */}
+          <div style={{ background:"#1E293B", borderRadius:14, padding:"14px 16px", overflowY:"auto", maxHeight:220 }}>
+            <div style={{ fontSize:11, color:"#94A3B8", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
+              📋 Médico Solicitante
+            </div>
+            {lMR ? <div style={{ color:"#475569", fontSize:12 }}>Carregando...</div> : (
+              <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+                {Object.entries(
+                  (medicosReq||[]).reduce((acc, m) => {
+                    const k = m.medico?.trim();
+                    if (!acc[k]) acc[k] = { medico:k, atend:0, pac:0, tipos:[] };
+                    acc[k].atend += m.atendimentos||0;
+                    acc[k].pac   += m.pacientes||0;
+                    acc[k].tipos.push(m.tipo_atend);
+                    return acc;
+                  }, {})
+                ).sort((a,b)=>b[1].atend-a[1].atend).map(([nome, m], i) => (
+                  <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px",
+                    borderRadius:7, background:"#0F172A", border:"1px solid #1E293B" }}>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:"#F1F5F9",
+                        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{nome}</div>
+                    </div>
+                    <div style={{ textAlign:"right", flexShrink:0 }}>
+                      <span style={{ fontSize:15, fontWeight:900, color:"#8B5CF6" }}>{m.atend}</span>
+                      <span style={{ fontSize:10, color:"#64748B", marginLeft:4 }}>guias</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── LINHA DO TEMPO ── */}
+      <div style={{ background:"#1E293B", borderRadius:14, padding:"16px 18px" }}>
+        <div style={{ fontSize:13, color:"#94A3B8", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:14 }}>
+          🕐 Linha do Tempo — Últimos Atendimentos
+        </div>
+        {lL ? <div style={{ color:"#475569", fontSize:13 }}>Carregando...</div> : (
+          <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
+            {(linha||[]).slice(0,5).map((os,i) => {
+              const cor   = STATUS_COR[os.status] || "#64748B";
+              const isLast = i === (linha||[]).slice(0,5).length-1;
+              return (
+                <div key={i} style={{ display:"flex", gap:14, alignItems:"flex-start" }}>
+                  {/* Timeline dot & line */}
+                  <div style={{ display:"flex", flexDirection:"column", alignItems:"center", flexShrink:0, width:20 }}>
+                    <div style={{ width:12, height:12, borderRadius:"50%", background:cor,
+                      boxShadow:`0 0 8px ${cor}80`, flexShrink:0, marginTop:4 }}/>
+                    {!isLast && <div style={{ width:2, flex:1, background:"#334155", minHeight:28 }}/>}
+                  </div>
+                  {/* Conteúdo */}
+                  <div style={{ flex:1, paddingBottom:16, minWidth:0 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, flex:1 }}>
+                        <span style={{ fontSize:12, fontWeight:700, color:"#94A3B8", flexShrink:0 }}>{os.hora_abertura?.slice(0,5)}</span>
+                        <span style={{ fontSize:13, fontWeight:700, color:"#F1F5F9",
+                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:200 }}>
+                          {os.paciente?.trim() || "Paciente"}
+                        </span>
+                        <span style={{ fontSize:11, color:"#64748B", flexShrink:0 }}>— {os.medico?.trim()}</span>
+                        <span style={{ fontSize:10, color:"#64748B", background:"#0F172A",
+                          padding:"1px 6px", borderRadius:4, flexShrink:0 }}>
+                          {ATEND_LABEL[os.osm_atend]||os.osm_atend}
+                        </span>
+                      </div>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0, marginLeft:10 }}>
+                        {os.duracao_min != null && (
+                          <span style={{ fontSize:12, fontWeight:700, color:os.duracao_min>60?"#EF4444":os.duracao_min>30?"#F59E0B":"#10B981" }}>
+                            ⏱ {os.duracao_min}min
+                          </span>
+                        )}
+                        <span style={{ fontSize:10, fontWeight:700, color:cor,
+                          background:cor+"20", padding:"2px 8px", borderRadius:10 }}>
+                          {STATUS_NOME[os.status]||os.status}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Rodapé */}
+      <div style={{ marginTop:12, textAlign:"center", fontSize:11, color:"#334155" }}>
+        Atualiza automaticamente a cada 30 segundos · Última atualização: {resumo?.hora_atual || "—"}
+      </div>
+
+      <style dangerouslySetInnerHTML={{__html: `
+        @keyframes pulse      { 0%,100%{opacity:1} 50%{opacity:.4} }
+        @keyframes glow       { 0%,100%{box-shadow:0 0 8px rgba(16,185,129,0.5)} 50%{box-shadow:0 0 16px #10B981} }
+        @keyframes celebrar   { 0%{transform:scale(1)} 100%{transform:scale(1.02)} }
+        @keyframes fadeInDown { 0%{opacity:0;transform:translateY(-20px)} 100%{opacity:1;transform:translateY(0)} }
+        #painel-tv-root:-webkit-full-screen { overflow-y: auto !important; height: 100vh !important; }
+        #painel-tv-root:-moz-full-screen    { overflow-y: auto !important; height: 100vh !important; }
+        #painel-tv-root:fullscreen          { overflow-y: auto !important; height: 100vh !important; }
+      `}}/>
+    </div>
+  );
+}
+
+
+export default PainelTV;
