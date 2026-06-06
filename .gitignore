@@ -1,0 +1,30 @@
+﻿# Python
+__pycache__/
+*.pyc
+.env
+venv/
+
+# Arquivos temporários de debug/patch
+backend/debug_*.py
+backend/patch*.py
+backend/fix*.py
+backend/check_*.py
+backend/pef.py
+backend/main3.py
+test.py
+
+# Configurações sensíveis
+backend/whatsapp_config.json
+backend/.env
+
+# Node
+node_modules/
+dist/
+
+# Submodulos externos
+evolution-api/
+wppconnect-server/
+
+# OS
+.DS_Store
+Thumbs.db
