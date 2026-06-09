@@ -137,6 +137,11 @@ def buscar_dados_manha(query_func):
         "prod_ano_ant":         (prod_ano_ant[0].get("producao") or 0) if prod_ano_ant else 0,
         "guias_ano_ant":        (prod_ano_ant[0].get("guias")    or 0) if prod_ano_ant else 0,
         "hoje_ano_ant":         hoje_ano_ant,
+        "meta_mensal":          META_MENSAL,
+        "meta_diaria":          meta_diaria,
+        "meta_dia_pct":         meta_dia_pct,
+        "meta_mes_pct":         meta_mes_pct,
+        "falta_meta":           falta_meta,
     }
 
 
@@ -273,6 +278,11 @@ def buscar_dados_fechamento(query_func):
         "prod_ano_ant":         (prod_ano_ant[0].get("producao") or 0) if prod_ano_ant else 0,
         "guias_ano_ant":        (prod_ano_ant[0].get("guias")    or 0) if prod_ano_ant else 0,
         "hoje_ano_ant":         hoje_ano_ant,
+        "meta_mensal":          META_MENSAL,
+        "meta_diaria":          meta_diaria,
+        "meta_dia_pct":         meta_dia_pct,
+        "meta_mes_pct":         meta_mes_pct,
+        "falta_meta":           falta_meta,
     }
 
 
@@ -415,6 +425,11 @@ def montar_fechamento(dados):
     prod_ano_ant  = dados.get("prod_ano_ant")         or 0
     guias_ano_ant = dados.get("guias_ano_ant")        or 0
     hoje_ano_ant  = dados.get("hoje_ano_ant", "")
+    meta_mensal   = dados.get("meta_mensal")          or 1200000.0
+    meta_dia      = dados.get("meta_diaria")          or 0
+    meta_dia_pct  = dados.get("meta_dia_pct")         or 0
+    meta_mes_pct  = dados.get("meta_mes_pct")         or 0
+    falta_meta    = dados.get("falta_meta")           or 0
     prod          = fat.get("producao") or 0
     total_os      = fat.get("total_os") or 0
     pacientes     = fat.get("pacientes") or 0
@@ -482,10 +497,16 @@ def montar_fechamento(dados):
             pct  = falt / marc * 100
             msg += "  - " + str(a["medico"]) + ": " + num(falt) + " falta(s) de " + num(marc) + " (" + "{:.0f}".format(pct) + "%)" + n
 
+    sinal_dia = "+" if meta_dia_pct >= 100 else ""
+    sinal_mes = "+" if meta_mes_pct >= 100 else ""
+    msg += n + "*Metas do Mes*" + n
+    msg += "  Meta mes:  *" + brl(meta_mensal) + "*" + n
+    msg += "  Meta dia:  *" + brl(meta_dia) + "* (media necessaria)" + n
     msg += n + "*Producao do Mes*" + n
     msg += "  Acumulado:    *" + brl(prod_mes) + "* (" + num(int(guias_mes)) + " guias)" + n
-    msg += "  Media diaria: *" + brl(media_dia) + "*" + n
-    msg += "  Projecao mes: *" + brl(projecao) + "* (" + str(int(dias_rest)) + " dias uteis restantes)" + n
+    msg += "  Media diaria: *" + brl(media_dia) + "* vs meta *" + brl(meta_dia) + "* (" + sinal_dia + "{:.1f}".format(meta_dia_pct - 100) + "%)" + n
+    msg += "  Projecao mes: *" + brl(projecao) + "* vs meta *" + brl(meta_mensal) + "* (" + sinal_mes + "{:.1f}".format(meta_mes_pct - 100) + "%)" + n
+    msg += "  Falta para meta: *" + brl(falta_meta) + "*" + n
 
     msg += n + "_Enviado automaticamente as " + datetime.now().strftime("%H:%M") + " - Dashboard Clinica_"
     return msg

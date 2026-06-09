@@ -27,7 +27,7 @@ from whatsapp_sender import enviar_resumo
 
 # Horários de envio (hora, minuto, turno)
 HORARIOS = [
-    (8,  0,  "manha"),       # 08:00 — Resumo da manhã
+    (7,  0,  "manha"),       # 07:00 — Resumo da manhã
     (17, 0,  "fechamento"),  # 17:00 — Fechamento + prévia do dia seguinte
 ]
 

@@ -1059,7 +1059,7 @@ def pacientes_aniversariantes(mes: int = None):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/financeiro/producao-mensal")
-def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = 45000.0, meta_mensal_fixa: float = None):
+def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None, meta_mensal_fixa: float = 1200000.0):
     """
     meta_diaria      → valor diário (padrão 45000)
     meta_mensal_fixa → se informado, usa esse valor fixo para a meta do mês
@@ -1173,6 +1173,8 @@ def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = 45000
             and dt.date(ano, mes, d) not in feriados
         )
 
+    if meta_diaria is None:
+        meta_diaria = round(meta_mensal_fixa / dias_uteis_mes, 2) if dias_uteis_mes > 0 else 0
     meta_mes  = meta_mensal_fixa if meta_mensal_fixa else meta_diaria * dias_uteis_mes
     projecao  = total_geral + (media_diaria * dias_restantes)
     diferenca = meta_mes - total_geral
@@ -2530,8 +2532,56 @@ def wpp_preview(turno: str = "manha"):
     except Exception as e:
         return {"erro": str(e)}
 
+@app.get("/api/estoque/sintetico")
+def estoque_sintetico(data_inicio: str = "2024-01-01", data_fim: str = ""):
+    """Relatório sintético de saldos por grupo — como o PDF Sintético."""
+    from datetime import datetime
+    fim = data_fim if data_fim else datetime.now().strftime("%Y-%m-%d")
+    inicio = data_inicio
+
+    rows = query(f"""
+        SELECT
+            RTRIM(gmm.GMM_COD)                                              AS grupo_cod,
+            RTRIM(gmm.GMM_NOME)                                             AS grupo_nome,
+            SUM(CASE WHEN mma_e.valor IS NULL THEN 0 ELSE mma_e.valor END)  AS sld_mes_ant,
+            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='E' THEN mma.MMA_VALOR ELSE 0 END),0) AS entradas,
+            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='S' THEN mma.MMA_VALOR ELSE 0 END),0) AS saidas,
+            SUM(mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM)                     AS saldo_atual,
+            COUNT(DISTINCT mat.MAT_COD)                                     AS total_itens
+        FROM GMM gmm
+        LEFT JOIN MAT mat ON mat.MAT_GMM_COD = gmm.GMM_COD AND mat.MAT_DEL_LOGICA <> 'S'
+        LEFT JOIN MMA mma ON mma.MMA_MAT_COD = mat.MAT_COD
+            AND mma.MMA_DATA_MOV BETWEEN '{inicio}' AND '{fim} 23:59:59'
+            AND mma.MMA_IND_CANCELADA <> 'S'
+        LEFT JOIN (
+            SELECT MMA_MAT_COD, SUM(CASE WHEN MMA_TIPO_ES='E' THEN MMA_VALOR ELSE -MMA_VALOR END) AS valor
+            FROM MMA
+            WHERE MMA_DATA_MOV < '{inicio}' AND MMA_IND_CANCELADA <> 'S'
+            GROUP BY MMA_MAT_COD
+        ) mma_e ON mma_e.MMA_MAT_COD = mat.MAT_COD
+        WHERE gmm.GMM_COD <> '0'
+        GROUP BY RTRIM(gmm.GMM_COD), RTRIM(gmm.GMM_NOME)
+        HAVING COUNT(DISTINCT mat.MAT_COD) > 0
+        ORDER BY grupo_nome
+    """)
+    
+    total_entradas = sum(r.get('entradas') or 0 for r in rows)
+    total_saidas   = sum(r.get('saidas')   or 0 for r in rows)
+    total_atual    = sum(r.get('saldo_atual') or 0 for r in rows)
+    
+    return {
+        "grupos": rows,
+        "totais": {
+            "entradas": round(total_entradas, 2),
+            "saidas":   round(total_saidas, 2),
+            "saldo_atual": round(total_atual, 2),
+        },
+        "periodo": {"inicio": inicio, "fim": fim}
+    }
+
+
 @app.get("/api/estoque/analitico")
-def estoque_analitico(data_inicio: str = "2026-01-02", data_fim: str = "",
+def estoque_analitico(data_inicio: str = "2024-01-01", data_fim: str = "",
                       grupo_cod: str = "", busca: str = "", limite: int = 100):
     """Relatório analítico de saldos por material — como o PDF Analítico."""
     from datetime import datetime
@@ -2580,79 +2630,6 @@ def estoque_analitico(data_inicio: str = "2026-01-02", data_fim: str = "",
     """)
     return rows
 
-
-
-@app.get("/api/estoque/sintetico")
-def estoque_sintetico(data_inicio: str = "2026-01-02", data_fim: str = ""):
-    from datetime import datetime
-    fim = data_fim if data_fim else datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT
-            RTRIM(gmm.GMM_COD) AS grupo_cod,
-            RTRIM(gmm.GMM_NOME) AS grupo_nome,
-            SUM(mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM) AS saldo_atual,
-            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='E' THEN mma.MMA_VALOR ELSE 0 END),0) AS entradas,
-            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='S' THEN mma.MMA_VALOR ELSE 0 END),0) AS saidas,
-            COUNT(DISTINCT mat.MAT_COD) AS total_itens
-        FROM GMM gmm
-        LEFT JOIN MAT mat ON mat.MAT_GMM_COD = gmm.GMM_COD AND mat.MAT_DEL_LOGICA <> 'S'
-        LEFT JOIN MMA mma ON mma.MMA_MAT_COD = mat.MAT_COD
-            AND mma.MMA_DATA_MOV BETWEEN '{data_inicio}' AND '{fim} 23:59:59'
-            AND mma.MMA_IND_CANCELADA <> 'S'
-        WHERE gmm.GMM_COD <> '0'
-        GROUP BY RTRIM(gmm.GMM_COD), RTRIM(gmm.GMM_NOME)
-        HAVING COUNT(DISTINCT mat.MAT_COD) > 0
-        ORDER BY grupo_nome
-    """)
-    return {
-        "grupos": rows,
-        "totais": {
-            "entradas":    round(sum(r.get("entradas")    or 0 for r in rows), 2),
-            "saidas":      round(sum(r.get("saidas")      or 0 for r in rows), 2),
-            "saldo_atual": round(sum(r.get("saldo_atual") or 0 for r in rows), 2),
-        },
-        "periodo": {"inicio": data_inicio, "fim": fim}
-    }
-
-
-@app.get("/api/estoque/analitico")
-def estoque_analitico(data_inicio: str = "2026-01-02", data_fim: str = "",
-                      grupo_cod: str = "", busca: str = "", limite: int = 100):
-    from datetime import datetime
-    fim = data_fim if data_fim else datetime.now().strftime("%Y-%m-%d")
-    fg = f"AND RTRIM(mat.MAT_GMM_COD) = '{grupo_cod}'" if grupo_cod else ""
-    fb = f"AND RTRIM(mat.MAT_DESC_RESUMIDA) LIKE '%{busca}%'" if busca else ""
-    rows = query(f"""
-        SELECT TOP {limite}
-            RTRIM(gmm.GMM_NOME) AS grupo_nome,
-            mat.MAT_COD AS cod,
-            RTRIM(mat.MAT_DESC_RESUMIDA) AS descricao,
-            mat.MAT_VLR_PM AS pm_atual,
-            mat.MAT_QT_EST_ATUAL AS qtd_atual,
-            mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM AS saldo_atual,
-            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='E' THEN mma.MMA_QTD   ELSE 0 END),0) AS qtd_entradas,
-            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='E' THEN mma.MMA_VALOR ELSE 0 END),0) AS val_entradas,
-            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='S' THEN mma.MMA_QTD   ELSE 0 END),0) AS qtd_saidas,
-            ISNULL(SUM(CASE WHEN mma.MMA_TIPO_ES='S' THEN mma.MMA_VALOR ELSE 0 END),0) AS val_saidas,
-            CASE WHEN mat.MAT_QT_EST_ATUAL = 0 THEN 'ZERADO'
-                 WHEN mat.MAT_PT_RESSUPRIMENTO > 0
-                      AND mat.MAT_QT_EST_ATUAL <= mat.MAT_PT_RESSUPRIMENTO THEN 'CRITICO'
-                 ELSE 'NORMAL' END AS status_estoque
-        FROM MAT mat
-        LEFT JOIN GMM gmm ON RTRIM(gmm.GMM_COD) = RTRIM(mat.MAT_GMM_COD)
-        LEFT JOIN MMA mma ON mma.MMA_MAT_COD = mat.MAT_COD
-            AND mma.MMA_DATA_MOV BETWEEN '{data_inicio}' AND '{fim} 23:59:59'
-            AND mma.MMA_IND_CANCELADA <> 'S'
-        WHERE mat.MAT_DEL_LOGICA <> 'S'
-          {fg}
-          {fb}
-        GROUP BY RTRIM(gmm.GMM_NOME), mat.MAT_COD, RTRIM(mat.MAT_DESC_RESUMIDA),
-                 mat.MAT_VLR_PM, mat.MAT_QT_EST_ATUAL, mat.MAT_PT_RESSUPRIMENTO
-        HAVING mat.MAT_QT_EST_ATUAL > 0
-            OR SUM(CASE WHEN mma.MMA_TIPO_ES IS NOT NULL THEN 1 ELSE 0 END) > 0
-        ORDER BY saldo_atual DESC
-    """)
-    return rows
 
 @app.get("/api/debug/estoque-grupos")
 def debug_estoque_grupos():
@@ -2847,34 +2824,21 @@ def debug_estoque2():
 # MMA_TIPO_OPERACAO: E0/E1=entrada, S0/S1/S2=saída, T=transferência
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/api/estoque/ultimo-inventario")
-def estoque_ultimo_inventario():
-    """Retorna a data do último inventário realizado."""
-    r = query("""
-        SELECT TOP 1
-            INV_NUM,
-            CONVERT(VARCHAR(10), INV_DT_CONTAGEM, 120) AS data_inventario,
-            CONVERT(VARCHAR(10), INV_DATA, 120)         AS data_registro
-        FROM INV
-        ORDER BY INV_DATA DESC
-    """)
-    if r:
-        return r[0]
-    return {"data_inventario": "2026-01-01", "data_registro": "2026-01-01"}
-
-
 @app.get("/api/estoque/resumo")
-def estoque_resumo(periodo: str = "30d", data_inicio: str = "2026-01-02", data_fim_est: str = ""):
+def estoque_resumo(periodo: str = "30d", data_inicio: str = "2024-01-01"):
     inicio, fim = periodo_datas(periodo)
-    from datetime import datetime as _dt
-    fim_est = data_fim_est if data_fim_est else _dt.now().strftime("%Y-%m-%d")
+    
+    # KPIs — filtra apenas materiais com movimentação a partir de data_inicio
+    # para evitar distorção de itens antigos/vencidos sem movimentação recente
     kpis = query(f"""
         SELECT
-            COUNT(DISTINCT mat.MAT_COD) AS total_itens,
-            SUM(CASE WHEN mat.MAT_QT_EST_ATUAL > 0 THEN 1 ELSE 0 END) AS com_estoque,
-            SUM(CASE WHEN mat.MAT_QT_EST_ATUAL = 0 THEN 1 ELSE 0 END) AS zerados,
-            SUM(CASE WHEN mat.MAT_PT_RESSUPRIMENTO > 0 AND mat.MAT_QT_EST_ATUAL <= mat.MAT_PT_RESSUPRIMENTO THEN 1 ELSE 0 END) AS abaixo_minimo,
-            SUM(mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM) AS valor_total,
+            COUNT(DISTINCT mat.MAT_COD)                                     AS total_itens,
+            SUM(CASE WHEN mat.MAT_QT_EST_ATUAL > 0 THEN 1 ELSE 0 END)      AS com_estoque,
+            SUM(CASE WHEN mat.MAT_QT_EST_ATUAL = 0 THEN 1 ELSE 0 END)      AS zerados,
+            SUM(CASE WHEN mat.MAT_PT_RESSUPRIMENTO > 0
+                      AND mat.MAT_QT_EST_ATUAL <= mat.MAT_PT_RESSUPRIMENTO
+                     THEN 1 ELSE 0 END)                                     AS abaixo_minimo,
+            SUM(mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM)                     AS valor_total,
             SUM(CASE WHEN mat.MAT_IND_CURVA_ABC='A' THEN mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM ELSE 0 END) AS valor_curva_a,
             SUM(CASE WHEN mat.MAT_IND_CURVA_ABC='B' THEN mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM ELSE 0 END) AS valor_curva_b,
             SUM(CASE WHEN mat.MAT_IND_CURVA_ABC='C' THEN mat.MAT_QT_EST_ATUAL * mat.MAT_VLR_PM ELSE 0 END) AS valor_curva_c
@@ -2888,39 +2852,37 @@ def estoque_resumo(periodo: str = "30d", data_inicio: str = "2026-01-02", data_f
                 AND MMA_IND_CANCELADA <> 'S'
           )
     """)
-
-
-    kpi = kpis[0] if kpis else {}
-    movs = query(f"""
+    
+    # Movimentações do período
+    mov = query(f"""
         SELECT
-            SUM(CASE WHEN MMA_TIPO_ES='E' THEN MMA_QTD   ELSE 0 END) AS qtd_entradas,
+            SUM(CASE WHEN MMA_TIPO_ES='E' THEN MMA_QTD ELSE 0 END)   AS qtd_entradas,
+            SUM(CASE WHEN MMA_TIPO_ES='S' THEN MMA_QTD ELSE 0 END)   AS qtd_saidas,
             SUM(CASE WHEN MMA_TIPO_ES='E' THEN MMA_VALOR ELSE 0 END) AS valor_entradas,
-            SUM(CASE WHEN MMA_TIPO_ES='S' THEN MMA_QTD   ELSE 0 END) AS qtd_saidas,
             SUM(CASE WHEN MMA_TIPO_ES='S' THEN MMA_VALOR ELSE 0 END) AS valor_saidas,
-            COUNT(DISTINCT MMA_MAT_COD) AS materiais_movimentados
+            COUNT(DISTINCT MMA_MAT_COD)                               AS materiais_movimentados
         FROM MMA
-        WHERE MMA_DATA_MOV BETWEEN '{data_inicio}' AND '{fim_est} 23:59:59'
+        WHERE MMA_DATA_MOV BETWEEN '{data_inicio}' AND CASE WHEN '{data_fim}' = '' THEN CONVERT(VARCHAR,GETDATE(),120) ELSE '{data_fim} 23:59:59' END
           AND MMA_IND_CANCELADA <> 'S'
     """)
-    mov = movs[0] if movs else {}
-    return {
-        "total_itens":            kpi.get("total_itens") or 0,
-        "com_estoque":            kpi.get("com_estoque") or 0,
-        "zerados":                kpi.get("zerados") or 0,
-        "abaixo_minimo":          kpi.get("abaixo_minimo") or 0,
-        "valor_total":            float(kpi.get("valor_total") or 0),
-        "valor_curva_a":          float(kpi.get("valor_curva_a") or 0),
-        "valor_curva_b":          float(kpi.get("valor_curva_b") or 0),
-        "valor_curva_c":          float(kpi.get("valor_curva_c") or 0),
-        "qtd_entradas":           float(mov.get("qtd_entradas") or 0),
-        "qtd_saidas":             float(mov.get("qtd_saidas") or 0),
-        "valor_entradas":         float(mov.get("valor_entradas") or 0),
-        "valor_saidas":           float(mov.get("valor_saidas") or 0),
-        "materiais_movimentados": mov.get("materiais_movimentados") or 0,
-        "periodo_inicio":         inicio,
-        "periodo_fim":            fim,
-        "vence_30d": 0, "vence_60d": 0, "vence_90d": 0, "vencidos": 0,
-    }
+    
+    # Lotes vencendo em 30/60/90 dias
+    vencimento = query("""
+        SELECT
+            SUM(CASE WHEN DATEDIFF(day,GETDATE(),LOT_DATA_VALIDADE) BETWEEN 0 AND 30  THEN 1 ELSE 0 END) AS vence_30d,
+            SUM(CASE WHEN DATEDIFF(day,GETDATE(),LOT_DATA_VALIDADE) BETWEEN 31 AND 60 THEN 1 ELSE 0 END) AS vence_60d,
+            SUM(CASE WHEN DATEDIFF(day,GETDATE(),LOT_DATA_VALIDADE) BETWEEN 61 AND 90 THEN 1 ELSE 0 END) AS vence_90d,
+            SUM(CASE WHEN LOT_DATA_VALIDADE < GETDATE() AND LOT_SALDO > 0 THEN 1 ELSE 0 END) AS vencidos
+        FROM LOT WHERE LOT_SALDO > 0
+    """)
+    
+    k = kpis[0] if kpis else {}
+    m = mov[0] if mov else {}
+    v = vencimento[0] if vencimento else {}
+    
+    return {**k, **m, **v,
+            "periodo_inicio": inicio, "periodo_fim": fim}
+
 
 @app.get("/api/estoque/posicao")
 def estoque_posicao(curva: str = "", busca: str = "", limite: int = 50):
@@ -2967,7 +2929,7 @@ def estoque_posicao(curva: str = "", busca: str = "", limite: int = 50):
 
 
 @app.get("/api/estoque/giro")
-def estoque_giro(periodo: str = "30d", limite: int = 50, data_inicio: str = "2026-01-02"):
+def estoque_giro(periodo: str = "30d", limite: int = 50):
     """
     Relatório de giro de estoque.
     Giro = Saídas no período / Estoque médio
@@ -3052,7 +3014,7 @@ def estoque_lotes_vencimento(dias: int = 90):
 
 
 @app.get("/api/estoque/movimentacoes")
-def estoque_movimentacoes(periodo: str = "30d", tipo: str = "", data_inicio: str = "2026-01-02"):
+def estoque_movimentacoes(periodo: str = "30d", tipo: str = ""):
     """Movimentações do período. tipo: E=entradas, S=saídas, vazio=todas."""
     inicio, fim = periodo_datas(periodo)
     filtro_tipo = f"AND MMA_TIPO_ES = '{tipo}'" if tipo else ""
@@ -3085,7 +3047,7 @@ def estoque_movimentacoes(periodo: str = "30d", tipo: str = "", data_inicio: str
 
 
 @app.get("/api/estoque/curva-abc")
-def estoque_curva_abc(data_inicio: str = "2026-01-02"):
+def estoque_curva_abc():
     """Distribuição da curva ABC com totais."""
     rows = query("""
         SELECT
@@ -3106,7 +3068,7 @@ def estoque_curva_abc(data_inicio: str = "2026-01-02"):
 
 
 @app.get("/api/estoque/mov-por-dia")
-def estoque_mov_por_dia(periodo: str = "30d", data_inicio: str = "2026-01-02"):
+def estoque_mov_por_dia(periodo: str = "30d"):
     inicio, fim = periodo_datas(periodo)
     rows = query(f"""
         SELECT
@@ -3129,7 +3091,7 @@ def estoque_mov_por_dia(periodo: str = "30d", data_inicio: str = "2026-01-02"):
 
 
 @app.get("/api/estoque/por-setor")
-def estoque_por_setor(periodo: str = "30d", data_inicio: str = "2026-01-02"):
+def estoque_por_setor(periodo: str = "30d"):
     """Dashboard de consumo de materiais por setor."""
     inicio, fim = periodo_datas(periodo)
 
@@ -3206,7 +3168,7 @@ def estoque_por_setor(periodo: str = "30d", data_inicio: str = "2026-01-02"):
     }
 
 @app.get("/api/estoque/por-grupo")
-def estoque_por_grupo(periodo: str = "30d", data_inicio: str = "2026-01-02"):
+def estoque_por_grupo(periodo: str = "30d"):
     """Dashboard por grupo (GMM) e linha (LMA) de material."""
     inicio, fim = periodo_datas(periodo)
 
@@ -3330,7 +3292,7 @@ def estoque_por_grupo(periodo: str = "30d", data_inicio: str = "2026-01-02"):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/painel/resumo-hoje")
-def painel_resumo_hoje(meta_diaria: float = 45000, setor: str = ""):
+def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
     """KPIs do dia atual em tempo real."""
     hoje = datetime.now().strftime("%Y-%m-%d")
     filtro_str = f"AND RTRIM(osm.osm_str) = '{setor}'" if setor else ""
@@ -3461,6 +3423,14 @@ def painel_resumo_hoje(meta_diaria: float = 45000, setor: str = ""):
     t0 = tempo[0] if tempo else {}
     e0 = em_atend[0] if em_atend else {}
     fat_val = float(f0.get("faturamento") or 0)
+    META_MENSAL = 1200000.0
+    from calendar import monthrange
+    import datetime as _dt
+    _hoje = _dt.date.today()
+    _dias_uteis = sum(1 for d in range(1, monthrange(_hoje.year, _hoje.month)[1]+1)
+                      if _dt.date(_hoje.year, _hoje.month, d).weekday() < 6)
+    if meta_diaria is None:
+        meta_diaria = round(META_MENSAL / _dias_uteis, 2) if _dias_uteis > 0 else 45000
     pct_meta = round(fat_val / meta_diaria * 100, 1) if meta_diaria > 0 else 0
     falta = max(0, meta_diaria - fat_val)
 
