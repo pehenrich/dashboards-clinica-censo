@@ -7926,6 +7926,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
               AND fle.FLE_PAC_REG > 0
               AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
               AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
               {filtro_setor}
         ),
         chegadas_prod AS (
@@ -7947,6 +7948,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                   AND fle.FLE_PAC_REG > 0
                   AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
                   AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+                  AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
                   {filtro_setor}
             ) x WHERE rn = 1
         ),
@@ -8025,6 +8027,7 @@ def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str 
           AND fle.FLE_PAC_REG > 0
           AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
           AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+          AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
           {filtro_setor}
           {filtro_recep}
         GROUP BY
@@ -8055,6 +8058,7 @@ def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str
               AND fle.FLE_PAC_REG > 0
               AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
               AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
               {filtro_setor}
               {filtro_recep}
         ),
