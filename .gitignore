@@ -25,6 +25,9 @@ dist/
 evolution-api/
 wppconnect-server/
 
+# Logs
+*.log
+
 # OS
 .DS_Store
 Thumbs.db
