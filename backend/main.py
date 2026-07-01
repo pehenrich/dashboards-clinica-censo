@@ -7946,10 +7946,12 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                 c.login_recep,
                 c.setor_cod,
                 SUM({vliq}) AS producao
-            FROM chegadas c
+            FROM (
+                SELECT DISTINCT login_recep, setor_cod, FLE_PAC_REG
+                FROM chegadas
+            ) c
             JOIN osm o ON o.osm_pac = c.FLE_PAC_REG
-                      AND CAST(o.osm_dthr AS DATE) = c.data_cheg
-                      AND RTRIM(o.osm_str) = c.setor_cod
+                      AND o.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
             JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_OSM_SERIE = o.osm_serie
             GROUP BY c.login_recep, c.setor_cod
         )
@@ -8026,23 +8028,25 @@ def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str
     filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
     filtro_recep = f"AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) = '{recepcionista}'" if recepcionista else ""
     rows = query(f"""
-        WITH base AS (
-            SELECT DISTINCT
-                RTRIM(ISNULL(cnv.CNV_NOME, CAST(osm.osm_cnv AS VARCHAR(50)))) AS convenio,
-                osm.osm_num,
-                osm.osm_serie
+        WITH pacientes AS (
+            SELECT DISTINCT fle.FLE_PAC_REG
             FROM fle
-            JOIN osm ON osm.osm_pac = fle.FLE_PAC_REG
-                    AND CAST(osm.osm_dthr AS DATE) = CAST(fle.FLE_DTHR_CHEGADA AS DATE)
-                    AND osm.osm_dthr >= fle.FLE_DTHR_CHEGADA
-                    AND RTRIM(osm.osm_str) = RTRIM(fle.FLE_STR_COD)
-            LEFT JOIN cnv ON cnv.CNV_COD = osm.osm_cnv
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
               AND fle.FLE_PAC_REG > 0
               AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
               AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
               {filtro_setor}
               {filtro_recep}
+        ),
+        base AS (
+            SELECT DISTINCT
+                RTRIM(ISNULL(cnv.CNV_NOME, CAST(osm.osm_cnv AS VARCHAR(50)))) AS convenio,
+                osm.osm_num,
+                osm.osm_serie
+            FROM pacientes p
+            JOIN osm ON osm.osm_pac = p.FLE_PAC_REG
+                    AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+            LEFT JOIN cnv ON cnv.CNV_COD = osm.osm_cnv
         )
         SELECT convenio, COUNT(*) AS total_os
         FROM base
