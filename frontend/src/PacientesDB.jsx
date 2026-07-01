@@ -10,11 +10,7 @@ import {
 //   NAV: { id:"pacientesdb", label:"Pacientes DB", icon:"users", color:"#0891B2", desc:"Base de pacientes" }
 //   RENDER_MAP: pacientesdb: (p) => <PacientesDB periodo={p}/>
 
-const API = import.meta.env.VITE_API_URL || (
-  window.location.hostname === "localhost" || window.location.hostname.startsWith("192.168.")
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "https://breaking-sarah-gmc-drum.trycloudflare.com"
-);
+const API = `${window.location.protocol}//${window.location.host}`;
 
 const MESES_PT = ["Janeiro","Fevereiro","Marco","Abril","Maio","Junho",
   "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];

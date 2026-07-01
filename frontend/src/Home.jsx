@@ -4,11 +4,7 @@ import {
   ResponsiveContainer, CartesianGrid, ReferenceLine,
 } from "recharts";
 
-const API = import.meta.env.VITE_API_URL || (
-  window.location.hostname === "localhost" || window.location.hostname.startsWith("192.168.")
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "https://gestao.clinicacenso.com.br"
-);
+const API = `${window.location.protocol}//${window.location.host}`;
 
 const brl = v => v != null ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v) : "--";
 const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "--";

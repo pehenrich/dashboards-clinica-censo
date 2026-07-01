@@ -11,11 +11,7 @@ import {
   Tooltip, ResponsiveContainer, Legend, Cell,
 } from "recharts";
 
-const API = import.meta.env.VITE_API_URL || (
-  window.location.hostname === "localhost" || window.location.hostname.startsWith("192.168.")
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "https://breaking-sarah-gmc-drum.trycloudflare.com"
-);
+const API = `${window.location.protocol}//${window.location.host}`;
 
 const C = {
   masc:   "#0891B2",

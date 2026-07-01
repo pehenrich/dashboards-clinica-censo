@@ -14,11 +14,7 @@ import {
 import Home from "./Home";
 
 const BACKEND_TUNNEL = "https://breaking-sarah-gmc-drum.trycloudflare.com";
-const API = import.meta.env.VITE_API_URL || (
-  window.location.hostname === "localhost" || window.location.hostname.startsWith("192.168.")
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : "https://breaking-sarah-gmc-drum.trycloudflare.com"
-);
+const API = `${window.location.protocol}//${window.location.host}`;
 
 const CORES_ANOS = ["#8B1A1A","#D97706","#7C3AED","#059669","#0891B2"];
 const CORES_ESP  = ["#8B1A1A","#059669","#D97706","#7C3AED","#DC2626","#0891B2","#DB2777","#65A30D"];
@@ -3635,7 +3631,7 @@ function TabelaMedicosAgenda({ medicos, periodo }) {
   const brl = v => v!=null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
   const num = v => v!=null ? Number(v).toLocaleString("pt-BR") : "—";
   const pct = v => v!=null ? `${Number(v).toFixed(1)}%` : "—";
-  const API = `http://${window.location.hostname}:8000`;
+  const API = `${window.location.protocol}//${window.location.host}`;
 
   const toggleMedico = async (m, i) => {
     const key = i;
@@ -3832,7 +3828,7 @@ function SecaoModuloAgendamentos({ periodo }) {
   const [showCnvModal, setShowCnvModal] = useState(false);
   const [cnvData, setCnvData] = useState([]);
   const [loadCnv, setLoadCnv] = useState(false);
-  const API = `http://${window.location.hostname}:8000`;
+  const API = `${window.location.protocol}//${window.location.host}`;
   const s  = data?.stats || {};
   const sh = hoje?.stats || {};
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";

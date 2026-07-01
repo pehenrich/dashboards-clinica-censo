@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 
-const API = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
+const API = `${window.location.protocol}//${window.location.host}`;
 
 // ══════════════════════════════════════════════════════════════════════════════
 // PAINEL TV — TEMPO REAL

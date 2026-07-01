@@ -12,11 +12,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const API = import.meta.env.VITE_API_URL || (
-  window.location.hostname === "localhost" || window.location.hostname.startsWith("192.168.")
-    ? `http://${window.location.hostname}:8000`
-    : "https://breaking-sarah-gmc-drum.trycloudflare.com"
-);
+const API = `${window.location.protocol}//${window.location.host}`;
 
 // Coordenadas centrais dos bairros de Parauapebas - PA
 const COORDS_BAIRROS = {
