@@ -2880,6 +2880,22 @@ function SecaoModuloAssistencial({ periodo }) {
     <div>
       {error && <Err msg={error.message}/>}
 
+      <BriefingCard
+        cor="#8B1A1A"
+        cacheKey={`briefing_assistencial_${periodo}`}
+        disabled={loading}
+        promptFn={() => `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Módulo Assistencial (período: ${periodo}):
+- Total de guias: ${fin.total_os ?? "n/d"}
+- Pacientes atendidos: ${fin.pacientes_unicos ?? "n/d"}
+- Produção financeira: ${brl(fin.faturamento)}
+- Ticket médio por paciente: ${fin.faturamento > 0 && fin.pacientes_unicos > 0 ? brl(fin.faturamento / fin.pacientes_unicos) : "n/d"}
+- Total de atendimentos: ${op.total_atendimentos ?? "n/d"}
+
+Destaque desempenho, alertas de queda e sugestões para aumentar a produção assistencial.`}
+      />
+
       {/* KPIs principais */}
       {/* KPIs linha 1 */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:12 }}>
@@ -3209,6 +3225,22 @@ function SecaoModuloOcupacional({ periodo }) {
   return (
     <div>
       {error && <Err msg={error.message}/>}
+
+      <BriefingCard
+        cor="#D97706"
+        cacheKey={`briefing_ocupacional_${periodo}`}
+        disabled={loading}
+        promptFn={() => `Você é um analista de saúde ocupacional. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Medicina Ocupacional (período: ${periodo}):
+- Admissional: ${op?.admissional ?? "n/d"} | Periódico: ${op?.periodico ?? "n/d"} | Demissional: ${op?.demissional ?? "n/d"}
+- Retorno ao trabalho: ${op?.ret_trabalho ?? "n/d"} | Mudança de função: ${op?.mud_funcao ?? "n/d"}
+- Total OSs: ${op?.total_os ?? "n/d"} | Empresas atendidas: ${op?.empresas ?? "n/d"}
+- Pacientes únicos: ${op?.pacientes_unicos ?? "n/d"}
+- Produção financeira: ${brl(fin?.faturamento)} | Ticket médio: ${brl(fin?.ticket_medio)}
+
+Destaque tipos em crescimento, oportunidades de captação de empresas e alertas operacionais.`}
+      />
 
       {/* Tipos de atendimento */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:10, marginBottom:20 }}>
