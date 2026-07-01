@@ -3653,7 +3653,7 @@ function SecaoModuloLaboratorio({ periodo }) {
           return `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
 
 DADOS — Laboratório / Exames (período: ${periodoParaLabel(periodo)}, setor: ${setorLabel}):
-- Total exames: ${fin.total_exames||fin.total_os ?? "n/d"} | OSs: ${fin.total_os ?? "n/d"}
+- Total exames: ${(fin.total_exames || fin.total_os) ?? "n/d"} | OSs: ${fin.total_os ?? "n/d"}
 - Pacientes únicos: ${fin.pacientes_unicos ?? "n/d"}
 - Produção financeira: ${brl(fin.faturamento)} | Ticket médio por OS: ${brl(fin.ticket_medio)}
 - Exames mais realizados: ${top3ex || "n/d"}
