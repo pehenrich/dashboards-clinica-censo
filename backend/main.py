@@ -57,6 +57,7 @@ from fastapi import HTTPException
 # ── Todos os módulos disponíveis no sistema ───────────────────────────────────
 TODOS_MODULOS = [
     {"id": "clinica",       "label": "Clínica"},
+    {"id": "laboratorio",   "label": "Laboratório"},
     {"id": "recepcao",      "label": "Recepção"},
     {"id": "producao",      "label": "Produção Mensal"},
     {"id": "pacientesdb",   "label": "Pacientes DB"},

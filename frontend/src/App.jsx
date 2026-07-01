@@ -4432,7 +4432,6 @@ const ABAS_CLINICA = [
   { id: "assistencial", label: "Assistencial",    cor: "#8B1A1A" },
   { id: "ocupacional",  label: "Ocupacional",     cor: "#D97706" },
   { id: "servicos",     label: "Serviços Espec.", cor: "#8B5CF6" },
-  { id: "laboratorio",  label: "Laboratório",     cor: "#10B981" },
   { id: "agendamentos", label: "Agendamentos",    cor: "#7C3AED" },
 ];
 
@@ -4458,7 +4457,6 @@ function SecaoClinica({ periodo }) {
         {aba === "assistencial" && <SecaoModuloAssistencial periodo={periodo} />}
         {aba === "ocupacional"  && <SecaoModuloOcupacional  periodo={periodo} />}
         {aba === "servicos"     && <SecaoModuloServicos     periodo={periodo} />}
-        {aba === "laboratorio"  && <SecaoModuloLaboratorio  periodo={periodo} />}
         {aba === "agendamentos" && <SecaoModuloAgendamentos periodo={periodo} />}
       </div>
     </div>
@@ -4471,7 +4469,8 @@ function SecaoClinica({ periodo }) {
 const NAV = [
   { id: "home",       label: "Home",            icon: "home",         color: "#8B1A1A" },
   { id: "contratos",  label: "Contratos",       icon: "layers",       color: "#0D9488", desc: "Gestão de contratos" },
-  { id: "clinica",    label: "Clínica",         icon: "stethoscope",  color: "#8B1A1A", desc: "Assistencial · Ocupacional · Serviços · Lab · Agenda" },
+  { id: "clinica",    label: "Clínica",         icon: "stethoscope",  color: "#8B1A1A", desc: "Assistencial · Ocupacional · Serviços · Agenda" },
+  { id: "laboratorio",label: "Laboratório",     icon: "flask",        color: "#10B981", desc: "Exames · Diagnóstico · Ocupacional" },
   { id: "recepcao",   label: "Recepção",        icon: "users",        color: "#D97706", desc: "Métricas por recepcionista" },
   { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento mensal" },
   { id: "pacientesdb",label: "Pacientes DB",    icon: "users",        color: "#0891B2", desc: "Base · logradouros · ranking · aniversários" },
@@ -4504,6 +4503,7 @@ const RENDER_MAP = {
   recepcao:    (p) => <Recepcao         periodo={p}/>,
   pacientesdb: (p) => <PacientesDB      periodo={p}/>,
   producao:    (p) => <SecaoProducaoMensal modulo={{}} periodoEfetivo={p}/>,
+  laboratorio: (p) => <SecaoModuloLaboratorio periodo={p}/>,
   estoque:     (p) => <SecaoEstoque     periodo={p}/>,
   painel_tv:   ()  => <PainelTV/>,
 };
