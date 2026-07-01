@@ -7947,11 +7947,11 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                 c.setor_cod,
                 SUM({vliq}) AS producao
             FROM (
-                SELECT DISTINCT login_recep, setor_cod, FLE_PAC_REG
+                SELECT DISTINCT login_recep, setor_cod, FLE_PAC_REG, data_cheg
                 FROM chegadas
             ) c
             JOIN osm o ON o.osm_pac = c.FLE_PAC_REG
-                      AND o.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+                      AND CAST(o.osm_dthr AS DATE) = c.data_cheg
             JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_OSM_SERIE = o.osm_serie
             GROUP BY c.login_recep, c.setor_cod
         )
@@ -8029,7 +8029,8 @@ def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str
     filtro_recep = f"AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) = '{recepcionista}'" if recepcionista else ""
     rows = query(f"""
         WITH pacientes AS (
-            SELECT DISTINCT fle.FLE_PAC_REG
+            SELECT DISTINCT fle.FLE_PAC_REG,
+                            CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg
             FROM fle
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
               AND fle.FLE_PAC_REG > 0
@@ -8045,7 +8046,7 @@ def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str
                 osm.osm_serie
             FROM pacientes p
             JOIN osm ON osm.osm_pac = p.FLE_PAC_REG
-                    AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+                    AND CAST(osm.osm_dthr AS DATE) = p.data_cheg
             LEFT JOIN cnv ON cnv.CNV_COD = osm.osm_cnv
         )
         SELECT convenio, COUNT(*) AS total_os
