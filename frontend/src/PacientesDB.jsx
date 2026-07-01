@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import BriefingCard from "./BriefingCard";
 import ServicosPorSexo from "./ServicosPorSexo";
 import {
   BarChart, Bar, PieChart, Pie, Cell,
@@ -629,6 +630,22 @@ export default function PacientesDB({periodo="30d"}) {
       <style>{`
         @keyframes pac-pulse {0%,100%{opacity:1}50%{opacity:.45}}
       `}</style>
+
+      <BriefingCard
+        cor="#0891B2"
+        cacheKey={`briefing_pacientesdb_${periodo}_${setor}`}
+        disabled={lR || lB}
+        promptFn={() => `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Base de Pacientes (período: ${periodo}${setor ? ", setor: "+setor : ""}):
+- Pacientes atendidos no período: ${resumo?.pacientes_atendidos ?? "n/d"}
+- Novos cadastros: ${resumo?.novos_cadastros ?? "n/d"}
+- Pacientes de retorno: ${resumo?.retorno ?? "n/d"}
+- Base total de pacientes: ${resumo?.total_base ?? "n/d"}
+- Rua/bairro com maior concentração: ${topRua ? topRua.bairro+" ("+topRua.total+" pacientes)" : "n/d"}
+
+Destaque crescimento da base, fidelização de retornos e oportunidades de captação por área geográfica.`}
+      />
 
       {/* ── FILTRO DE SETOR ── */}
       <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>

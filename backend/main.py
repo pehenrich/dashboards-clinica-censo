@@ -146,43 +146,45 @@ import os
 # ── SERVE FRONTEND REACT ──────────────────────────────────────────────────────
 DIST = r"C:\Dashboard\frontend\dist"
 
-@app.post("/api/home/briefing")
-def home_briefing(payload: dict):
-    prompt = payload.get("prompt", "")
-    try:
-        import os
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        if not api_key:
-            return {"texto": "Configure a variável OPENAI_API_KEY no servidor."}
-        
-        res = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "max_tokens": 300,
-                "messages": [
-                    {"role": "system", "content": "Você é um analista de gestão clínica especialista financeiro com insights revolucionarios, sempre dê dicas que você achar importante para aumentar a produção. Responda sempre em português brasileiro, de forma direta e profissional."},
-                    {"role": "user", "content": prompt}
-                ],
-            },
-            timeout=30,
+def _call_openai(prompt: str, system: str = None) -> str:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        return "Configure a variável OPENAI_API_KEY no servidor."
+    if system is None:
+        system = (
+            "Você é um analista de gestão clínica com expertise financeira e operacional. "
+            "Gere insights diretos, profissionais e acionáveis em português brasileiro. "
+            "Sem markdown, apenas texto corrido."
         )
-        data = res.json()
-        texto = data["choices"][0]["message"]["content"]
-        return {"texto": texto}
+    res = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": "gpt-4o-mini",
+            "max_tokens": 300,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": prompt},
+            ],
+        },
+        timeout=30,
+    )
+    data = res.json()
+    return data["choices"][0]["message"]["content"]
+
+@app.post("/api/briefing")
+def briefing_generico(payload: dict):
+    try:
+        return {"texto": _call_openai(payload.get("prompt", ""))}
     except Exception as e:
         return {"texto": f"Erro: {str(e)}"}
 
 @app.post("/api/home/briefing")
 def home_briefing(payload: dict):
-    prompt = payload.get("prompt", "")
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    print(f"DEBUG API KEY: '{api_key[:10] if api_key else 'VAZIO'}'")
-    ...
+    try:
+        return {"texto": _call_openai(payload.get("prompt", ""))}
+    except Exception as e:
+        return {"texto": f"Erro: {str(e)}"}
 
 @app.post("/api/auth/login")
 def auth_login(req: LoginRequest):

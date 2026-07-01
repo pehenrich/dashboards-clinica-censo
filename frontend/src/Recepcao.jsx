@@ -1,4 +1,5 @@
 import { useState, useEffect, Fragment } from "react";
+import BriefingCard from "./BriefingCard";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend,
@@ -150,9 +151,31 @@ export default function Recepcao({ periodo = "30d" }) {
   }
   const diasData = Object.values(diasMap).sort((a, b) => a.data.localeCompare(b.data));
 
+  const top3 = sortedRanking.slice(0, 3);
+  const setorLabel = RECEPCOES.find(r => r.cod === setor)?.nome || "Todas";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <style>{`@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}`}</style>
+
+      <BriefingCard
+        cor="#D97706"
+        cacheKey={`briefing_recepcao_${periodo}_${setor}`}
+        disabled={loadingRank}
+        promptFn={() => {
+          const t3 = top3.map((r, i) => `${i+1}. ${r.nome_recep||r.login_recep}: ${r.total_pacientes} pacientes, espera ${r.espera_media_min != null ? Math.round(r.espera_media_min)+"min" : "n/d"}`).join("; ");
+          return `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases curtas, direto e profissional, sem markdown.
+
+DADOS — Módulo Recepção (${setorLabel}, período: ${periodo}):
+- Total de pacientes recepcionados: ${totalPacientes}
+- Tempo médio de espera na recepção: ${esperaMedia != null ? Math.round(esperaMedia)+"min" : "n/d"}
+- Produção financeira total: R$ ${producaoTotal != null ? producaoTotal.toLocaleString("pt-BR",{minimumFractionDigits:0,maximumFractionDigits:0}) : "n/d"}
+- Nº de recepcionistas ativos: ${ranking.length}
+- Top 3 recepcionistas: ${t3.length ? t3 : "n/d"}
+
+Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.`;
+        }}
+      />
 
       {/* KPI Cards */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>

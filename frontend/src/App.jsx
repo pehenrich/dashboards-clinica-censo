@@ -12,6 +12,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from "recharts";
 import Home from "./Home";
+import BriefingCard from "./BriefingCard";
 
 const BACKEND_TUNNEL = "https://breaking-sarah-gmc-drum.trycloudflare.com";
 const API = `${window.location.protocol}//${window.location.host}`;
@@ -720,8 +721,28 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
     return             { bg:"#FFF1F2", border:"#FECDD3", dot:"#F43F5E" };
   };
 
+  const brlFmt = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "n/d";
+
   return (
     <div style={{ position:"relative" }}>
+
+      <BriefingCard
+        cor="#0891B2"
+        cacheKey={`briefing_producao_${ano}_${mes}`}
+        disabled={loading}
+        promptFn={() => `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Produção Mensal (${MESES_PT[mes-1]} ${ano}):
+- Total produzido no mês: ${brlFmt(data?.total_geral)}
+- Meta mensal: ${brlFmt(metaMensal)}
+- Percentual da meta atingido: ${data ? Math.min(100,(data.total_geral/metaMensal)*100).toFixed(1) : "n/d"}%
+- Média diária: ${brlFmt(data?.media_diaria)}
+- Projeção do mês: ${brlFmt(projecao)}
+- Dias restantes no mês: ${data?.dias_restantes ?? "n/d"}
+- Necessário por dia para bater a meta: ${brlFmt(necessario > 0 ? necessario : null)}
+
+Aponte se a meta está em risco, qual o ritmo necessário e uma sugestão prática.`}
+      />
 
       {/* ── HEADER CONTROLS ── */}
       <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24, flexWrap:"wrap" }}>
@@ -1329,6 +1350,10 @@ function SecaoAssistencial({ periodo }) {
 
   const brlFull = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
 
+  const brlFullAssist = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "n/d";
+  const topMedico = (med||[])[0];
+  const topConv   = (conv||[])[0];
+
   return (
     <div style={{ background:"#fff", border:`2px solid ${"#8B1A1A"}33`, borderRadius:16, overflow:"hidden" }}>
       <div style={{ background:`${"#8B1A1A"}18`, borderBottom:`1px solid ${"#8B1A1A"}33`, padding:"14px 20px", display:"flex", alignItems:"center", gap:10 }}>
@@ -1340,6 +1365,22 @@ function SecaoAssistencial({ periodo }) {
       </div>
 
       <div style={{ padding:"16px 20px" }}>
+        <BriefingCard
+          cor="#8B1A1A"
+          cacheKey={`briefing_assistencial_${periodo}`}
+          disabled={lR || lF}
+          promptFn={() => `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Módulo Assistencial (período: ${periodo}):
+- Total de atendimentos: ${resumo?.total_atendimentos ?? "n/d"}
+- Produção financeira: ${brlFullAssist(resumoFin?.faturamento)}
+- Ticket médio: ${brlFullAssist(resumoFin?.ticket_medio)}
+- Especialidades ativas: ${(esp||[]).length}
+- Top médico: ${topMedico ? topMedico.profissional+" ("+brlFullAssist(topMedico.producao)+")" : "n/d"}
+- Principal convênio: ${topConv ? topConv.convenio+" ("+brlFullAssist(topConv.producao)+")" : "n/d"}
+
+Destaque desempenho dos médicos, alertas de queda e sugestões para aumentar a produção.`}
+        />
         {/* KPIs */}
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:12, marginBottom:16 }}>
           <div style={{ background:"#EEEEEE", borderRadius:10, padding:"14px 16px", borderTop:`3px solid ${"#8B1A1A"}` }}>
@@ -1474,6 +1515,28 @@ function SecaoOcupacional({ periodo }) {
       </div>
 
       <div style={{ padding:"16px 20px" }}>
+        <BriefingCard
+          cor="#D97706"
+          cacheKey={`briefing_ocupacional_${periodo}`}
+          disabled={lR}
+          promptFn={() => {
+            const topEmp = (emp||[])[0];
+            return `Você é um analista de saúde ocupacional. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Medicina Ocupacional (período: ${periodo}):
+- Admissional: ${resumo?.admissional ?? "n/d"} exames
+- Periódico: ${resumo?.periodico ?? "n/d"} exames
+- Demissional: ${resumo?.demissional ?? "n/d"} exames
+- Retorno ao trabalho: ${resumo?.ret_trabalho ?? "n/d"}
+- Mudança de função: ${resumo?.mud_funcao ?? "n/d"}
+- Total de exames: ${resumo?.total_os ?? "n/d"}
+- Pacientes únicos: ${resumo?.pacientes_unicos ?? "n/d"}
+- Produção financeira: ${resumo?.faturamento != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(resumo.faturamento) : "n/d"}
+- Principal empresa: ${topEmp ? topEmp.empresa+" ("+topEmp.total+" exames)" : "n/d"}
+
+Destaque tipos de exame em crescimento, alertas e oportunidades de captação de empresas.`;
+          }}
+        />
         {/* KPIs */}
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:10, marginBottom:16 }}>
           {tipos.map(t => (
