@@ -19,6 +19,7 @@ backend/.env
 backend/ssl/
 frontend/.env.production
 frontend/cloudflared
+cloudflared.exe
 
 # Node
 node_modules/
