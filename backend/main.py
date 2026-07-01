@@ -7928,6 +7928,28 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
               AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
               {filtro_setor}
         ),
+        chegadas_prod AS (
+            -- One row per (patient, day): the first-touch receptionist gets production credit
+            -- Deduplicates cross-sector double-counting (patient going to 2+ desks same day)
+            SELECT login_recep, setor_cod, FLE_PAC_REG, data_cheg
+            FROM (
+                SELECT
+                    RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login_recep,
+                    RTRIM(fle.FLE_STR_COD)                                     AS setor_cod,
+                    fle.FLE_PAC_REG,
+                    CAST(fle.FLE_DTHR_CHEGADA AS DATE)                         AS data_cheg,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY fle.FLE_PAC_REG, CAST(fle.FLE_DTHR_CHEGADA AS DATE)
+                        ORDER BY fle.FLE_DTHR_CHEGADA ASC
+                    ) AS rn
+                FROM fle
+                WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+                  AND fle.FLE_PAC_REG > 0
+                  AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+                  AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+                  {filtro_setor}
+            ) x WHERE rn = 1
+        ),
         esperas AS (
             SELECT
                 c.login_recep,
@@ -7946,10 +7968,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                 c.login_recep,
                 c.setor_cod,
                 SUM({vliq}) AS producao
-            FROM (
-                SELECT DISTINCT login_recep, setor_cod, FLE_PAC_REG, data_cheg
-                FROM chegadas
-            ) c
+            FROM chegadas_prod c
             JOIN osm o ON o.osm_pac = c.FLE_PAC_REG
                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
             JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_OSM_SERIE = o.osm_serie
