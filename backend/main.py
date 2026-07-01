@@ -56,11 +56,8 @@ from fastapi import HTTPException
 
 # ── Todos os módulos disponíveis no sistema ───────────────────────────────────
 TODOS_MODULOS = [
-    {"id": "assistencial",  "label": "Assistencial"},
-    {"id": "ocupacional",   "label": "Med. Ocupacional"},
-    {"id": "servicos",      "label": "Serviços Especializados"},
-    {"id": "laboratorio",   "label": "Laboratório"},
-    {"id": "agendamentos",  "label": "Agendamentos"},
+    {"id": "clinica",       "label": "Clínica"},
+    {"id": "recepcao",      "label": "Recepção"},
     {"id": "producao",      "label": "Produção Mensal"},
     {"id": "pacientesdb",   "label": "Pacientes DB"},
     {"id": "estoque",       "label": "Estoque"},
@@ -7896,6 +7893,128 @@ def pacientes_servicos_comparativo(
         OFFSET 0 ROWS FETCH NEXT {limite} ROWS ONLY
     """)
     return rows
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MÓDULO RECEPÇÃO — Métricas por recepcionista
+# ══════════════════════════════════════════════════════════════════════════════
+
+RECEPCOES = {
+    "RDI": "Recepção Diagnóstico",
+    "ROC": "Recepção Ocupacional",
+    "RPS": "Recepção Pro Saúde",
+    "RCN": "Recepção Consultórios",
+    "RCI": "Recepção Censo Imagem",
+}
+
+@app.get("/api/recepcao/ranking")
+def recepcao_ranking(periodo: str = "30d", setor: str = ""):
+    """Ranking de recepcionistas: quantidade de pacientes, tempo de espera e produção financeira."""
+    inicio, fim = periodo_datas(periodo)
+    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    rows = query(f"""
+        WITH chegadas AS (
+            SELECT
+                RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login_recep,
+                RTRIM(fle.FLE_STR_COD)                                     AS setor_cod,
+                fle.FLE_PAC_REG,
+                fle.FLE_DTHR_CHEGADA,
+                CAST(fle.FLE_DTHR_CHEGADA AS DATE)                         AS data_cheg
+            FROM fle
+            WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND fle.FLE_PAC_REG > 0
+              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+              {filtro_setor}
+        ),
+        esperas AS (
+            SELECT
+                c.login_recep,
+                c.setor_cod,
+                c.FLE_PAC_REG,
+                DATEDIFF(minute, c.FLE_DTHR_CHEGADA,
+                    (SELECT TOP 1 o.osm_dthr FROM osm o
+                     WHERE o.osm_pac = c.FLE_PAC_REG
+                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+                       AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
+                     ORDER BY o.osm_dthr ASC)) AS espera_min
+            FROM chegadas c
+        ),
+        financeiro AS (
+            SELECT
+                c.login_recep,
+                c.setor_cod,
+                SUM({vliq}) AS producao
+            FROM chegadas c
+            JOIN osm o ON o.osm_pac = c.FLE_PAC_REG
+                      AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+            JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_SERIE = o.osm_serie
+            GROUP BY c.login_recep, c.setor_cod
+        )
+        SELECT
+            c.login_recep,
+            RTRIM(ISNULL(u.USR_NOME, c.login_recep))   AS nome_recep,
+            c.setor_cod,
+            ISNULL(RTRIM(str.str_nome), c.setor_cod)   AS setor_nome,
+            COUNT(DISTINCT c.FLE_PAC_REG)               AS total_pacientes,
+            AVG(CAST(
+                CASE WHEN e.espera_min BETWEEN 0 AND 120 THEN e.espera_min ELSE NULL END
+            AS FLOAT))                                   AS espera_media_min,
+            ISNULL(f.producao, 0)                        AS producao_financeira
+        FROM chegadas c
+        LEFT JOIN esperas    e ON e.login_recep = c.login_recep
+                              AND e.setor_cod   = c.setor_cod
+                              AND e.FLE_PAC_REG = c.FLE_PAC_REG
+        LEFT JOIN financeiro f ON f.login_recep = c.login_recep
+                              AND f.setor_cod   = c.setor_cod
+        LEFT JOIN str ON RTRIM(str.str_cod) = c.setor_cod
+        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) = c.login_recep
+        GROUP BY c.login_recep, RTRIM(ISNULL(u.USR_NOME, c.login_recep)),
+                 c.setor_cod, ISNULL(RTRIM(str.str_nome), c.setor_cod),
+                 ISNULL(f.producao, 0)
+        ORDER BY total_pacientes DESC
+    """)
+    return rows or []
+
+
+@app.get("/api/recepcao/evolucao")
+def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str = ""):
+    """Evolução diária por turno (manhã/tarde) por recepcionista."""
+    inicio, fim = periodo_datas(periodo)
+    filtro_setor  = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+    filtro_recep  = f"AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) = '{recepcionista}'" if recepcionista else ""
+
+    rows = query(f"""
+        SELECT
+            CAST(fle.FLE_DTHR_CHEGADA AS DATE)                                AS data,
+            CASE
+                WHEN DATEPART(hour, fle.FLE_DTHR_CHEGADA) < 13 THEN 'Manhã'
+                ELSE 'Tarde'
+            END                                                                AS turno,
+            RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))        AS login_recep,
+            RTRIM(ISNULL(u.USR_NOME,
+                   ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)))       AS nome_recep,
+            COUNT(DISTINCT fle.FLE_PAC_REG)                                    AS total_pacientes
+        FROM fle
+        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) =
+                           RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))
+        WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND fle.FLE_PAC_REG > 0
+          AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+          {filtro_setor}
+          {filtro_recep}
+        GROUP BY
+            CAST(fle.FLE_DTHR_CHEGADA AS DATE),
+            CASE WHEN DATEPART(hour, fle.FLE_DTHR_CHEGADA) < 13 THEN 'Manhã' ELSE 'Tarde' END,
+            RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)),
+            RTRIM(ISNULL(u.USR_NOME, ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)))
+        ORDER BY data, turno
+    """)
+    for r in rows:
+        if hasattr(r.get("data"), "strftime"):
+            r["data"] = r["data"].strftime("%Y-%m-%d")
+    return rows or []
+
 
 @app.get("/api/health")
 def health():

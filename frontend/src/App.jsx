@@ -4,6 +4,7 @@ const useMobile = () => useContext(MobileCtx);
 import PainelTV from "./PainelTV";
 import PacientesDB from "./PacientesDB";
 import ModuloContratos from "./ModuloContratos";
+import Recepcao from "./Recepcao";
 import Login, { AuthProvider, useAuth, AdminPermissoes } from "./Login";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -4283,21 +4284,58 @@ function SecaoModuloAgendamentos({ periodo }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// MÓDULO CLÍNICA — agrupa Assistencial, Ocupacional, Serviços e Laboratório
+// ══════════════════════════════════════════════════════════════════════════════
+const ABAS_CLINICA = [
+  { id: "assistencial", label: "Assistencial",    cor: "#8B1A1A" },
+  { id: "ocupacional",  label: "Ocupacional",     cor: "#D97706" },
+  { id: "servicos",     label: "Serviços Espec.", cor: "#8B5CF6" },
+  { id: "laboratorio",  label: "Laboratório",     cor: "#10B981" },
+  { id: "agendamentos", label: "Agendamentos",    cor: "#7C3AED" },
+];
+
+function SecaoClinica({ periodo }) {
+  const [aba, setAba] = useState("assistencial");
+  const abaAtual = ABAS_CLINICA.find(a => a.id === aba);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {ABAS_CLINICA.map(a => (
+          <button key={a.id} onClick={() => setAba(a.id)} style={{
+            padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 700,
+            cursor: "pointer", border: "none", transition: "all 0.12s",
+            background: aba === a.id ? a.cor : "#ECECEC",
+            color: aba === a.id ? "#fff" : "#374151",
+            boxShadow: aba === a.id ? `0 2px 6px ${a.cor}40` : "none",
+          }}>{a.label}</button>
+        ))}
+      </div>
+      {/* Conteúdo */}
+      <div>
+        {aba === "assistencial" && <SecaoModuloAssistencial periodo={periodo} />}
+        {aba === "ocupacional"  && <SecaoModuloOcupacional  periodo={periodo} />}
+        {aba === "servicos"     && <SecaoModuloServicos     periodo={periodo} />}
+        {aba === "laboratorio"  && <SecaoModuloLaboratorio  periodo={periodo} />}
+        {aba === "agendamentos" && <SecaoModuloAgendamentos periodo={periodo} />}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // NAVEGAÇÃO
 // ══════════════════════════════════════════════════════════════════════════════
 const NAV = [
-  { id: "home", label: "Home", icon: "home", color: "#8B1A1A" },
-  { id:"contratos",  label:"Contratos",             icon:"layers",         color:"#0D9488", desc:"Gestão de contratos" },
-  { id:"assistencial",label:"Assistencial",          icon:"stethoscope",    color:"#8B1A1A", desc:"Consultas, emergências e cirurgias" },
-  { id:"ocupacional", label:"Med. Ocupacional",      icon:"hardhat",        color:"#D97706", desc:"Adm · Per · Dem · Retorno" },
-  { id:"servicos",    label:"Serviços Especializados",icon:"brain",         color:"#8B5CF6", desc:"Psi, Nutri, Fono, Radiologia, Cardio…" },
-  { id:"laboratorio", label:"Laboratório",           icon:"microscope",     color:"#10B981", desc:"Análises clínicas e exames de sangue" },
-  { id:"agendamentos",label:"Agendamentos",          icon:"calendar-clock", color:"#7C3AED", desc:"Agenda médica e indicadores" },
-  { id:"producao",    label:"Produção Mensal",       icon:"money-trend",    color:"#0891B2", desc:"Meta e provisionamento mensal" },
-  { id:"pacientesdb", label:"Pacientes DB",          icon:"users",          color:"#0891B2", desc:"Base · logradouros · ranking · aniversários" },
-  { id:"estoque",     label:"Estoque",               icon:"box",            color:"#0D9488", desc:"Posição, giro e validade" },
-  { id:"painel_tv",   label:"Painel TV",             icon:"monitor",        color:"#7C3AED", desc:"Tempo real · para telão" },
-  { id:"admin", label:"Permissões", icon:"settings", color:"#374151", desc:"Gerenciar acessos" },
+  { id: "home",       label: "Home",            icon: "home",         color: "#8B1A1A" },
+  { id: "contratos",  label: "Contratos",       icon: "layers",       color: "#0D9488", desc: "Gestão de contratos" },
+  { id: "clinica",    label: "Clínica",         icon: "stethoscope",  color: "#8B1A1A", desc: "Assistencial · Ocupacional · Serviços · Lab · Agenda" },
+  { id: "recepcao",   label: "Recepção",        icon: "users",        color: "#D97706", desc: "Métricas por recepcionista" },
+  { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento mensal" },
+  { id: "pacientesdb",label: "Pacientes DB",    icon: "users",        color: "#0891B2", desc: "Base · logradouros · ranking · aniversários" },
+  { id: "estoque",    label: "Estoque",         icon: "box",          color: "#0D9488", desc: "Posição, giro e validade" },
+  { id: "painel_tv",  label: "Painel TV",       icon: "monitor",      color: "#7C3AED", desc: "Tempo real · para telão" },
+  { id: "admin",      label: "Permissões",      icon: "settings",     color: "#374151", desc: "Gerenciar acessos" },
 ];
 
 const IconLayers = ({ size=18, color="currentColor" }) => (
@@ -4317,20 +4355,15 @@ const IconUsers = ({ size=18, color="currentColor" }) => (
   </svg>
 );
 const RENDER_MAP = {
-  home:         (p) => <Home periodoGlobal={p}/>,
-  admin: () => <AdminPermissoes/>,
-  contratos: () => <ModuloContratos/>,
-  admin: () => <AdminPermissoes/>,
-  contratos: () => <ModuloContratos/>,
-  assistencial: (p) => <SecaoModuloAssistencial periodo={p}/>,
-  ocupacional:  (p) => <SecaoModuloOcupacional  periodo={p}/>,
-  pacientesdb: (p) => <PacientesDB periodo={p}/>,
-  servicos:     (p) => <SecaoModuloServicos     periodo={p}/>,
-  laboratorio:  (p) => <SecaoModuloLaboratorio  periodo={p}/>,
-  agendamentos: (p) => <SecaoModuloAgendamentos periodo={p}/>,
-  producao:     (p) => <SecaoProducaoMensal modulo={{}} periodoEfetivo={p}/>,
-  estoque:      (p) => <SecaoEstoque periodo={p}/>,
-  painel_tv:    ()  => <PainelTV/>,
+  home:        (p) => <Home periodoGlobal={p}/>,
+  admin:       ()  => <AdminPermissoes/>,
+  contratos:   ()  => <ModuloContratos/>,
+  clinica:     (p) => <SecaoClinica     periodo={p}/>,
+  recepcao:    (p) => <Recepcao         periodo={p}/>,
+  pacientesdb: (p) => <PacientesDB      periodo={p}/>,
+  producao:    (p) => <SecaoProducaoMensal modulo={{}} periodoEfetivo={p}/>,
+  estoque:     (p) => <SecaoEstoque     periodo={p}/>,
+  painel_tv:   ()  => <PainelTV/>,
 };
 
 
@@ -5913,11 +5946,10 @@ function AppInner() {
           display:"flex", alignItems:"center", height:60,
         }}>
           {[
-            { id:"assistencial", icon:"♥", label:"Assist." },
-            { id:"ocupacional",  icon:"⚙", label:"Ocup."  },
-            { id:"agendamentos", icon:"📅", label:"Agenda" },
-            { id:"producao",     icon:"📈", label:"Prod."  },
-            { id:"painel_tv",    icon:"📺", label:"Painel" },
+            { id:"clinica",   icon:"🩺", label:"Clínica" },
+            { id:"recepcao",  icon:"🪟", label:"Recepção" },
+            { id:"producao",  icon:"📈", label:"Prod."   },
+            { id:"painel_tv", icon:"📺", label:"Painel"  },
           ].map(item => (
             <button key={item.id} onClick={() => setPage(item.id)} style={{
               flex:1, display:"flex", flexDirection:"column", alignItems:"center",
@@ -5928,7 +5960,7 @@ function AppInner() {
               <span style={{ fontSize:9, fontWeight:page===item.id?700:400 }}>{item.label}</span>
             </button>
           ))}
-          <button onClick={() => setPage(page==="menu_mobile"?"assistencial":"menu_mobile")} style={{
+          <button onClick={() => setPage(page==="menu_mobile"?"clinica":"menu_mobile")} style={{
             flex:1, display:"flex", flexDirection:"column", alignItems:"center",
             justifyContent:"center", background:"none", border:"none", cursor:"pointer",
             gap:2, color: page==="menu_mobile"?"#8B1A1A":"#9CA3AF",
@@ -5945,7 +5977,7 @@ function AppInner() {
           <div style={{ padding:"16px 16px 12px", borderBottom:"1px solid #E5E7EB",
             display:"flex", justifyContent:"space-between", alignItems:"center" }}>
             <span style={{ fontSize:16, fontWeight:700 }}>Menu</span>
-            <button onClick={() => setPage("assistencial")}
+            <button onClick={() => setPage("clinica")}
               style={{ background:"none", border:"none", fontSize:22, cursor:"pointer" }}>✕</button>
           </div>
           <div style={{ display:"flex", flexDirection:"column" }}>
