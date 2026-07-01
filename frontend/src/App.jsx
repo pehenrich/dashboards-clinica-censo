@@ -3326,6 +3326,24 @@ function SecaoModuloServicos({ periodo }) {
   return (
     <div>
       {error && <Err msg={error.message}/>}
+
+      <BriefingCard
+        cor="#8B5CF6"
+        cacheKey={`briefing_servicos_${periodoParaLabel(periodo)}`}
+        disabled={loading}
+        promptFn={() => {
+          const top3svc = (data?.por_servico||[]).slice(0,3).map(s=>`${s.nome}: ${num(s.qtd_os)} OSs (${brl(s.faturamento)})`).join("; ");
+          return `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Serviços Especializados (período: ${periodoParaLabel(periodo)}):
+- Total OSs: ${fin.total_os ?? "n/d"} | Pacientes únicos: ${fin.pacientes_unicos ?? "n/d"}
+- Produção financeira: ${brl(fin.faturamento)} | Ticket médio: ${brl(fin.ticket_medio)}
+- Top serviços: ${top3svc || "n/d"}
+
+Destaque serviços com maior demanda, oportunidades de crescimento e alertas de queda.`;
+        }}
+      />
+
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
         <ModuloCard label="Total OSs"        value={num(fin.total_os)}        color="#8B5CF6" loading={loading} icon="bar"/>
         <ModuloCard label="Pacientes Únicos" value={num(fin.pacientes_unicos)} color="#8B1A1A" loading={loading} icon="users"/>
@@ -3624,6 +3642,25 @@ function SecaoModuloLaboratorio({ periodo }) {
   return (
     <div>
       {error && <Err msg={error.message}/>}
+
+      <BriefingCard
+        cor="#10B981"
+        cacheKey={`briefing_laboratorio_${periodoParaLabel(periodo)}_${setor}`}
+        disabled={loading}
+        promptFn={() => {
+          const top3ex = topExames.slice(0,3).map(e=>`${e.nome||e.codigo}: ${num(e.qtd)}`).join("; ");
+          const setorLabel = setor === "diagnostico" ? "Diagnóstico" : setor === "ocupacional" ? "Ocupacional" : "Todos";
+          return `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Laboratório / Exames (período: ${periodoParaLabel(periodo)}, setor: ${setorLabel}):
+- Total exames: ${fin.total_exames||fin.total_os ?? "n/d"} | OSs: ${fin.total_os ?? "n/d"}
+- Pacientes únicos: ${fin.pacientes_unicos ?? "n/d"}
+- Produção financeira: ${brl(fin.faturamento)} | Ticket médio por OS: ${brl(fin.ticket_medio)}
+- Exames mais realizados: ${top3ex || "n/d"}
+
+Destaque exames em alta, alertas de capacidade e sugestões para aumentar a produção laboratorial.`;
+        }}
+      />
 
       {/* Filtro setor */}
       <div style={{ display:"flex", gap:8, marginBottom:20, alignItems:"center" }}>
