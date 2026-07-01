@@ -6062,7 +6062,11 @@ function AppInner() {
                 border:"none", borderBottom:"1px solid #F1F5F9", cursor:"pointer",
                 textAlign:"left", color:page===item.id?"#8B1A1A":"#374151",
               }}>
-                <span style={{ fontSize:18 }}>{item.icon||"•"}</span>
+                <div style={{ width:36, height:36, borderRadius:10, flexShrink:0,
+                  background:page===item.id?item.color+"20":"#F3F4F6",
+                  display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <Icon name={item.icon} size={18} color={page===item.id?item.color:"#6B7280"}/>
+                </div>
                 <span style={{ fontSize:15, fontWeight:page===item.id?700:400 }}>{item.label}</span>
               </button>
             ))}
