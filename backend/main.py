@@ -243,8 +243,8 @@ def auth_login(req: LoginRequest):
     modulos   = get_modulos_usuario(login_str)
     admin     = is_admin_censo(login_str)
 
-    # Admin vê tudo automaticamente se não tiver permissões configuradas
-    if admin and not modulos:
+    # Admin sempre vê todos os módulos
+    if admin:
         modulos = [m["id"] for m in TODOS_MODULOS]
 
     return {
