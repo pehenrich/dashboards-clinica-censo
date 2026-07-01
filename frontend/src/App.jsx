@@ -2183,6 +2183,14 @@ function SecaoAgendamentos({ periodo, modulo }) {
 // ── PACIENTES ─────────────────────────────────────────────────────────────────
 const MESES_PT = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
 
+const periodoParaLabel = (periodo) => {
+  const now = new Date();
+  if (periodo === "hoje") return `Hoje (${now.toLocaleDateString("pt-BR")})`;
+  if (periodo === "30d")  return `${MESES_PT[now.getMonth()]} de ${now.getFullYear()}`;
+  if (periodo === "ano")  return `Ano ${now.getFullYear()}`;
+  return periodo;
+};
+
 function PainelTopAtendimentos({ periodo }) {
   const anoAtual = new Date().getFullYear();
   const mesAtual = new Date().getMonth() + 1;
@@ -2882,11 +2890,11 @@ function SecaoModuloAssistencial({ periodo }) {
 
       <BriefingCard
         cor="#8B1A1A"
-        cacheKey={`briefing_assistencial_${periodo}`}
+        cacheKey={`briefing_assistencial_${periodoParaLabel(periodo)}`}
         disabled={loading}
         promptFn={() => `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
 
-DADOS — Módulo Assistencial (período: ${periodo}):
+DADOS — Módulo Assistencial (período: ${periodoParaLabel(periodo)}):
 - Total de guias: ${fin.total_os ?? "n/d"}
 - Pacientes atendidos: ${fin.pacientes_unicos ?? "n/d"}
 - Produção financeira: ${brl(fin.faturamento)}
@@ -3228,11 +3236,11 @@ function SecaoModuloOcupacional({ periodo }) {
 
       <BriefingCard
         cor="#D97706"
-        cacheKey={`briefing_ocupacional_${periodo}`}
+        cacheKey={`briefing_ocupacional_${periodoParaLabel(periodo)}`}
         disabled={loading}
         promptFn={() => `Você é um analista de saúde ocupacional. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
 
-DADOS — Medicina Ocupacional (período: ${periodo}):
+DADOS — Medicina Ocupacional (período: ${periodoParaLabel(periodo)}):
 - Admissional: ${op?.admissional ?? "n/d"} | Periódico: ${op?.periodico ?? "n/d"} | Demissional: ${op?.demissional ?? "n/d"}
 - Retorno ao trabalho: ${op?.ret_trabalho ?? "n/d"} | Mudança de função: ${op?.mud_funcao ?? "n/d"}
 - Total OSs: ${op?.total_os ?? "n/d"} | Empresas atendidas: ${op?.empresas ?? "n/d"}

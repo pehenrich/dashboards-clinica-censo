@@ -625,6 +625,13 @@ export default function PacientesDB({periodo="30d"}) {
   const {data:bairros,loading:lB}=useFetch("/api/pacientesdb/por-bairro",{periodo,setor});
   const topRua=bairros?.[0];
 
+  const MESES_PAC = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+  const _now = new Date();
+  const periodoLabel = periodo === "hoje" ? `Hoje (${_now.toLocaleDateString("pt-BR")})`
+    : periodo === "30d" ? `${MESES_PAC[_now.getMonth()]} de ${_now.getFullYear()}`
+    : periodo === "ano" ? `Ano ${_now.getFullYear()}`
+    : periodo;
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <style>{`
@@ -633,11 +640,11 @@ export default function PacientesDB({periodo="30d"}) {
 
       <BriefingCard
         cor="#0891B2"
-        cacheKey={`briefing_pacientesdb_${periodo}_${setor}`}
+        cacheKey={`briefing_pacientesdb_${periodoLabel}_${setor}`}
         disabled={lR || lB}
         promptFn={() => `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
 
-DADOS — Base de Pacientes (período: ${periodo}${setor ? ", setor: "+setor : ""}):
+DADOS — Base de Pacientes (período: ${periodoLabel}${setor ? ", setor: "+setor : ""}):
 - Pacientes atendidos no período: ${resumo?.pacientes_atendidos ?? "n/d"}
 - Novos cadastros: ${resumo?.novos_cadastros ?? "n/d"}
 - Pacientes de retorno: ${resumo?.retorno ?? "n/d"}
