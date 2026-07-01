@@ -7948,7 +7948,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             FROM chegadas c
             JOIN osm o ON o.osm_pac = c.FLE_PAC_REG
                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
-            JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_SERIE = o.osm_serie
+            JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_OSM_SERIE = o.osm_serie
             GROUP BY c.login_recep, c.setor_cod
         )
         SELECT
