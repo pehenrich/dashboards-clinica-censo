@@ -88,16 +88,35 @@ function useFetch(path, deps = {}, intervalMs = 0) {
 // ── KPI CARD ──────────────────────────────────────────────────────────────────
 function KPI({ label, value, sub, deltaUp, loading, accent }) {
   const ac = accent || "#8B1A1A";
+  const isUp   = deltaUp === true;
+  const isDown = deltaUp === false;
   return (
-    <div style={{ background:"#fff", borderRadius:14, padding:"22px 24px", borderTop:`3px solid ${ac}`, display:"flex", flexDirection:"column", gap:8, minWidth:0, boxShadow:"0 1px 3px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.03)" }}>
-      <span style={{ fontSize:11, color:"#9CA3AF", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em" }}>{label}</span>
+    <div style={{
+      background: `linear-gradient(135deg, ${ac}14 0%, ${ac}05 100%)`,
+      borderRadius: 16, padding: "20px 22px",
+      border: `1.5px solid ${ac}25`,
+      boxShadow: `0 4px 20px ${ac}10, 0 1px 3px rgba(0,0,0,0.05)`,
+      display: "flex", flexDirection: "column", gap: 8, minWidth: 0,
+      position: "relative", overflow: "hidden",
+    }}>
+      <div style={{
+        position:"absolute", right:-12, top:-12,
+        width:72, height:72, borderRadius:"50%",
+        background:`${ac}10`, pointerEvents:"none",
+      }}/>
+      <span style={{ fontSize:10, color: ac, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em" }}>{label}</span>
       {loading
-        ? <div style={{ height:38, width:"65%", background:"#F3F4F6", borderRadius:8, animation:"pulse 1.5s infinite" }}/>
-        : <div style={{ fontSize:22, fontWeight:800, color:"#111827", lineHeight:1.1, letterSpacing:"-0.5px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", wordBreak:"break-all" }}>{value}</div>
+        ? <div style={{ height:34, width:"65%", background:`${ac}20`, borderRadius:8, animation:"pulse 1.5s infinite" }}/>
+        : <div style={{ fontSize:24, fontWeight:900, color:"#111827", lineHeight:1.05, letterSpacing:"-0.5px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{value}</div>
       }
       {sub && (
-        <span style={{ fontSize:12, fontWeight:500, color: deltaUp===true?"#059669":deltaUp===false?"#EF4444":"#9CA3AF" }}>
-          {deltaUp===true?"↑ ":deltaUp===false?"↓ ":""}{sub}
+        <span style={{
+          fontSize:11, fontWeight:700,
+          color: isUp?"#059669" : isDown?"#EF4444" : "#64748B",
+          background: isUp?"#D1FAE5" : isDown?"#FEE2E2" : "#F1F5F9",
+          borderRadius:6, padding:"2px 8px", display:"inline-block", alignSelf:"flex-start",
+        }}>
+          {isUp?"↑ ": isDown?"↓ ":""}{sub}
         </span>
       )}
     </div>
@@ -105,26 +124,69 @@ function KPI({ label, value, sub, deltaUp, loading, accent }) {
 }
 
 function Skeleton({ h = 200 }) {
-  return <div style={{ height:h, background:"#F3F4F6", borderRadius:10, animation:"pulse 1.5s infinite" }}/>;
+  return <div style={{ height:h, background:"linear-gradient(90deg,#F1F5F9 25%,#E2E8F0 50%,#F1F5F9 75%)", backgroundSize:"200% 100%", borderRadius:12, animation:"shimmer 1.5s infinite" }}/>;
 }
 
 function Err({ msg }) {
-  return <div style={{ background:"#FEF2F2", border:"1px solid #FECACA", color:"#DC2626", borderRadius:8, padding:"10px 14px", fontSize:13, marginBottom:12 }}>⚠ {msg}</div>;
+  return (
+    <div style={{ background:"#FEF2F2", border:"1.5px solid #FECACA", color:"#DC2626", borderRadius:12, padding:"12px 16px", fontSize:13, marginBottom:12, display:"flex", alignItems:"center", gap:10 }}>
+      <span style={{ fontSize:18 }}>⚠</span> {msg}
+    </div>
+  );
 }
 
-function Card({ children, title, subtitle, action, style: ex={} }) {
+function Card({ children, title, subtitle, action, accent, style: ex={} }) {
   return (
-    <div style={{ background:"#fff", borderRadius:14, overflow:"hidden", boxShadow:"0 1px 3px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.03)", ...ex }}>
+    <div style={{ background:"#fff", borderRadius:16, overflow:"hidden", boxShadow:"0 2px 8px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.04)", ...ex }}>
       {(title||action) && (
-        <div style={{ padding:"18px 22px 12px", display:"flex", alignItems:"flex-start", justifyContent:"space-between" }}>
-          <div>
-            <div style={{ fontSize:14, fontWeight:700, color:"#111827" }}>{title}</div>
-            {subtitle && <div style={{ fontSize:12, color:"#9CA3AF", marginTop:2 }}>{subtitle}</div>}
+        <div style={{
+          padding:"16px 22px 12px",
+          display:"flex", alignItems:"flex-start", justifyContent:"space-between",
+          borderBottom: "1px solid #F1F5F9",
+        }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            {accent && <div style={{ width:4, height:20, borderRadius:3, background:accent, flexShrink:0 }}/>}
+            <div>
+              <div style={{ fontSize:14, fontWeight:800, color:"#111827" }}>{title}</div>
+              {subtitle && <div style={{ fontSize:11, color:"#94A3B8", marginTop:1, fontWeight:500 }}>{subtitle}</div>}
+            </div>
           </div>
           {action}
         </div>
       )}
-      <div style={{ padding:title?"0 22px 20px":"20px 22px" }}>{children}</div>
+      <div style={{ padding: title ? "16px 22px 20px" : "20px 22px" }}>{children}</div>
+    </div>
+  );
+}
+
+// Componente hero para cabeçalho de módulo com gradiente
+function ModuleHero({ title, subtitle, cor, stats, loading }) {
+  return (
+    <div style={{
+      background: `linear-gradient(135deg, ${cor} 0%, ${cor}CC 100%)`,
+      borderRadius: 20, padding: "28px 32px", marginBottom: 20,
+      boxShadow: `0 8px 32px ${cor}40`,
+      position:"relative", overflow:"hidden",
+    }}>
+      <div style={{ position:"absolute", right:-30, top:-30, width:200, height:200, borderRadius:"50%", background:"rgba(255,255,255,0.07)", pointerEvents:"none" }}/>
+      <div style={{ position:"absolute", right:60, bottom:-60, width:160, height:160, borderRadius:"50%", background:"rgba(255,255,255,0.05)", pointerEvents:"none" }}/>
+      <div style={{ position:"relative" }}>
+        <div style={{ fontSize:20, fontWeight:900, color:"#fff", marginBottom:4, letterSpacing:"-0.3px" }}>{title}</div>
+        {subtitle && <div style={{ fontSize:13, color:"rgba(255,255,255,0.75)", marginBottom:24, fontWeight:500 }}>{subtitle}</div>}
+        {stats && (
+          <div style={{ display:"grid", gridTemplateColumns:`repeat(${stats.length},1fr)`, gap:16 }}>
+            {stats.map((s,i) => (
+              <div key={i} style={{ background:"rgba(255,255,255,0.15)", borderRadius:12, padding:"12px 16px", backdropFilter:"blur(4px)" }}>
+                <div style={{ fontSize:10, color:"rgba(255,255,255,0.8)", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4 }}>{s.label}</div>
+                <div style={{ fontSize:22, fontWeight:900, color:"#fff", lineHeight:1 }}>
+                  {loading ? <span style={{ opacity:0.4 }}>—</span> : s.value}
+                </div>
+                {s.sub && <div style={{ fontSize:10, color:"rgba(255,255,255,0.7)", marginTop:3 }}>{s.sub}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -723,25 +785,89 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
 
   const brlFmt = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "n/d";
 
+  // Anel SVG de progresso da meta
+  const ringPct = Math.min(100, pctMes);
+  const ringR = 54, ringC = 68, ringCirc = 2 * Math.PI * ringR;
+  const ringStroke = ringCirc * (1 - ringPct / 100);
+  const ringCor = ringPct >= 100 ? "#10B981" : ringPct >= 60 ? "#0891B2" : ringPct >= 30 ? "#F59E0B" : "#EF4444";
+
   return (
-    <div style={{ position:"relative" }}>
+    <div style={{ position:"relative", animation:"fadeIn 0.35s ease" }}>
+
+      {/* Hero da Produção Mensal com anel de progresso */}
+      <div style={{
+        background:"linear-gradient(135deg, #0891B2 0%, #0369A1 100%)",
+        borderRadius:20, padding:"28px 32px", marginBottom:20,
+        boxShadow:"0 8px 32px #0891B240",
+        display:"flex", alignItems:"center", gap:32, flexWrap:"wrap",
+        position:"relative", overflow:"hidden",
+      }}>
+        <div style={{ position:"absolute", right:-20, top:-20, width:180, height:180, borderRadius:"50%", background:"rgba(255,255,255,0.07)" }}/>
+        <div style={{ position:"absolute", right:80, bottom:-60, width:140, height:140, borderRadius:"50%", background:"rgba(255,255,255,0.05)" }}/>
+
+        {/* Anel de progresso */}
+        <div style={{ flexShrink:0, position:"relative" }}>
+          <svg width={ringC*2} height={ringC*2}>
+            <circle cx={ringC} cy={ringC} r={ringR} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth={10}/>
+            <circle cx={ringC} cy={ringC} r={ringR} fill="none"
+              stroke={ringCor} strokeWidth={10}
+              strokeDasharray={ringCirc}
+              strokeDashoffset={ringStroke}
+              strokeLinecap="round"
+              transform={`rotate(-90 ${ringC} ${ringC})`}
+              style={{ transition:"stroke-dashoffset 1s ease, stroke 0.5s" }}
+            />
+            <text x={ringC} y={ringC-6} textAnchor="middle" fill="#fff" fontSize={18} fontWeight={900}>{ringPct.toFixed(0)}%</text>
+            <text x={ringC} y={ringC+14} textAnchor="middle" fill="rgba(255,255,255,0.7)" fontSize={10} fontWeight={600}>da meta</text>
+          </svg>
+        </div>
+
+        {/* Info principal */}
+        <div style={{ flex:1, minWidth:200 }}>
+          <div style={{ fontSize:20, fontWeight:900, color:"#fff", marginBottom:4 }}>Produção Mensal</div>
+          <div style={{ fontSize:13, color:"rgba(255,255,255,0.7)", marginBottom:20 }}>{MESES_PT[mes-1]} de {ano}</div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:12 }}>
+            {[
+              { l:"Realizado",   v:brlFmt(data?.total_geral),   s:null },
+              { l:"Meta Mensal", v:brlFmt(metaMensal),           s:null },
+              { l:"Projeção",    v:brlFmt(projecao),             s: projecao >= metaMensal ? "✓ atingirá" : "⚠ abaixo" },
+              { l:"Falta",       v:brlFmt(Math.max(0,falta)),    s:`${data?.dias_restantes ?? "—"} dias úteis` },
+            ].map((k,i) => (
+              <div key={i} style={{ background:"rgba(255,255,255,0.12)", borderRadius:10, padding:"10px 14px", backdropFilter:"blur(4px)" }}>
+                <div style={{ fontSize:9, color:"rgba(255,255,255,0.7)", fontWeight:800, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:3 }}>{k.l}</div>
+                <div style={{ fontSize:16, fontWeight:900, color:"#fff" }}>{loading ? "…" : k.v}</div>
+                {k.s && <div style={{ fontSize:10, color:"rgba(255,255,255,0.65)", marginTop:2 }}>{k.s}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
 
       <BriefingCard
         cor="#0891B2"
         cacheKey={`briefing_producao_${ano}_${mes}`}
         disabled={loading}
-        promptFn={() => `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+        promptFn={() => {
+          const diasUteis    = data?.dias_uteis_mes ?? 0;
+          const diasPassados = diasUteis - (data?.dias_restantes ?? 0);
+          const esperado     = diasUteis > 0 ? metaMensal * (diasPassados / diasUteis) : 0;
+          const status       = data?.total_geral >= esperado ? "DENTRO DO ESPERADO" : "ABAIXO DO ESPERADO";
+          return `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown. IMPORTANTE: considere sempre o dia atual do mês ao avaliar o desempenho — estar com baixo percentual nos primeiros dias é normal se o ritmo diário estiver adequado.
 
 DADOS — Produção Mensal (${MESES_PT[mes-1]} ${ano}):
-- Total produzido no mês: ${brlFmt(data?.total_geral)}
-- Meta mensal: ${brlFmt(metaMensal)}
+- Hoje é o dia ${new Date().getDate()} de ${MESES_PT[mes-1]} (${diasPassados} dias úteis transcorridos de ${diasUteis} no mês)
+- Total produzido até agora: ${brlFmt(data?.total_geral)}
+- Produção esperada para este ponto do mês: ${brlFmt(esperado)}
+- Status em relação ao ritmo esperado: ${status}
+- Meta mensal total: ${brlFmt(metaMensal)}
 - Percentual da meta atingido: ${data ? Math.min(100,(data.total_geral/metaMensal)*100).toFixed(1) : "n/d"}%
-- Média diária: ${brlFmt(data?.media_diaria)}
-- Projeção do mês: ${brlFmt(projecao)}
-- Dias restantes no mês: ${data?.dias_restantes ?? "n/d"}
+- Média diária realizada: ${brlFmt(data?.media_diaria)}
+- Projeção para fim do mês (ritmo atual): ${brlFmt(projecao)}
+- Dias úteis restantes: ${data?.dias_restantes ?? "n/d"}
 - Necessário por dia para bater a meta: ${brlFmt(necessario > 0 ? necessario : null)}
 
-Aponte se a meta está em risco, qual o ritmo necessário e uma sugestão prática.`}
+Avalie se o ritmo diário está adequado em relação ao ponto do mês, não apenas o percentual acumulado.`;
+        }}
       />
 
       {/* ── HEADER CONTROLS ── */}
@@ -2722,69 +2848,114 @@ const Icon = ({ name, size=18, color="currentColor" }) => {
 
 function ModuloCard({ label, value, sub, color, loading, icon }) {
   return (
-    <div style={{ background:"#fff", borderRadius:14, padding:"20px 22px", borderTop:`3px solid ${color}`,
-      boxShadow:"0 1px 3px rgba(0,0,0,0.06)", display:"flex", flexDirection:"column", gap:6 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:2 }}>
-        {icon && <span style={{ display:"flex", opacity:.7 }}><Icon name={icon} size={14} color={color}/></span>}
-        <span style={{ fontSize:11, color:C.faint, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em" }}>{label}</span>
+    <div style={{
+      background: `linear-gradient(135deg, ${color}16 0%, ${color}06 100%)`,
+      borderRadius: 16, padding: "18px 20px",
+      border: `1.5px solid ${color}28`,
+      boxShadow: `0 4px 16px ${color}12, 0 1px 4px rgba(0,0,0,0.05)`,
+      display: "flex", flexDirection: "column", gap: 10,
+      position: "relative", overflow: "hidden",
+    }}>
+      <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${color}0C`, pointerEvents:"none" }}/>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        {icon && (
+          <div style={{
+            width:38, height:38, borderRadius:11,
+            background: color,
+            display:"flex", alignItems:"center", justifyContent:"center",
+            boxShadow: `0 4px 12px ${color}45`,
+          }}>
+            <Icon name={icon} size={18} color="#fff"/>
+          </div>
+        )}
       </div>
       {loading
-        ? <div style={{ height:34, width:"60%", background:"#F3F4F6", borderRadius:6, animation:"pulse 1.5s infinite" }}/>
-        : <div style={{ fontSize:22, fontWeight:800, color:"#111827", lineHeight:1.1, letterSpacing:"-0.5px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{value}</div>
+        ? <div style={{ height:32, width:"60%", background:`${color}20`, borderRadius:7, animation:"pulse 1.5s infinite" }}/>
+        : <div style={{ fontSize:26, fontWeight:900, color:"#111827", lineHeight:1, letterSpacing:"-0.5px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{value}</div>
       }
-      {sub && <div style={{ fontSize:12, color:C.sub, marginTop:2 }}>{sub}</div>}
+      <div>
+        <span style={{ fontSize:10, color:"#64748B", fontWeight:800, textTransform:"uppercase", letterSpacing:"0.08em" }}>{label}</span>
+        {sub && <div style={{ fontSize:11, color:color, fontWeight:700, marginTop:3, background:`${color}14`, borderRadius:5, padding:"2px 7px", display:"inline-block" }}>{sub}</div>}
+      </div>
     </div>
   );
 }
 
 function ConvenioBar({ data }) {
-  const max = data?.[0]?.valor || 1;
+  const max = data?.[0]?.valor || data?.[0]?.faturamento || 1;
+  const fmt = v => new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v||0);
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-      {(data||[]).slice(0,8).map((item,i) => (
-        <div key={i}>
-          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
-            <span style={{ fontSize:12, color:C.text, fontWeight:500, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"60%" }}>{item.convenio||item.empresa||"—"}</span>
-            <span style={{ fontSize:12, color:CORES_ESP[i%CORES_ESP.length], fontWeight:700 }}>{new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(item.valor||item.faturamento||0)}</span>
+    <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+      {(data||[]).slice(0,8).map((item,i) => {
+        const cor = CORES_ESP[i%CORES_ESP.length];
+        const val = item.valor || item.faturamento || 0;
+        const largPct = Math.max(4, (val/max)*100);
+        return (
+          <div key={i} style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <div style={{ width:28, height:28, borderRadius:8, background:`${cor}18`, border:`1.5px solid ${cor}30`,
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:11, fontWeight:900, color:cor, flexShrink:0 }}>{i+1}</div>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                <span style={{ fontSize:12, color:"#111827", fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"58%" }}>{item.convenio||item.empresa||"—"}</span>
+                <span style={{ fontSize:12, color:cor, fontWeight:800, flexShrink:0 }}>{fmt(val)}</span>
+              </div>
+              <div style={{ height:6, background:"#F1F5F9", borderRadius:4, overflow:"hidden" }}>
+                <div style={{ height:"100%", borderRadius:4,
+                  background:`linear-gradient(90deg, ${cor}70, ${cor})`,
+                  width:`${largPct}%`, transition:"width 0.8s ease" }}/>
+              </div>
+              <div style={{ fontSize:10, color:"#94A3B8", marginTop:2 }}>{(item.qtd_os||item.total||0).toLocaleString("pt-BR")} OSs</div>
+            </div>
           </div>
-          <div style={{ height:6, background:"#EEEEEE", borderRadius:4, overflow:"hidden" }}>
-            <div style={{ height:"100%", borderRadius:4, background:CORES_ESP[i%CORES_ESP.length],
-              width:`${Math.max(4,((item.valor||item.faturamento||0)/max)*100)}%`, transition:"width .6s" }}/>
-          </div>
-          <div style={{ fontSize:10, color:C.faint, marginTop:2 }}>{(item.qtd_os||item.total||0).toLocaleString("pt-BR")} OSs</div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-function LinhaChart({ data, dataKey="valor", color="#8B1A1A", height=160 }) {
+function LinhaChart({ data, dataKey="valor", color="#8B1A1A", height=180 }) {
+  const gradId = `lg_${color.replace("#","")}`;
   const fmt = v => `R$${(v/1000).toFixed(0)}k`;
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={data||[]}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false}/>
-        <XAxis dataKey="data" tick={{fontSize:10,fill:"#9CA3AF"}} axisLine={false} tickLine={false}
+      <ComposedChart data={data||[]} margin={{top:4,right:8,bottom:0,left:0}}>
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={color} stopOpacity={0.35}/>
+            <stop offset="100%" stopColor={color} stopOpacity={0.02}/>
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
+        <XAxis dataKey="data" tick={{fontSize:10,fill:"#94A3B8"}} axisLine={false} tickLine={false}
           tickFormatter={v=>v?.slice(5)}/>
-        <YAxis tickFormatter={fmt} tick={{fontSize:10,fill:"#9CA3AF"}} axisLine={false} tickLine={false} width={50}/>
-        <Tooltip content={<CTip fmt={v=>new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v)}/>}/>
-        <Line type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2.5}
-          dot={{r:3,fill:color,strokeWidth:0}} name="Produção"/>
-      </LineChart>
+        <YAxis tickFormatter={fmt} tick={{fontSize:10,fill:"#94A3B8"}} axisLine={false} tickLine={false} width={52}/>
+        <Tooltip content={<CTip fmt={v=>new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v)}/>}
+          cursor={{stroke:color,strokeWidth:1,strokeDasharray:"3 3"}}/>
+        <Area type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2.5}
+          fill={`url(#${gradId})`} dot={false} activeDot={{r:5,fill:color,strokeWidth:2,stroke:"#fff"}} name="Produção"/>
+      </ComposedChart>
     </ResponsiveContainer>
   );
 }
 
-function BarChart2({ data, dataKey="qtd_os", color="#8B1A1A", height=160 }) {
+function BarChart2({ data, dataKey="qtd_os", color="#8B1A1A", height=180 }) {
+  const gradId = `bg_${color.replace("#","")}`;
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data||[]} barSize={20}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false}/>
-        <XAxis dataKey="data" tick={{fontSize:10,fill:"#9CA3AF"}} axisLine={false} tickLine={false}
+      <BarChart data={data||[]} barSize={18} margin={{top:4,right:8,bottom:0,left:0}}>
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={color} stopOpacity={0.9}/>
+            <stop offset="100%" stopColor={color} stopOpacity={0.4}/>
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
+        <XAxis dataKey="data" tick={{fontSize:10,fill:"#94A3B8"}} axisLine={false} tickLine={false}
           tickFormatter={v=>v?.slice(5)}/>
-        <YAxis tick={{fontSize:10,fill:"#9CA3AF"}} axisLine={false} tickLine={false} width={36}/>
-        <Tooltip content={<CTip/>}/>
-        <Bar dataKey={dataKey} fill={color} radius={[4,4,0,0]} name="OSs"/>
+        <YAxis tick={{fontSize:10,fill:"#94A3B8"}} axisLine={false} tickLine={false} width={36}/>
+        <Tooltip content={<CTip/>} cursor={{fill:`${color}10`}}/>
+        <Bar dataKey={dataKey} fill={`url(#${gradId})`} radius={[6,6,0,0]} name="OSs"/>
       </BarChart>
     </ResponsiveContainer>
   );
@@ -2882,11 +3053,25 @@ function SecaoModuloAssistencial({ periodo }) {
   const fin = data?.financeiro || {};
   const op  = data?.operacional || {};
   const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
+  const brlK = v => v != null ? `R$${(Number(v)/1000).toFixed(0)}k` : "—";
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
 
   return (
-    <div>
+    <div style={{ animation:"fadeIn 0.35s ease" }}>
       {error && <Err msg={error.message}/>}
+
+      <ModuleHero
+        title="Módulo Assistencial"
+        subtitle={`Período: ${periodoParaLabel(periodo)}`}
+        cor="#8B1A1A"
+        loading={loading}
+        stats={[
+          { label:"Guias Abertas",      value: num(fin.total_os),        sub: `${num(fin.pacientes_unicos)} pac.` },
+          { label:"Produção Líquida",   value: brlK(fin.faturamento),    sub: `Ticket: ${brl(fin.ticket_medio)}` },
+          { label:"Pend. Faturamento",  value: brlK(fin.val_aberto),     sub: "guias não faturadas" },
+          { label:"Atendimentos",       value: num(op.total_atendimentos) },
+        ]}
+      />
 
       <BriefingCard
         cor="#8B1A1A"
@@ -2904,7 +3089,6 @@ DADOS — Módulo Assistencial (período: ${periodoParaLabel(periodo)}):
 Destaque desempenho, alertas de queda e sugestões para aumentar a produção assistencial.`}
       />
 
-      {/* KPIs principais */}
       {/* KPIs linha 1 */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:12 }}>
         <ModuloCard label="Total Guias"         value={num(fin.total_os)}           color="#8B1A1A" loading={loading} icon="bar"/>
@@ -3230,9 +3414,24 @@ function SecaoModuloOcupacional({ periodo }) {
     { label:"Med. Ocup.",    key:"med_ocup",     color:"#0891B2", cod:"MOC" },
   ];
 
+  const brlK = v => v != null ? `R$${(Number(v)/1000).toFixed(0)}k` : "—";
+
   return (
-    <div>
+    <div style={{ animation:"fadeIn 0.35s ease" }}>
       {error && <Err msg={error.message}/>}
+
+      <ModuleHero
+        title="Medicina Ocupacional"
+        subtitle={`Período: ${periodoParaLabel(periodo)}`}
+        cor="#D97706"
+        loading={loading}
+        stats={[
+          { label:"Total OSs",        value: num(op.total_os),          sub: `${num(op.pacientes_unicos)} pac.` },
+          { label:"Empresas",         value: num(op.empresas),          sub: "atendidas no período" },
+          { label:"Produção",         value: brlK(fin.faturamento),     sub: `Ticket: ${brl(fin.ticket_medio)}` },
+          { label:"Admissional",      value: num(op.admissional),       sub: `Demissional: ${num(op.demissional)}` },
+        ]}
+      />
 
       <BriefingCard
         cor="#D97706"
@@ -3250,16 +3449,34 @@ DADOS — Medicina Ocupacional (período: ${periodoParaLabel(periodo)}):
 Destaque tipos em crescimento, oportunidades de captação de empresas e alertas operacionais.`}
       />
 
-      {/* Tipos de atendimento */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:10, marginBottom:20 }}>
-        {tiposOcup.map(t => (
-          <div key={t.cod} style={{ background:"#fff", borderRadius:12, padding:"14px 16px",
-            borderTop:`3px solid ${t.color}`, boxShadow:"0 1px 3px rgba(0,0,0,0.05)", textAlign:"center" }}>
-            <div style={{ fontSize:10, color:C.faint, fontWeight:700, textTransform:"uppercase", marginBottom:6 }}>{t.label}</div>
-            <div style={{ fontSize:24, fontWeight:800, color:t.color }}>{loading?"…":num(op[t.key])}</div>
-            <div style={{ fontSize:10, color:C.faint, marginTop:2 }}>{t.cod}</div>
+      {/* Tipos de atendimento — cards gradiente */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:12, marginBottom:20 }}>
+        {tiposOcup.map(t => {
+          const val = op[t.key];
+          const total = op.total_os || 1;
+          const parcPct = val ? Math.round((val/total)*100) : 0;
+          return (
+          <div key={t.cod} style={{
+            background:`linear-gradient(135deg, ${t.color}18 0%, ${t.color}06 100%)`,
+            borderRadius:14, padding:"16px", border:`1.5px solid ${t.color}28`,
+            boxShadow:`0 4px 14px ${t.color}10`, textAlign:"center",
+          }}>
+            <div style={{ width:40, height:40, borderRadius:12, background:t.color,
+              display:"flex", alignItems:"center", justifyContent:"center",
+              margin:"0 auto 10px", boxShadow:`0 4px 10px ${t.color}40` }}>
+              <span style={{ fontSize:18, color:"#fff", fontWeight:900 }}>{loading?"…":num(val)?.split(".")[0]?.slice(0,3)}</span>
+            </div>
+            <div style={{ fontSize:26, fontWeight:900, color:t.color, lineHeight:1, marginBottom:4 }}>
+              {loading ? "…" : num(val)}
+            </div>
+            <div style={{ fontSize:10, color:"#64748B", fontWeight:800, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:4 }}>{t.label}</div>
+            <div style={{ height:3, borderRadius:3, background:`${t.color}20`, overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${parcPct}%`, background:t.color, transition:"width 0.8s ease" }}/>
+            </div>
+            <div style={{ fontSize:10, color:t.color, fontWeight:700, marginTop:3 }}>{parcPct}% do total</div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* KPIs financeiros */}
@@ -3323,9 +3540,24 @@ function SecaoModuloServicos({ periodo }) {
 
   const CORES_SVC = { PSI:"#8B5CF6",NUT:"#10B981",FON:"#8B1A1A",FIS:"#F59E0B",OFT:"#0891B2",DER:"#DB2777",END:"#D97706",GIN:"#EC4899",PED:"#14B8A6",ORT:"#6366F1" };
 
+  const brlK = v => v != null ? `R$${(Number(v)/1000).toFixed(0)}k` : "—";
+
   return (
-    <div>
+    <div style={{ animation:"fadeIn 0.35s ease" }}>
       {error && <Err msg={error.message}/>}
+
+      <ModuleHero
+        title="Serviços Especializados"
+        subtitle={`Período: ${periodoParaLabel(periodo)} · PSI · NUT · FON · FIS · OFT e mais`}
+        cor="#8B5CF6"
+        loading={loading}
+        stats={[
+          { label:"Total OSs",       value: num(fin.total_os),          sub: `${num(fin.pacientes_unicos)} pac.` },
+          { label:"Produção",        value: brlK(fin.faturamento),      sub: "faturamento líquido" },
+          { label:"Ticket Médio",    value: brl(fin.ticket_medio),      sub: "por OS" },
+          { label:"Serviços Ativos", value: num((data?.por_servico||[]).length), sub: "especialidades" },
+        ]}
+      />
 
       <BriefingCard
         cor="#8B5CF6"
@@ -3347,20 +3579,33 @@ Destaque serviços com maior demanda, oportunidades de crescimento e alertas de 
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
         <ModuloCard label="Total OSs"        value={num(fin.total_os)}        color="#8B5CF6" loading={loading} icon="bar"/>
         <ModuloCard label="Pacientes Únicos" value={num(fin.pacientes_unicos)} color="#8B1A1A" loading={loading} icon="users"/>
-        <ModuloCard label="Produção"      value={brl(fin.faturamento)}     color="#10B981" loading={loading} icon="dollar"/>
+        <ModuloCard label="Produção"         value={brlK(fin.faturamento)}    color="#10B981" loading={loading} icon="dollar"/>
         <ModuloCard label="Ticket Médio"     value={brl(fin.ticket_medio)}    color="#F59E0B" loading={loading} icon="trending"/>
       </div>
 
-      {/* Cards por serviço */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:10, marginBottom:20 }}>
+      {/* Cards por serviço — gradiente */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(165px,1fr))", gap:12, marginBottom:20 }}>
         {(data?.por_servico||[]).map((s,i)=>{
           const cor = CORES_SVC[s.codigo] || CORES_ESP[i%CORES_ESP.length];
+          const maxFat = (data?.por_servico||[])[0]?.faturamento || 1;
+          const largPct = Math.max(8, (s.faturamento/maxFat)*100);
           return (
-            <div key={i} style={{ background:"#fff", borderRadius:12, padding:"16px", borderTop:`3px solid ${cor}`, boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
-              <div style={{ fontSize:11, color:C.faint, fontWeight:700, textTransform:"uppercase", marginBottom:8 }}>{s.nome}</div>
-              <div style={{ fontSize:22, fontWeight:800, color:cor, marginBottom:4 }}>{num(s.qtd_os)}</div>
-              <div style={{ fontSize:11, color:C.sub }}>OSs · {num(s.pacientes)} pac.</div>
-              <div style={{ fontSize:12, fontWeight:700, color:C.text, marginTop:6 }}>{brl(s.faturamento)}</div>
+            <div key={i} style={{
+              background:`linear-gradient(135deg, ${cor}14 0%, ${cor}05 100%)`,
+              borderRadius:14, padding:"16px 18px",
+              border:`1.5px solid ${cor}25`,
+              boxShadow:`0 4px 12px ${cor}10`,
+            }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                <span style={{ fontSize:10, color:"#64748B", fontWeight:800, textTransform:"uppercase", letterSpacing:"0.07em" }}>{s.nome}</span>
+                <span style={{ fontSize:10, fontWeight:700, color:cor, background:`${cor}18`, borderRadius:5, padding:"2px 6px" }}>{s.codigo}</span>
+              </div>
+              <div style={{ fontSize:28, fontWeight:900, color:cor, lineHeight:1, marginBottom:3 }}>{num(s.qtd_os)}</div>
+              <div style={{ fontSize:11, color:"#64748B", marginBottom:10 }}>OSs · {num(s.pacientes)} pac.</div>
+              <div style={{ fontSize:13, fontWeight:800, color:"#111827", marginBottom:8 }}>{brl(s.faturamento)}</div>
+              <div style={{ height:4, borderRadius:3, background:`${cor}15`, overflow:"hidden" }}>
+                <div style={{ height:"100%", width:`${largPct}%`, background:`linear-gradient(90deg,${cor}80,${cor})`, transition:"width 0.8s" }}/>
+              </div>
             </div>
           );
         })}
@@ -3639,9 +3884,24 @@ function SecaoModuloLaboratorio({ periodo }) {
   // Top exames flat list do grupo lab
   const topExames = data?.grupos?.lab?.top_exames || [];
 
+  const brlK = v => v != null ? `R$${(Number(v)/1000).toFixed(0)}k` : "—";
+
   return (
-    <div>
+    <div style={{ animation:"fadeIn 0.35s ease" }}>
       {error && <Err msg={error.message}/>}
+
+      <ModuleHero
+        title="Laboratório"
+        subtitle={`Período: ${periodoParaLabel(periodo)} · Diagnóstico · Ocupacional`}
+        cor="#10B981"
+        loading={loading}
+        stats={[
+          { label:"Total Exames",   value: num(fin.total_exames||fin.total_os), sub:`${num(fin.total_os)} OSs` },
+          { label:"Pacientes",      value: num(fin.pacientes_unicos),           sub:"atendidos" },
+          { label:"Produção",       value: brlK(fin.faturamento),               sub:`Ticket: ${brl(fin.ticket_medio)}` },
+          { label:"Top Exame",      value: topExames[0]?.exame_cod || "—",      sub: topExames[0] ? `${num(topExames[0].qtd)} realizações` : "" },
+        ]}
+      />
 
       <BriefingCard
         cor="#10B981"
@@ -3727,20 +3987,34 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
         {loading ? <Skeleton h={200}/> : <ConvenioBar data={data?.por_convenio}/>}
       </Card>
 
-      {/* Top exames */}
+      {/* Top exames — ranking visual */}
       {topExames.length > 0 && (
-        <Card title="Top Exames Realizados" subtitle="Exames mais solicitados no período" style={{ marginBottom:16 }}>
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:10 }}>
+        <Card title="Top Exames Realizados" subtitle="Exames mais solicitados no período" accent="#10B981" style={{ marginBottom:16 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(165px,1fr))", gap:10 }}>
             {topExames.slice(0,10).map((ex,i) => {
               const max = topExames[0]?.qtd || 1;
-              const pct = Math.max(6, (ex.qtd/max)*100);
+              const pctW = Math.max(6, (ex.qtd/max)*100);
+              const cor = ["#10B981","#0891B2","#8B5CF6","#F59E0B","#EF4444","#DB2777","#D97706","#6366F1","#14B8A6","#059669"][i] || "#10B981";
               return (
-                <div key={i} style={{ background:"#F2F2F2", borderRadius:10, padding:"12px 14px" }}>
-                  <div style={{ fontSize:13, fontFamily:"monospace", fontWeight:800, color:"#111827", marginBottom:6 }}>{ex.exame_cod}</div>
-                  <div style={{ fontSize:18, fontWeight:800, color:"#8B1A1A" }}>{num(ex.qtd)}</div>
-                  <div style={{ height:4, background:"#E2E8F0", borderRadius:3, marginTop:6, overflow:"hidden" }}>
-                    <div style={{ height:"100%", width:`${pct}%`, background:"#8B1A1A", borderRadius:3 }}/>
+                <div key={i} style={{
+                  background:`linear-gradient(135deg, ${cor}12 0%, ${cor}04 100%)`,
+                  borderRadius:12, padding:"14px 15px",
+                  border:`1.5px solid ${cor}22`,
+                  position:"relative",
+                }}>
+                  <div style={{
+                    position:"absolute", top:10, right:12,
+                    width:24, height:24, borderRadius:8,
+                    background: cor, color:"#fff",
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:11, fontWeight:900,
+                  }}>{i+1}</div>
+                  <div style={{ fontSize:12, fontFamily:"monospace", fontWeight:900, color:cor, marginBottom:4 }}>{ex.exame_cod}</div>
+                  <div style={{ fontSize:22, fontWeight:900, color:"#111827", lineHeight:1, marginBottom:6 }}>{num(ex.qtd)}</div>
+                  <div style={{ height:4, background:`${cor}18`, borderRadius:3, overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${pctW}%`, background:`linear-gradient(90deg,${cor}70,${cor})`, transition:"width 0.8s" }}/>
                   </div>
+                  <div style={{ fontSize:10, color:cor, fontWeight:700, marginTop:4 }}>{pctW.toFixed(0)}% do 1º</div>
                 </div>
               );
             })}
@@ -4439,21 +4713,27 @@ function SecaoClinica({ periodo }) {
   const [aba, setAba] = useState("assistencial");
   const abaAtual = ABAS_CLINICA.find(a => a.id === aba);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* Tabs */}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {ABAS_CLINICA.map(a => (
-          <button key={a.id} onClick={() => setAba(a.id)} style={{
-            padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 700,
-            cursor: "pointer", border: "none", transition: "all 0.12s",
-            background: aba === a.id ? a.cor : "#ECECEC",
-            color: aba === a.id ? "#fff" : "#374151",
-            boxShadow: aba === a.id ? `0 2px 6px ${a.cor}40` : "none",
-          }}>{a.label}</button>
-        ))}
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Tabs visuais */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {ABAS_CLINICA.map(a => {
+          const ativo = aba === a.id;
+          return (
+            <button key={a.id} onClick={() => setAba(a.id)} style={{
+              padding: "9px 20px", borderRadius: 12, fontSize: 13, fontWeight: 700,
+              cursor: "pointer", border: "none", transition: "all 0.15s",
+              background: ativo ? a.cor : "#fff",
+              color: ativo ? "#fff" : "#64748B",
+              boxShadow: ativo
+                ? `0 4px 16px ${a.cor}40`
+                : "0 1px 3px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.05)",
+              transform: ativo ? "translateY(-1px)" : "none",
+            }}>{a.label}</button>
+          );
+        })}
       </div>
-      {/* Conteúdo */}
-      <div>
+      {/* Conteúdo com animação */}
+      <div key={aba} style={{ animation:"fadeIn 0.25s ease" }}>
         {aba === "assistencial" && <SecaoModuloAssistencial periodo={periodo} />}
         {aba === "ocupacional"  && <SecaoModuloOcupacional  periodo={periodo} />}
         {aba === "servicos"     && <SecaoModuloServicos     periodo={periodo} />}
@@ -4977,30 +5257,49 @@ function SecaoEstoque({ periodo }) {
       <FiltroDataEstoque/>
 
       {/* Sub-tabs */}
-      <div style={{ display:"flex", gap:4, marginBottom:24, borderBottom:`1px solid ${C.border}`, paddingBottom:0 }}>
-        {ABAS_EST.map(a => (
-          <button key={a.id} onClick={()=>setAba(a.id)} style={{
-            padding:"8px 18px", border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
-            background:"transparent", transition:"all 0.12s",
-            color: aba===a.id ? C.blue : C.faint,
-            borderBottom: aba===a.id ? `2px solid ${C.blue}` : "2px solid transparent",
-            marginBottom:-1,
-          }}>{a.label}</button>
-        ))}
+      {/* Hero Estoque */}
+      <ModuleHero
+        title="Gestão de Estoque"
+        subtitle="Posição · Movimentações · Curva ABC · Validades"
+        cor="#0D9488"
+        loading={lR}
+        stats={[
+          { label:"Valor em Estoque",  value: brl(resumo?.valor_total),   sub:"saldo atual" },
+          { label:"Itens Ativos",      value: num(resumo?.com_estoque),   sub:`de ${num(resumo?.total_itens)} cadastrados` },
+          { label:"Itens Zerados",     value: num(resumo?.zerados),       sub:"sem estoque" },
+          { label:"Abaixo do Mínimo",  value: num(resumo?.abaixo_minimo), sub:"precisam reposição" },
+        ]}
+      />
+
+      {/* Tabs redesenhadas */}
+      <div style={{ display:"flex", gap:6, marginBottom:20, flexWrap:"wrap" }}>
+        {ABAS_EST.map(a => {
+          const ativo = aba===a.id;
+          return (
+            <button key={a.id} onClick={()=>setAba(a.id)} style={{
+              padding:"7px 16px", borderRadius:10, border:"none", cursor:"pointer", fontSize:12, fontWeight:700,
+              background: ativo ? "#0D9488" : "#fff",
+              color: ativo ? "#fff" : "#64748B",
+              boxShadow: ativo ? "0 4px 12px #0D948840" : "0 1px 3px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.05)",
+              transition:"all 0.15s",
+              transform: ativo ? "translateY(-1px)" : "none",
+            }}>{a.label}</button>
+          );
+        })}
       </div>
 
       {/* ── DASHBOARD ── */}
       {aba==="dashboard" && (
-        <div>
+        <div key="dashboard" style={{ animation:"fadeIn 0.25s ease" }}>
           {/* KPIs posição */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
-            <ModuloCard label="Valor Total em Estoque" value={brl(resumo?.valor_total)}   color="#8B1A1A" loading={lR} icon="dollar"/>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:16 }}>
+            <ModuloCard label="Valor Total em Estoque" value={brl(resumo?.valor_total)}   color="#0D9488" loading={lR} icon="dollar"/>
             <ModuloCard label="Itens com Estoque"      value={num(resumo?.com_estoque)}   color="#10B981" loading={lR} icon="bar"
-              sub={`de ${num(resumo?.total_itens)} itens cadastrados`}/>
+              sub={`de ${num(resumo?.total_itens)} cadastrados`}/>
             <ModuloCard label="Itens Zerados"          value={num(resumo?.zerados)}       color="#EF4444" loading={lR} icon="activity"
               sub="sem estoque"/>
             <ModuloCard label="Abaixo do Mínimo"       value={num(resumo?.abaixo_minimo)} color="#F59E0B" loading={lR} icon="trending"
-              sub="necessitam reposição"/>
+              sub="precisam reposição"/>
           </div>
 
           {/* KPIs movimentação */}
@@ -5031,31 +5330,42 @@ function SecaoEstoque({ periodo }) {
               )}
             </Card>
 
-            <Card title="Curva ABC" subtitle="Distribuição por valor">
+            <Card title="Curva ABC" subtitle="Distribuição por valor" accent="#0D9488">
               {lABC ? <Skeleton h={200}/> : (
-                <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-                  {(abc||[]).filter(r=>r.curva).map((r,i) => (
-                    <div key={i}>
-                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4, alignItems:"center" }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                          <span style={{ width:22, height:22, borderRadius:6, background:ABC_COR[r.curva]||"#94A3B8",
+                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                  {(abc||[]).filter(r=>r.curva).map((r,i) => {
+                    const cor = ABC_COR[r.curva] || "#94A3B8";
+                    return (
+                    <div key={i} style={{
+                      background:`linear-gradient(135deg, ${cor}12 0%, ${cor}04 100%)`,
+                      borderRadius:12, padding:"14px 16px", border:`1.5px solid ${cor}25`,
+                    }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8, alignItems:"center" }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                          <span style={{ width:32, height:32, borderRadius:10, background:cor,
                             display:"flex", alignItems:"center", justifyContent:"center",
-                            fontSize:11, fontWeight:800, color:"#fff" }}>{r.curva}</span>
-                          <span style={{ fontSize:12, color:"#111827", fontWeight:600 }}>{num(r.qtd_itens)} itens</span>
+                            fontSize:14, fontWeight:900, color:"#fff", boxShadow:`0 4px 8px ${cor}40` }}>{r.curva}</span>
+                          <div>
+                            <div style={{ fontSize:13, color:"#111827", fontWeight:700 }}>{num(r.qtd_itens)} itens</div>
+                            <div style={{ fontSize:10, color:"#64748B" }}>curva {r.curva}</div>
+                          </div>
                         </div>
                         <div style={{ textAlign:"right" }}>
-                          <div style={{ fontSize:12, fontWeight:800, color:ABC_COR[r.curva] }}>{brl(r.valor_total)}</div>
-                          <div style={{ fontSize:10, color:C.faint }}>{pct(r.pct_valor)}</div>
+                          <div style={{ fontSize:14, fontWeight:900, color:cor }}>{brl(r.valor_total)}</div>
+                          <div style={{ fontSize:11, color:"#64748B", fontWeight:600 }}>{pct(r.pct_valor)} do total</div>
                         </div>
                       </div>
-                      <div style={{ height:8, background:"#EEEEEE", borderRadius:4, overflow:"hidden" }}>
-                        <div style={{ height:"100%", width:`${r.pct_valor||0}%`, background:ABC_COR[r.curva], borderRadius:4 }}/>
+                      <div style={{ height:6, background:`${cor}18`, borderRadius:4, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${r.pct_valor||0}%`,
+                          background:`linear-gradient(90deg, ${cor}70, ${cor})`,
+                          borderRadius:4, transition:"width 0.8s" }}/>
                       </div>
                     </div>
-                  ))}
-                  <div style={{ marginTop:8, padding:"10px 0", borderTop:`1px solid ${C.border}` }}>
-                    <div style={{ fontSize:11, color:C.faint }}>Valor total do estoque</div>
-                    <div style={{ fontSize:16, fontWeight:800, color:"#111827" }}>{brl(resumo?.valor_total)}</div>
+                    );
+                  })}
+                  <div style={{ padding:"10px 0", borderTop:`1px solid #F1F5F9` }}>
+                    <div style={{ fontSize:11, color:"#94A3B8", fontWeight:600 }}>VALOR TOTAL DO ESTOQUE</div>
+                    <div style={{ fontSize:18, fontWeight:900, color:"#111827" }}>{brl(resumo?.valor_total)}</div>
                   </div>
                 </div>
               )}
@@ -6215,6 +6525,9 @@ function AppInner() {
         * { box-sizing:border-box; margin:0; padding:0; }
         html,body,#root { height:100%; background:#DADADA; overflow:hidden; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+        @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes scaleIn { from{transform:scale(0.97);opacity:0} to{transform:scale(1);opacity:1} }
         ::-webkit-scrollbar { width:5px; height:5px; }
         ::-webkit-scrollbar-track { background:transparent; }
         ::-webkit-scrollbar-thumb { background:#D1D5DB; border-radius:10px; }

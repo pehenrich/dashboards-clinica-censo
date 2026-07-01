@@ -122,7 +122,11 @@ def get_modulos_usuario(login: str) -> list:
         "SELECT cp_modulo FROM censo_permissoes WHERE RTRIM(cp_login)=? AND cp_ativo='S'",
         (login.strip(),)
     )
-    return [r["cp_modulo"] for r in rows]
+    mods = [r["cp_modulo"] for r in rows]
+    # Migração: laboratorio saiu do clinica — concede acesso automaticamente
+    if "clinica" in mods and "laboratorio" not in mods:
+        mods.append("laboratorio")
+    return mods
 
 def is_admin_censo(login: str) -> bool:
     """Verifica se o usuário é admin do Censo (nível 3 no Pixeon)."""
@@ -550,6 +554,16 @@ def salvar_permissoes(req: PermissaoRequest):
 def auth_modulos():
     """Retorna lista de todos os módulos do sistema."""
     return TODOS_MODULOS
+
+@app.get("/api/auth/diagnostico/{login}")
+def auth_diagnostico(login: str):
+    """Diagnóstico: mostra nivel, admin e módulos de um usuário."""
+    from fastapi.responses import JSONResponse
+    rows = query("SELECT RTRIM(USR_NIVEL) AS nivel FROM usr WHERE RTRIM(USR_LOGIN)=?", (login.strip(),))
+    nivel = str(rows[0].get("nivel") or "").strip() if rows else "não encontrado"
+    admin = nivel == "3"
+    mods  = get_modulos_usuario(login.strip())
+    return JSONResponse({"login": login, "nivel_pixeon": nivel, "admin": admin, "modulos": mods})
 
 [{
 	"resource": "/c:/Dashboard/backend/main.py",
