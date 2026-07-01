@@ -16,6 +16,9 @@ test.py
 # Configurações sensíveis
 backend/whatsapp_config.json
 backend/.env
+backend/ssl/
+frontend/.env.production
+frontend/cloudflared
 
 # Node
 node_modules/
