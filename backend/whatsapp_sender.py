@@ -23,6 +23,8 @@ EVOLUTION_INST     = os.getenv("EVOLUTION_INST",      "censo")
 DEST_NUMBERS       = os.getenv("WHATSAPP_DEST",       "5594999999999").split(",")
 
 
+# ── Helpers de formatação ────────────────────────────────────────────────────
+
 def brl(v):
     if v is None:
         return "R$ 0,00"
@@ -34,6 +36,72 @@ def num(v):
         return "0"
     return "{:,}".format(int(v)).replace(",", ".")
 
+
+# ── Helper de metas ──────────────────────────────────────────────────────────
+
+def _calcular_metas(producao_mes: float, meta_mensal_fixa: float = 1200000.0) -> dict:
+    """
+    Calcula META_MENSAL, meta_diaria, meta_dia_pct, meta_mes_pct e falta_meta
+    com base na produção acumulada do mês e na meta mensal fixa.
+
+    meta_dia_pct → média diária real / meta diária  (100 = no alvo)
+    meta_mes_pct → acumulado real / meta acumulada até hoje  (100 = no alvo)
+    falta_meta   → quanto ainda falta para bater a meta mensal (>= 0)
+    """
+    import datetime as _dt
+    from calendar import monthrange as _mr
+
+    hoje       = _dt.date.today()
+    ano, mes   = hoje.year, hoje.month
+    ultimo_dia = _mr(ano, mes)[1]
+
+    # Feriados Parauapebas-PA (espelho exato do main.py)
+    def _feriados(a: int):
+        f = set()
+        for m_, d_ in [(1,1),(4,21),(5,1),(9,7),(10,12),(11,2),(11,15),(11,20),(12,25)]:
+            f.add(_dt.date(a, m_, d_))
+        # Páscoa (algoritmo de Gauss)
+        a_ = a % 19; b_ = a // 100; c_ = a % 100
+        d__ = b_ // 4; e_ = b_ % 4; f_ = (b_+8)//25; g_ = (b_-f_+1)//3
+        h_ = (19*a_+b_-d__-g_+15)%30; i_ = c_//4; k_ = c_%4
+        l_ = (32+2*e_+2*i_-h_-k_)%7; m__ = (a_+11*h_+22*l_)//451
+        month_ = (h_+l_-7*m__+114)//31; day_ = ((h_+l_-7*m__+114)%31)+1
+        pascoa = _dt.date(a, month_, day_)
+        f.add(pascoa - _dt.timedelta(days=2))   # Sexta-feira Santa
+        f.add(pascoa + _dt.timedelta(days=60))  # Corpus Christi
+        f.add(_dt.date(a, 8, 15))   # Adesão do Pará
+        f.add(_dt.date(a, 5, 27))   # Aniversário de Parauapebas
+        return f
+
+    feriados = _feriados(ano)
+    is_util  = lambda d: (
+        _dt.date(ano, mes, d).weekday() < 6
+        and _dt.date(ano, mes, d) not in feriados
+    )
+
+    dias_uteis_mes      = sum(1 for d in range(1, ultimo_dia + 1)  if is_util(d))
+    dias_uteis_passados = sum(1 for d in range(1, hoje.day + 1)    if is_util(d))
+
+    META_MENSAL    = meta_mensal_fixa
+    meta_diaria    = round(META_MENSAL / dias_uteis_mes, 2) if dias_uteis_mes > 0 else 0.0
+    meta_acum      = meta_diaria * max(dias_uteis_passados, 1)   # meta acumulada até hoje
+    media_dia_real = producao_mes / max(dias_uteis_passados, 1)
+
+    # >100 = acima da meta, <100 = abaixo
+    meta_dia_pct = (media_dia_real / meta_diaria * 100) if meta_diaria > 0 else 0.0
+    meta_mes_pct = (producao_mes   / meta_acum   * 100) if meta_acum   > 0 else 0.0
+    falta_meta   = max(0.0, META_MENSAL - producao_mes)
+
+    return {
+        "META_MENSAL":  META_MENSAL,
+        "meta_diaria":  meta_diaria,
+        "meta_dia_pct": meta_dia_pct,
+        "meta_mes_pct": meta_mes_pct,
+        "falta_meta":   falta_meta,
+    }
+
+
+# ── Busca de dados ───────────────────────────────────────────────────────────
 
 def buscar_dados_manha(query_func):
     hoje = datetime.now().strftime("%Y-%m-%d")
@@ -50,20 +118,32 @@ def buscar_dados_manha(query_func):
     # Médicos divididos por turno (manhã = antes das 12h, tarde = 12h+)
     medicos_raw = query_func(
         "SELECT TOP 20 RTRIM(psv.psv_apel) AS medico, "
+        "RTRIM(ISNULL(esp.esp_nome, '')) AS especialidade, "
+        "RTRIM(ISNULL(psv.psv_esp_cod, '')) AS esp_cod, "
         "SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B') THEN 1 ELSE 0 END) AS marcacoes, "
         "MIN(agm.agm_hini) AS inicio, MAX(agm.agm_hini) AS fim "
-        "FROM agm JOIN psv ON psv.psv_cod = agm.agm_med "
+        "FROM agm "
+        "JOIN psv ON psv.psv_cod = agm.agm_med "
+        "LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod "
         "WHERE CAST(agm.agm_hini AS DATE) = '" + hoje + "' AND agm.agm_pac > 0 "
-        "GROUP BY RTRIM(psv.psv_apel) ORDER BY MIN(agm.agm_hini)"
+        "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(psv.psv_esp_cod,'')) "
+        "ORDER BY MIN(agm.agm_hini)"
     )
     for r in medicos_raw:
         for k, v in r.items():
             if hasattr(v, "strftime"):
                 r[k] = v.strftime("%H:%M")
 
-    # Separar por turno baseado no horário de início
-    medicos_manha = [m for m in medicos_raw if m.get('inicio','') < '12:00']
-    medicos_tarde = [m for m in medicos_raw if m.get('inicio','') >= '12:00']
+    # Códigos de especialidade multiprofissional (Pixeon)
+    _MULT_CODES = {'PSC','NUT','FON','FIS','ENF','TER','FAR','ASS','SOC','PSQ','NEU','FIO'}
+
+    def _is_mult(m):
+        return m.get('esp_cod', '').strip().upper() in _MULT_CODES
+
+    medicos_manha = [m for m in medicos_raw if m.get('inicio','') < '12:00' and not _is_mult(m)]
+    medicos_tarde = [m for m in medicos_raw if m.get('inicio','') >= '12:00' and not _is_mult(m)]
+    mult_manha    = [m for m in medicos_raw if m.get('inicio','') < '12:00' and _is_mult(m)]
+    mult_tarde    = [m for m in medicos_raw if m.get('inicio','') >= '12:00' and _is_mult(m)]
     medicos = medicos_raw  # compatibilidade
 
     vagas_med = query_func(
@@ -111,7 +191,7 @@ def buscar_dados_manha(query_func):
     media_diaria  = producao_mes / max(dias_uteis_passados, 1)
     projecao_mes  = producao_mes + (media_diaria * dias_uteis_restantes)
 
-    # Producao mesmo dia ano anterior
+    # Produção mesmo dia ano anterior
     hoje_ano_ant = (datetime.now().replace(year=datetime.now().year-1)).strftime("%Y-%m-%d")
     prod_ano_ant = query_func(
         "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao, "
@@ -121,12 +201,22 @@ def buscar_dados_manha(query_func):
         "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje_ano_ant + "' AND smm.SMM_SFAT IN ('A','F','P')"
     )
 
+    # ── Calcula metas (corrige Pylance: variáveis declaradas aqui) ───────────
+    _metas       = _calcular_metas(float(producao_mes))
+    META_MENSAL  = _metas["META_MENSAL"]
+    meta_diaria  = _metas["meta_diaria"]
+    meta_dia_pct = _metas["meta_dia_pct"]
+    meta_mes_pct = _metas["meta_mes_pct"]
+    falta_meta   = _metas["falta_meta"]
+
     return {
         "hoje": hoje,
         "agd": agd[0] if agd else {},
         "medicos": medicos,
         "medicos_manha": medicos_manha,
         "medicos_tarde": medicos_tarde,
+        "mult_manha":    mult_manha,
+        "mult_tarde":    mult_tarde,
         "vagas_med": vagas_med,
         "ticket_medio":         (ticket[0].get("ticket_medio") or 0) if ticket else 0,
         "producao_mes":         producao_mes,
@@ -190,13 +280,17 @@ def buscar_dados_fechamento(query_func):
 
     medicos = query_func(
         "SELECT TOP 10 RTRIM(psv.psv_apel) AS medico, "
+        "RTRIM(ISNULL(esp.esp_nome, '')) AS especialidade, "
+        "RTRIM(ISNULL(psv.psv_esp_cod, '')) AS esp_cod, "
         "COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS guias, "
         "COUNT(DISTINCT osm.osm_pac) AS pacientes, "
         "SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao "
         "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
         "JOIN psv ON psv.psv_cod=osm.osm_mreq "
+        "LEFT JOIN esp ON esp.esp_cod=psv.psv_esp_cod "
         "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje + "' AND smm.SMM_SFAT IN ('A','F','P') "
-        "GROUP BY RTRIM(psv.psv_apel) ORDER BY producao DESC"
+        "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(psv.psv_esp_cod,'')) "
+        "ORDER BY producao DESC"
     )
 
     agd = query_func(
@@ -253,7 +347,7 @@ def buscar_dados_fechamento(query_func):
     media_diaria = producao_mes / max(dias_uteis_passados, 1)
     projecao_mes = producao_mes + (media_diaria * dias_uteis_restantes)
 
-    # Producao mesmo dia ano anterior
+    # Produção mesmo dia ano anterior
     hoje_ano_ant = datetime.now().replace(year=datetime.now().year-1).strftime("%Y-%m-%d")
     prod_ano_ant = query_func(
         "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao, "
@@ -261,6 +355,14 @@ def buscar_dados_fechamento(query_func):
         "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
         "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje_ano_ant + "' AND smm.SMM_SFAT IN ('A','F','P')"
     )
+
+    # ── Calcula metas (corrige Pylance: variáveis declaradas aqui) ───────────
+    _metas       = _calcular_metas(float(producao_mes))
+    META_MENSAL  = _metas["META_MENSAL"]
+    meta_diaria  = _metas["meta_diaria"]
+    meta_dia_pct = _metas["meta_dia_pct"]
+    meta_mes_pct = _metas["meta_mes_pct"]
+    falta_meta   = _metas["falta_meta"]
 
     return {
         "hoje": hoje,
@@ -348,6 +450,8 @@ def buscar_dados_resumo(query_func):
     return buscar_dados_fechamento(query_func)
 
 
+# ── Montadores de mensagem ───────────────────────────────────────────────────
+
 def montar_manha(dados):
     hoje_fmt   = datetime.now().strftime("%d/%m/%Y")
     agd        = dados["agd"]
@@ -360,52 +464,97 @@ def montar_manha(dados):
     previsao   = marcacoes * ticket
     n          = "\n"
 
-    msg  = "*Bom dia! Agenda de Hoje - " + hoje_fmt + "*" + n + n
-    msg += "*Resumo da Agenda*" + n
-    msg += "  Medicos com agenda: *" + str(agd.get("medicos") or len(medicos)) + "*" + n
-    msg += "  Pacientes marcados: *" + num(marcacoes) + "*" + n
-    msg += "  Vagas disponiveis:  *" + num(vagas_disp) + "*" + n
+    msg  = "\U0001f305 *BOM DIA \u2014 AGENDA DE HOJE*" + n
+    msg += "\U0001f4c5 " + hoje_fmt + n
+    msg += "\u2501" * 28 + n + n
+
+    msg += "\U0001f4cb *RESUMO DA AGENDA*" + n
+    msg += "  \U0001f468\u200d\u2695\ufe0f Profissionais:  *" + str(agd.get("medicos") or len(medicos)) + "*" + n
+    msg += "  \U0001f9d1\u200d\U0001f91d\u200d\U0001f9d1 Pac. marcados:  *" + num(marcacoes) + "*" + n
+    msg += "  \U0001f7e2 Vagas abertas:  *" + num(vagas_disp) + "*" + n
     if cancelados > 0:
-        msg += "  Cancelamentos: " + num(cancelados) + n
+        msg += "  \U0001f534 Cancelamentos:  *" + num(cancelados) + "*" + n
 
     if previsao > 0:
-        msg += n + "*Previsao de Producao*" + n
-        msg += "  Se todos comparecerem: *" + brl(previsao) + "*" + n
+        msg += n + "\U0001f4b0 *PREVISAO DE PRODUCAO*" + n
+        msg += "  Se todos comparecerem:" + n
+        msg += "  \u27a4 *" + brl(previsao) + "*" + n
         msg += "  _(ticket medio 30d: " + brl(ticket) + ")_" + n
 
     medicos_manha = dados.get("medicos_manha", [])
     medicos_tarde = dados.get("medicos_tarde", [])
+    mult_manha    = dados.get("mult_manha", [])
+    mult_tarde    = dados.get("mult_tarde", [])
 
-    if medicos_manha:
-        msg += n + "*Turno Manha (ate 12h)*" + n
-        for m in medicos_manha:
-            ini  = m.get("inicio", "")
-            fim  = m.get("fim", "")
-            marc = m.get("marcacoes") or 0
-            msg += "  - " + str(m["medico"]) + ": " + num(marc) + " pac. (" + ini + "--" + fim + ")" + n
+    # ── Equipe Médica ────────────────────────────────────────────────────────
+    if medicos_manha or medicos_tarde:
+        msg += n + "\u2501" * 28 + n
+        msg += "\U0001fa7a *EQUIPE MEDICA*" + n
+        if medicos_manha:
+            msg += n + "  \U0001f324\ufe0f _Manha_" + n
+            for m in medicos_manha:
+                ini  = m.get("inicio", "")
+                fim  = m.get("fim", "")
+                marc = m.get("marcacoes") or 0
+                msg += "  \u2022 " + str(m["medico"]) + n
+                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
+        if medicos_tarde:
+            msg += n + "  \U0001f306 _Tarde_" + n
+            for m in medicos_tarde:
+                ini  = m.get("inicio", "")
+                fim  = m.get("fim", "")
+                marc = m.get("marcacoes") or 0
+                msg += "  \u2022 " + str(m["medico"]) + n
+                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
+    elif medicos:
+        medicos_sem_mult = [m for m in medicos if m not in mult_manha and m not in mult_tarde]
+        if medicos_sem_mult:
+            msg += n + "\u2501" * 28 + n
+            msg += "\U0001fa7a *EQUIPE MEDICA*" + n
+            for m in medicos_sem_mult:
+                ini  = m.get("inicio", "")
+                fim  = m.get("fim", "")
+                marc = m.get("marcacoes") or 0
+                msg += "  \u2022 " + str(m["medico"]) + n
+                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
 
-    if medicos_tarde:
-        msg += n + "*Turno Tarde (12h+)*" + n
-        for m in medicos_tarde:
-            ini  = m.get("inicio", "")
-            fim  = m.get("fim", "")
-            marc = m.get("marcacoes") or 0
-            msg += "  - " + str(m["medico"]) + ": " + num(marc) + " pac. (" + ini + "--" + fim + ")" + n
-
-    if not medicos_manha and not medicos_tarde and medicos:
-        msg += n + "*Medicos com Agenda Hoje*" + n
-        for m in medicos:
-            ini  = m.get("inicio", "")
-            fim  = m.get("fim", "")
-            marc = m.get("marcacoes") or 0
-            msg += "  - " + str(m["medico"]) + ": " + num(marc) + " pac. (" + ini + "--" + fim + ")" + n
+    # ── Equipe Multiprofissional ──────────────────────────────────────────────
+    if mult_manha or mult_tarde:
+        msg += n + "\u2501" * 28 + n
+        msg += "\U0001f3e5 *EQUIPE MULTIPROFISSIONAL*" + n
+        if mult_manha:
+            msg += n + "  \U0001f324\ufe0f _Manha_" + n
+            for m in mult_manha:
+                ini  = m.get("inicio", "")
+                fim  = m.get("fim", "")
+                marc = m.get("marcacoes") or 0
+                esp  = m.get("especialidade", "").strip()
+                msg += "  \u2022 " + str(m["medico"])
+                if esp:
+                    msg += "  _(" + esp + ")_"
+                msg += n
+                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
+        if mult_tarde:
+            msg += n + "  \U0001f306 _Tarde_" + n
+            for m in mult_tarde:
+                ini  = m.get("inicio", "")
+                fim  = m.get("fim", "")
+                marc = m.get("marcacoes") or 0
+                esp  = m.get("especialidade", "").strip()
+                msg += "  \u2022 " + str(m["medico"])
+                if esp:
+                    msg += "  _(" + esp + ")_"
+                msg += n
+                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
 
     if vagas_med:
-        msg += n + "*Vagas Disponiveis por Medico*" + n
+        msg += n + "\u2501" * 28 + n
+        msg += "\U0001f513 *VAGAS DISPONIVEIS POR PROFISSIONAL*" + n
         for v in vagas_med:
-            msg += "  - " + str(v["medico"]) + ": " + num(v["vagas"]) + " vagas" + n
+            msg += "  \u2022 " + str(v["medico"]) + ":  *" + num(v["vagas"]) + " vagas*" + n
 
-    msg += n + "_Dashboard Clinica - " + datetime.now().strftime("%H:%M") + "_"
+    msg += n + "\u2501" * 28 + n
+    msg += "_Dashboard Clinica  \u2022  " + datetime.now().strftime("%H:%M") + "_"
     return msg
 
 
@@ -444,71 +593,112 @@ def montar_fechamento(dados):
     cancelados    = agd.get("cancelados") or 0
     taxa_abs      = (faltantes / marcacoes * 100) if marcacoes > 0 else 0
     taxa_comp     = (compareceram / marcacoes * 100) if marcacoes > 0 else 0
-    abs_tag       = "[OK]" if taxa_abs <= 10 else "[ATENCAO]" if taxa_abs <= 25 else "[ALTO]"
-    n             = "\n"
+    abs_tag = "\u2705" if taxa_abs <= 10 else "\u26a0\ufe0f" if taxa_abs <= 25 else "\U0001f534"
+    n       = "\n"
 
-    msg  = "*Fechamento do Dia - " + hoje_fmt + "*" + n
-    msg += "_Relatorio de encerramento_" + n + n
-    msg += "-----------------------------" + n
-    msg += "*PRODUCAO TOTAL: " + brl(prod) + "*" + n
+    # ── Cabeçalho ─────────────────────────────────────────────────────────────
+    msg  = "\U0001f319 *FECHAMENTO DO DIA*" + n
+    msg += "\U0001f4c5 " + hoje_fmt + n
+    msg += "\u2501" * 28 + n + n
+
+    # ── Produção total ────────────────────────────────────────────────────────
+    msg += "\U0001f4b5 *PRODUCAO TOTAL*" + n
+    msg += "  \u27a4 *" + brl(prod) + "*" + n
     if prod_ano_ant:
         from datetime import datetime as _dt2
-        dias_pt = {"Monday":"Seg","Tuesday":"Ter","Wednesday":"Qua","Thursday":"Qui","Friday":"Sex","Saturday":"Sab","Sunday":"Dom"}
+        dias_pt = {"Monday":"Seg","Tuesday":"Ter","Wednesday":"Qua","Thursday":"Qui",
+                   "Friday":"Sex","Saturday":"Sab","Sunday":"Dom"}
         dia_sem = dias_pt.get(_dt2.strptime(hoje_ano_ant, "%Y-%m-%d").strftime("%A"), "") if hoje_ano_ant else ""
         var_pct = ((prod - prod_ano_ant) / prod_ano_ant * 100) if prod_ano_ant > 0 else 0
-        sinal = "+" if var_pct >= 0 else ""
-        msg += "  Mesmo dia " + hoje_ano_ant[:4] + " (" + dia_sem + "): *" + brl(prod_ano_ant) + "* | " + sinal + "{:.1f}".format(var_pct) + "%" + n
-    msg += "-----------------------------" + n
-    msg += "  Guias: *" + num(total_os) + "*  |  Pacientes: *" + num(pacientes) + "*" + n + n
-    msg += "*Por Modulo*" + n
-    msg += "  Assistencial: *" + brl(prod_ass) + "* (" + num(assistencial) + " guias)" + n
-    msg += "  Ocupacional:  *" + brl(prod_ocup) + "* (" + num(ocupacional) + " guias)" + n
-    if particular > 0:
-        msg += "  Particular:    *" + brl(particular) + "*" + n
+        sinal   = "+" if var_pct >= 0 else ""
+        msg += "  \U0001f4ca Mesmo dia " + hoje_ano_ant[:4] + " (" + dia_sem + "):  " + brl(prod_ano_ant) + n
+        msg += "  \U0001f4c8 Variacao:  *" + sinal + "{:.1f}%".format(var_pct) + "*" + n
+    msg += n
+    msg += "  \U0001f4c4 Guias: *" + num(total_os) + "*   |   \U0001f465 Pacientes: *" + num(pacientes) + "*" + n
 
+    # ── Por módulo ────────────────────────────────────────────────────────────
+    msg += n + "\u2501" * 28 + n
+    msg += "\U0001f539 *POR MODULO*" + n
+    msg += "  \U0001fa7a Assistencial:  *" + brl(prod_ass) + "*  (" + num(assistencial) + " guias)" + n
+    msg += "  \U0001f3ed Ocupacional:   *" + brl(prod_ocup) + "*  (" + num(ocupacional) + " guias)" + n
+    if particular > 0:
+        msg += "  \U0001f4b3 Particular:    *" + brl(particular) + "*" + n
+
+    # ── Convênios ─────────────────────────────────────────────────────────────
     if cnvs:
-        msg += n + "*Convenios (Assistencial)*" + n
+        msg += n + "\u2501" * 28 + n
+        msg += "\U0001f91d *CONVENIOS \u2014 ASSISTENCIAL*" + n
         for c in cnvs:
             nome = str(c["nome"])[:25].strip()
-            msg += "  - " + nome + ": *" + brl(c["producao"]) + "* (" + num(c["guias"]) + " guias, " + num(c["pacientes"]) + " pac.)" + n
+            msg += "  \u2022 " + nome + n
+            msg += "    *" + brl(c["producao"]) + "*  |  " + num(c["guias"]) + " guias  |  " + num(c["pacientes"]) + " pac." + n
 
+    # ── Empresas ──────────────────────────────────────────────────────────────
     if emps:
-        msg += n + "*Empresas (Ocupacional)*" + n
+        msg += n + "\u2501" * 28 + n
+        msg += "\U0001f3e2 *EMPRESAS \u2014 OCUPACIONAL*" + n
         for e in emps:
             nome = str(e["nome"])[:25].strip()
-            msg += "  - " + nome + ": *" + brl(e["producao"]) + "* (" + num(e["guias"]) + " guias, " + num(e["pacientes"]) + " pac.)" + n
+            msg += "  \u2022 " + nome + n
+            msg += "    *" + brl(e["producao"]) + "*  |  " + num(e["guias"]) + " guias  |  " + num(e["pacientes"]) + " pac." + n
 
+    # ── Equipe ────────────────────────────────────────────────────────────────
     if meds:
-        msg += n + "*Medicos que Atenderam*" + n
-        for m in meds:
-            msg += "  - " + str(m["medico"]) + ": " + num(m["guias"]) + " guias | " + num(m["pacientes"]) + " pac. | *" + brl(m["producao"]) + "*" + n
+        _MULT_CODES_F = {'PSC','NUT','FON','FIS','ENF','TER','FAR','ASS','SOC','PSQ','NEU','FIO'}
+        def _is_mult_f(m):
+            return m.get('esp_cod', '').strip().upper() in _MULT_CODES_F
+        meds_med  = [m for m in meds if not _is_mult_f(m)]
+        meds_mult = [m for m in meds if _is_mult_f(m)]
 
-    msg += n + "*Agenda do Dia*" + n
-    msg += "  Marcacoes:    " + num(marcacoes) + n
-    msg += "  Compareceram: *" + num(compareceram) + "* (" + "{:.1f}".format(taxa_comp) + "%)" + n
-    msg += "  Faltantes:    " + num(faltantes) + " " + abs_tag + " *" + "{:.1f}".format(taxa_abs) + "% absenteismo*" + n
-    msg += "  Cancelamentos: " + num(cancelados) + n
+        if meds_med:
+            msg += n + "\u2501" * 28 + n
+            msg += "\U0001fa7a *EQUIPE MEDICA*" + n
+            for m in meds_med:
+                msg += "  \u2022 " + str(m["medico"]) + n
+                msg += "    *" + brl(m["producao"]) + "*  |  " + num(m["guias"]) + " guias  |  " + num(m["pacientes"]) + " pac." + n
+
+        if meds_mult:
+            msg += n + "\U0001f3e5 *EQUIPE MULTIPROFISSIONAL*" + n
+            for m in meds_mult:
+                esp = m.get("especialidade", "").strip()
+                msg += "  \u2022 " + str(m["medico"])
+                if esp:
+                    msg += "  _(" + esp + ")_"
+                msg += n
+                msg += "    *" + brl(m["producao"]) + "*  |  " + num(m["guias"]) + " guias  |  " + num(m["pacientes"]) + " pac." + n
+
+    # ── Agenda ────────────────────────────────────────────────────────────────
+    msg += n + "\u2501" * 28 + n
+    msg += "\U0001f4c5 *AGENDA DO DIA*" + n
+    msg += "  \U0001f4cc Marcacoes:     *" + num(marcacoes) + "*" + n
+    msg += "  \u2705 Compareceram:  *" + num(compareceram) + "*  (" + "{:.1f}".format(taxa_comp) + "%)" + n
+    msg += "  " + abs_tag + " Absenteismo:   *" + "{:.1f}".format(taxa_abs) + "%*  (" + num(faltantes) + " faltantes)" + n
+    msg += "  \u274c Cancelamentos: *" + num(cancelados) + "*" + n
 
     if abs_m:
-        msg += n + "*Maiores Absenteismos*" + n
+        msg += n + "  _Maiores absenteismos:_" + n
         for a in abs_m:
             marc = a.get("marcacoes") or 1
             falt = a.get("faltantes") or 0
             pct  = falt / marc * 100
-            msg += "  - " + str(a["medico"]) + ": " + num(falt) + " falta(s) de " + num(marc) + " (" + "{:.0f}".format(pct) + "%)" + n
+            msg += "  \u2022 " + str(a["medico"]) + ":  " + num(falt) + "/" + num(marc) + "  (" + "{:.0f}".format(pct) + "%)" + n
 
+    # ── Metas ─────────────────────────────────────────────────────────────────
     sinal_dia = "+" if meta_dia_pct >= 100 else ""
     sinal_mes = "+" if meta_mes_pct >= 100 else ""
-    msg += n + "*Metas do Mes*" + n
-    msg += "  Meta mes:  *" + brl(meta_mensal) + "*" + n
-    msg += "  Meta dia:  *" + brl(meta_dia) + "* (media necessaria)" + n
-    msg += n + "*Producao do Mes*" + n
-    msg += "  Acumulado:    *" + brl(prod_mes) + "* (" + num(int(guias_mes)) + " guias)" + n
-    msg += "  Media diaria: *" + brl(media_dia) + "* vs meta *" + brl(meta_dia) + "* (" + sinal_dia + "{:.1f}".format(meta_dia_pct - 100) + "%)" + n
-    msg += "  Projecao mes: *" + brl(projecao) + "* vs meta *" + brl(meta_mensal) + "* (" + sinal_mes + "{:.1f}".format(meta_mes_pct - 100) + "%)" + n
-    msg += "  Falta para meta: *" + brl(falta_meta) + "*" + n
+    msg += n + "\u2501" * 28 + n
+    msg += "\U0001f3af *METAS DO MES*" + n
+    msg += "  Meta mensal:  *" + brl(meta_mensal) + "*" + n
+    msg += "  Meta diaria:  *" + brl(meta_dia) + "*" + n
 
-    msg += n + "_Enviado automaticamente as " + datetime.now().strftime("%H:%M") + " - Dashboard Clinica_"
+    msg += n + "\U0001f4c8 *PRODUCAO ACUMULADA*" + n
+    msg += "  Acumulado:    *" + brl(prod_mes) + "*  (" + num(int(guias_mes)) + " guias)" + n
+    msg += "  Media diaria: *" + brl(media_dia) + "*  vs  *" + brl(meta_dia) + "*  (" + sinal_dia + "{:.1f}%".format(meta_dia_pct - 100) + ")" + n
+    msg += "  Projecao mes: *" + brl(projecao) + "*  vs  *" + brl(meta_mensal) + "*  (" + sinal_mes + "{:.1f}%".format(meta_mes_pct - 100) + ")" + n
+    msg += "  Falta p/ meta: *" + brl(falta_meta) + "*" + n
+
+    msg += n + "\u2501" * 28 + n
+    msg += "_Dashboard Clinica  \u2022  " + datetime.now().strftime("%H:%M") + "_"
     return msg
 
 
@@ -562,6 +752,8 @@ def montar_mensagem(dados, turno):
     return montar_fechamento(dados)
 
 
+# ── Envio WPPConnect ─────────────────────────────────────────────────────────
+
 def _wpp_regenerar_token():
     """Regenera o token do WPPConnect automaticamente."""
     try:
@@ -573,7 +765,6 @@ def _wpp_regenerar_token():
         novo_token = data.get("token", "")
         if novo_token:
             os.environ["WPPCONNECT_TOKEN"] = novo_token
-            # Persiste no config do backend
             try:
                 requests.post(
                     "http://localhost:8000/api/whatsapp/config",
@@ -609,7 +800,6 @@ def enviar_wppconnect(mensagem, numero):
 
     try:
         resp = _tentar(token)
-        # Se 401 (token expirado), regenera e tenta novamente
         if resp.status_code == 401:
             print("[WPPConnect] Token expirado, regenerando...")
             novo = _wpp_regenerar_token()
@@ -715,3 +905,128 @@ def enviar_resumo(query_func, turno="auto", numero=None):
             "fechamento": {"mensagem": msg_fech,   "envio": r1},
             "previa":     {"mensagem": msg_amanha, "envio": r2},
         }
+
+
+# ── Health check da sessão WhatsApp ─────────────────────────────────────────
+
+def checar_status_wpp() -> dict:
+    """
+    Verifica se o provider WhatsApp está online e com sessão ativa.
+    Retorna dict com:
+      online    : bool  — provider acessível
+      conectado : bool  — sessão/celular conectado
+      provider  : str   — wppconnect | zapi | evolution
+      detalhe   : str   — mensagem descritiva
+      ts        : str   — horário da verificação
+    """
+    provider = os.getenv("WPP_PROVIDER", WPP_PROVIDER)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── WPPConnect ────────────────────────────────────────────────────────────
+    if provider == "wppconnect":
+        session = os.getenv("WPPCONNECT_SESSION", WPPCONNECT_SESSION)
+        token   = os.getenv("WPPCONNECT_TOKEN",   WPPCONNECT_TOKEN)
+        base    = os.getenv("WPPCONNECT_URL",      WPPCONNECT_URL)
+        url     = base + "/api/" + session + "/status-session"
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": "Bearer " + token},
+                timeout=5
+            )
+            if resp.status_code == 401:
+                # Token expirado — tenta renovar
+                novo = _wpp_regenerar_token()
+                if novo:
+                    resp = requests.get(
+                        url,
+                        headers={"Authorization": "Bearer " + novo},
+                        timeout=5
+                    )
+            data   = resp.json()
+            status = data.get("status", "")   # CONNECTED | DISCONNECTED | CLOSED etc.
+            state  = data.get("state",  "")
+            conectado = status in ("CONNECTED", "isLogged") or state in ("CONNECTED",)
+            return {
+                "online":    True,
+                "conectado": conectado,
+                "provider":  "wppconnect",
+                "status":    status or state,
+                "detalhe":   "Sessao ativa" if conectado else "Sessao desconectada — escaneie o QR Code",
+                "ts":        ts,
+            }
+        except requests.exceptions.ConnectionError:
+            return {
+                "online":    False,
+                "conectado": False,
+                "provider":  "wppconnect",
+                "status":    "offline",
+                "detalhe":   "WPPConnect nao encontrado em " + base + " — verifique se o servico esta rodando",
+                "ts":        ts,
+            }
+        except Exception as e:
+            return {
+                "online":    False,
+                "conectado": False,
+                "provider":  "wppconnect",
+                "status":    "erro",
+                "detalhe":   str(e)[:200],
+                "ts":        ts,
+            }
+
+    # ── Z-API ─────────────────────────────────────────────────────────────────
+    elif provider == "zapi":
+        inst  = os.getenv("ZAPI_INSTANCE",     ZAPI_INSTANCE)
+        tok   = os.getenv("ZAPI_TOKEN",        ZAPI_TOKEN)
+        ctok  = os.getenv("ZAPI_CLIENT_TOKEN", ZAPI_CLIENT_TOKEN)
+        url   = f"https://api.z-api.io/instances/{inst}/token/{tok}/status"
+        try:
+            resp = requests.get(url, headers={"Client-Token": ctok}, timeout=5)
+            data = resp.json()
+            conectado = data.get("connected", False)
+            return {
+                "online":    True,
+                "conectado": conectado,
+                "provider":  "zapi",
+                "status":    "connected" if conectado else "disconnected",
+                "detalhe":   "Sessao ativa" if conectado else "Sessao desconectada — verifique o Z-API",
+                "ts":        ts,
+            }
+        except Exception as e:
+            return {
+                "online":    False,
+                "conectado": False,
+                "provider":  "zapi",
+                "status":    "erro",
+                "detalhe":   str(e)[:200],
+                "ts":        ts,
+            }
+
+    # ── Evolution API ─────────────────────────────────────────────────────────
+    else:
+        base = os.getenv("EVOLUTION_URL",  EVOLUTION_URL)
+        k    = os.getenv("EVOLUTION_KEY",  EVOLUTION_KEY)
+        inst = os.getenv("EVOLUTION_INST", EVOLUTION_INST)
+        url  = base + "/instance/connectionState/" + inst
+        try:
+            resp = requests.get(url, headers={"apikey": k}, timeout=5)
+            data = resp.json()
+            state     = data.get("instance", {}).get("state", "") or data.get("state", "")
+            conectado = state in ("open", "CONNECTED")
+            return {
+                "online":    True,
+                "conectado": conectado,
+                "provider":  "evolution",
+                "status":    state,
+                "detalhe":   "Sessao ativa" if conectado else "Sessao desconectada — escaneie o QR Code no Evolution",
+                "ts":        ts,
+            }
+        except Exception as e:
+            return {
+                "online":    False,
+                "conectado": False,
+                "provider":  "evolution",
+                "status":    "erro",
+                "detalhe":   str(e)[:200],
+                "ts":        ts,
+            }

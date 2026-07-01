@@ -23,12 +23,634 @@ except ImportError:
     _WPP_AVAILABLE = False
 import pyodbc
 import os
+import re as _re
 from datetime import datetime, timedelta
+import httpx
+with open(r"C:\Dashboard\backend\.env", "r", encoding="utf-8-sig") as _f:
+    for _line in _f:
+        _line = _line.strip()
+        if _line and "=" in _line and not _line.startswith("#"):
+            _k, _v = _line.split("=", 1)
+            os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
+print("ENV LOADED:", os.environ.get("OPENAI_API_KEY", "NAO")[:10])
+import os as _os_test
+print("ENV TEST:", _os_test.environ.get("OPENAI_API_KEY", "NAO")[:10])
 
 app = FastAPI(title="Dashboard Clínica", version="1.1.0")
 
+# ← ADICIONE AQUI
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTH CENSO — Login via Pixeon + Permissões próprias
+# Cole no main.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+import hashlib, hmac
+from pydantic import BaseModel
+from fastapi import HTTPException
+
+# ── Todos os módulos disponíveis no sistema ───────────────────────────────────
+TODOS_MODULOS = [
+    {"id": "assistencial",  "label": "Assistencial"},
+    {"id": "ocupacional",   "label": "Med. Ocupacional"},
+    {"id": "servicos",      "label": "Serviços Especializados"},
+    {"id": "laboratorio",   "label": "Laboratório"},
+    {"id": "agendamentos",  "label": "Agendamentos"},
+    {"id": "producao",      "label": "Produção Mensal"},
+    {"id": "pacientesdb",   "label": "Pacientes DB"},
+    {"id": "estoque",       "label": "Estoque"},
+    {"id": "painel_tv",     "label": "Painel TV"},
+    {"id": "contratos",     "label": "Contratos"},
+]
+
+# ── Cria tabela de permissões se não existir ──────────────────────────────────
+def inicializar_tabela_permissoes():
+    """
+    Cria a tabela censo_permissoes no banco Smart se não existir.
+    Chame esta função no startup do FastAPI.
+    """
+    try:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute("""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_NAME = 'censo_permissoes'
+            )
+            CREATE TABLE censo_permissoes (
+                cp_login      VARCHAR(20)   NOT NULL,
+                cp_modulo     VARCHAR(30)   NOT NULL,
+                cp_ativo      CHAR(1)       NOT NULL DEFAULT 'S',
+                cp_dthr_alt   DATETIME      NOT NULL DEFAULT GETDATE(),
+                cp_login_alt  VARCHAR(20)   NULL,
+                CONSTRAINT PK_censo_permissoes PRIMARY KEY (cp_login, cp_modulo)
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print("[Auth] Tabela censo_permissoes OK")
+    except Exception as e:
+        print(f"[Auth] Erro ao criar tabela: {e}")
+
+
+# ── Adicione no startup do FastAPI ────────────────────────────────────────────
+# @app.on_event("startup")
+# async def startup_event():
+#     inicializar_tabela_permissoes()
+#     ... resto do startup
+
+
+# ── Helpers de senha ──────────────────────────────────────────────────────────
+def verificar_senha_pixeon(senha: str, hash_banco: str, salt: str) -> bool:
+    if not hash_banco or not salt:
+        return False
+    tentativa = hashlib.sha256((salt + senha).encode("utf-8")).hexdigest()
+    return hmac.compare_digest(tentativa.lower(), hash_banco.lower())
+
+def verificar_senha_md5(senha: str, hash_banco: str) -> bool:
+    if not hash_banco:
+        return False
+    tentativa = hashlib.md5(senha.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(tentativa.lower(), hash_banco.lower())
+
+def get_modulos_usuario(login: str) -> list:
+    """Busca módulos permitidos na tabela censo_permissoes."""
+    rows = query(
+        "SELECT cp_modulo FROM censo_permissoes WHERE RTRIM(cp_login)=? AND cp_ativo='S'",
+        (login.strip(),)
+    )
+    return [r["cp_modulo"] for r in rows]
+
+def is_admin_censo(login: str) -> bool:
+    """Verifica se o usuário é admin do Censo (nível 3 no Pixeon)."""
+    rows = query(
+        "SELECT RTRIM(USR_NIVEL) AS nivel FROM usr WHERE RTRIM(USR_LOGIN)=?",
+        (login.strip(),)
+    )
+    if not rows:
+        return False
+    return str(rows[0].get("nivel") or "").strip() == "3"
+
+
+# ── ENDPOINT: Login ───────────────────────────────────────────────────────────
+class LoginRequest(BaseModel):
+    login: str
+    senha: str
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
+
+# ── SERVE FRONTEND REACT ──────────────────────────────────────────────────────
+DIST = r"C:\Dashboard\frontend\dist"
+
+@app.post("/api/home/briefing")
+def home_briefing(payload: dict):
+    prompt = payload.get("prompt", "")
+    try:
+        import os
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        if not api_key:
+            return {"texto": "Configure a variável OPENAI_API_KEY no servidor."}
+        
+        res = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "max_tokens": 300,
+                "messages": [
+                    {"role": "system", "content": "Você é um analista de gestão clínica especialista financeiro com insights revolucionarios, sempre dê dicas que você achar importante para aumentar a produção. Responda sempre em português brasileiro, de forma direta e profissional."},
+                    {"role": "user", "content": prompt}
+                ],
+            },
+            timeout=30,
+        )
+        data = res.json()
+        texto = data["choices"][0]["message"]["content"]
+        return {"texto": texto}
+    except Exception as e:
+        return {"texto": f"Erro: {str(e)}"}
+
+@app.post("/api/home/briefing")
+def home_briefing(payload: dict):
+    prompt = payload.get("prompt", "")
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    print(f"DEBUG API KEY: '{api_key[:10] if api_key else 'VAZIO'}'")
+    ...
+
+@app.post("/api/auth/login")
+def auth_login(req: LoginRequest):
+    if not req.login.strip() or not req.senha:
+        raise HTTPException(400, "Login e senha obrigatórios")
+
+    # Busca usuário no Pixeon
+    rows = query("""
+        SELECT
+            RTRIM(USR_LOGIN)       AS login,
+            RTRIM(USR_NOME)        AS nome,
+            USR_NOME_COMPLETO      AS nome_completo,
+            RTRIM(USR_NIVEL)       AS nivel,
+            RTRIM(USR_STATUS)      AS status,
+            RTRIM(USR_SENHA)       AS senha_md5,
+            RTRIM(USR_SENHA_HASH)  AS senha_hash,
+            RTRIM(usr_salt_hash)   AS salt,
+            USR_EMAIL              AS email
+        FROM usr
+        WHERE RTRIM(USR_LOGIN) = ?
+    """, (req.login.strip(),))
+
+    if not rows:
+        raise HTTPException(401, "Usuário não encontrado")
+
+    u = rows[0]
+
+    # Verifica status
+    status = str(u.get("status") or "").strip().upper()
+    if status and status not in ("A", ""):
+        raise HTTPException(403, "Usuário inativo ou bloqueado")
+
+    # Verifica senha — SHA-256+salt primeiro, fallback MD5
+    autenticado = verificar_senha_pixeon(req.senha, u.get("senha_hash") or "", u.get("salt") or "")
+    if not autenticado:
+        autenticado = verificar_senha_md5(req.senha, u.get("senha_hash") or "")
+    if not autenticado:
+        senha_raw = str(u.get("senha_md5") or "").strip()
+        autenticado = req.senha.strip() == senha_raw
+
+    # Atualiza último login
+    try:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "UPDATE usr SET usr_dt_last_login=GETDATE() WHERE RTRIM(USR_LOGIN)=?",
+            (req.login.strip(),)
+        )
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+    login_str = str(u["login"]).strip()
+    modulos   = get_modulos_usuario(login_str)
+    admin     = is_admin_censo(login_str)
+
+    # Admin vê tudo automaticamente se não tiver permissões configuradas
+    if admin and not modulos:
+        modulos = [m["id"] for m in TODOS_MODULOS]
+
+    return {
+        "ok":      True,
+        "login":   login_str,
+        "nome":    (u.get("nome_completo") or u.get("nome") or login_str).strip(),
+        "nivel":   str(u.get("nivel") or "").strip(),
+        "email":   str(u.get("email") or "").strip(),
+        "admin":   admin,
+        "modulos": modulos,
+    }
+# Adicione este endpoint no main.py
+
+@app.get("/api/home/resumo")
+def home_resumo(periodo: str = "30d", setor: str = "todos"):
+    from datetime import datetime, date
+    import calendar
+
+    inicio, fim = periodo_datas(periodo)
+
+    d_ini = datetime.strptime(inicio, "%Y-%m-%d")
+    d_fim = datetime.strptime(fim,    "%Y-%m-%d")
+    delta = (d_fim - d_ini).days + 1
+    ant_fim = d_ini - timedelta(days=1)
+    ant_ini = ant_fim - timedelta(days=delta - 1)
+    ant_inicio_str = ant_ini.strftime("%Y-%m-%d")
+    ant_fim_str    = ant_fim.strftime("%Y-%m-%d")
+
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    SETOR_MAP = {
+        "assistencial": "('ASS','EME','CRG','TAM')",
+        "ocupacional":  "('ADM','PER','DEM','RTB','MDF','MOC')",
+        "diagnostico":  "('ASS','EME','CRG','TAM','ADM','PER','DEM','RTB','MDF','MOC')",
+        "rci":          "('ASS','EME','CRG','TAM','ADM','PER','DEM','RTB','MDF','MOC')",
+        "todos":        "('ASS','EME','CRG','TAM','ADM','PER','DEM','RTB','MDF','MOC')",
+    }
+    af = SETOR_MAP.get(setor, SETOR_MAP["todos"])
+
+    diag_filter = ""
+    if setor == "diagnostico":
+        diag_filter = "AND RTRIM(osm.osm_str) = 'RDI'"
+    elif setor == "rci":
+        diag_filter = "AND RTRIM(osm.osm_str) = 'RCI'"
+
+    def kpis_periodo(ini, fim_p):
+        r = query(f"""
+            SELECT
+                COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS total_os,
+                COUNT(DISTINCT osm.osm_pac)                        AS pacientes,
+                ISNULL(SUM({vliq}), 0)                             AS producao,
+                ISNULL(SUM({vliq}), 0) / NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num), 0) AS ticket_medio
+            FROM osm
+            JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+            WHERE osm.osm_dthr BETWEEN '{ini}' AND '{fim_p} 23:59:59'
+              AND osm.osm_atend IN {af}
+              AND smm.SMM_SFAT IN ('A','F','P')
+              {diag_filter}
+        """)
+        return r[0] if r else {}
+
+    kpis_atual    = kpis_periodo(inicio, fim)
+    kpis_anterior = kpis_periodo(ant_inicio_str, ant_fim_str)
+
+    # Produção por dia
+    por_dia = query(f"""
+        SELECT
+            CAST(osm.osm_dthr AS DATE)                         AS data,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+            ISNULL(SUM({vliq}), 0)                             AS producao
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND osm.osm_atend IN {af}
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {diag_filter}
+        GROUP BY CAST(osm.osm_dthr AS DATE)
+        ORDER BY data
+    """)
+    for r in por_dia:
+        if hasattr(r.get("data"), "strftime"):
+            r["data"] = r["data"].strftime("%Y-%m-%d")
+
+    # Top convênios
+    top_convenios = query(f"""
+        SELECT TOP 8
+            RTRIM(cnv.cnv_nome)                                AS convenio,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+            COUNT(DISTINCT osm.osm_pac)                        AS pacientes,
+            ISNULL(SUM({vliq}), 0)                             AS producao
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN cnv ON cnv.cnv_cod=osm.osm_cnv
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND osm.osm_atend IN {af}
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {diag_filter}
+        GROUP BY RTRIM(cnv.cnv_nome)
+        ORDER BY producao DESC
+    """)
+
+    # Top profissionais
+    top_profissionais = query(f"""
+        SELECT TOP 10
+            RTRIM(psv.psv_apel)                                AS profissional,
+            RTRIM(psv.psv_nome)                                AS nome_completo,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+            COUNT(DISTINCT osm.osm_pac)                        AS pacientes,
+            ISNULL(SUM({vliq}), 0)                             AS producao
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN psv ON psv.psv_cod=osm.osm_mreq
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND osm.osm_atend IN {af}
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_mreq IS NOT NULL
+          {diag_filter}
+        GROUP BY RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)
+        ORDER BY producao DESC
+    """)
+
+    # Absenteísmo
+    absenteismo = {}
+    if setor in ("assistencial", "todos"):
+        abs_data = query(f"""
+            SELECT
+                SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B') THEN 1 ELSE 0 END) AS marcacoes,
+                SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B')
+                     AND agm.agm_stat <> 'E' AND agm.AGM_OSM_SERIE IS NULL THEN 1 ELSE 0 END)      AS faltantes,
+                SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat='C' THEN 1 ELSE 0 END)              AS cancelados
+            FROM agm
+            WHERE agm.agm_hini BETWEEN '{inicio}' AND '{fim} 23:59:59'
+        """)
+        absenteismo = abs_data[0] if abs_data else {}
+
+    # KPIs por setor (sempre usa todos os setores para comparação)
+    setores_kpi = query(f"""
+        SELECT
+            CASE
+                WHEN osm.osm_atend IN ('ASS','EME','CRG','TAM')             THEN 'Assistencial'
+                WHEN osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC') THEN 'Ocupacional'
+                ELSE 'Outros'
+            END AS setor,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+            ISNULL(SUM({vliq}), 0)                             AS producao
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND osm.osm_atend IN ('ASS','EME','CRG','TAM','ADM','PER','DEM','RTB','MDF','MOC')
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY CASE
+            WHEN osm.osm_atend IN ('ASS','EME','CRG','TAM')             THEN 'Assistencial'
+            WHEN osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC') THEN 'Ocupacional'
+            ELSE 'Outros'
+        END
+        ORDER BY producao DESC
+    """)
+
+    # KPI Diagnóstico separado
+    diag_kpi = query(f"""
+        SELECT
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+            ISNULL(SUM({vliq}), 0)                             AS producao
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND osm.osm_atend IN ('ASS','EME','CRG','TAM')
+          AND RTRIM(smm.SMM_ESP) = 'LAB'
+          AND smm.SMM_SFAT IN ('A','F','P')
+    """)
+    if diag_kpi:
+        setores_kpi.append({"setor": "Diagnóstico", "os": diag_kpi[0]["os"], "producao": diag_kpi[0]["producao"]})
+
+    # Projeção do mês
+    hoje = date.today()
+    dias_uteis_passados = len([r for r in por_dia if r.get("producao", 0) > 0])
+    prod_acumulada = kpis_atual.get("producao", 0) or 0
+    total_dias_mes = calendar.monthrange(hoje.year, hoje.month)[1]
+    dias_restantes = sum(
+        1 for d in range(hoje.day + 1, total_dias_mes + 1)
+        if date(hoje.year, hoje.month, d).weekday() != 6
+    )
+    media_diaria = prod_acumulada / dias_uteis_passados if dias_uteis_passados > 0 else 0
+    projecao_mes = prod_acumulada + (media_diaria * dias_restantes)
+
+    def var_pct(atual, anterior):
+        if not anterior or anterior == 0:
+            return None
+        return round(((atual - anterior) / anterior) * 100, 1)
+
+    variacoes = {
+        "producao":     var_pct(kpis_atual.get("producao", 0),     kpis_anterior.get("producao", 0)),
+        "total_os":     var_pct(kpis_atual.get("total_os", 0),      kpis_anterior.get("total_os", 0)),
+        "pacientes":    var_pct(kpis_atual.get("pacientes", 0),     kpis_anterior.get("pacientes", 0)),
+        "ticket_medio": var_pct(kpis_atual.get("ticket_medio", 0),  kpis_anterior.get("ticket_medio", 0)),
+    }
+
+    return {
+        "kpis":              kpis_atual,
+        "kpis_anterior":     kpis_anterior,
+        "variacoes":         variacoes,
+        "por_dia":           por_dia,
+        "top_convenios":     top_convenios,
+        "top_profissionais": top_profissionais,
+        "absenteismo":       absenteismo,
+        "setores_kpi":       setores_kpi,
+        "projecao": {
+            "valor":               round(projecao_mes, 2),
+            "media_diaria":        round(media_diaria, 2),
+            "dias_uteis_passados": dias_uteis_passados,
+            "dias_restantes":      dias_restantes,
+            "acumulado":           round(prod_acumulada, 2),
+        },
+        "setor":   setor,
+        "periodo": periodo,
+    }
+
+
+# ── ENDPOINT: Listar usuários com permissões ──────────────────────────────────
+@app.get("/api/auth/usuarios")
+def auth_usuarios(busca: str = ""):
+    """Lista usuários do Pixeon com suas permissões no Censo."""
+    filtro = f"AND (RTRIM(u.USR_NOME) LIKE '%{busca}%' OR RTRIM(u.USR_LOGIN) LIKE '%{busca}%')" if busca else ""
+    rows = query(f"""
+        SELECT TOP 100
+            RTRIM(u.USR_LOGIN)        AS login,
+            RTRIM(u.USR_NOME)         AS nome,
+            u.USR_NOME_COMPLETO       AS nome_completo,
+            RTRIM(u.USR_NIVEL)        AS nivel,
+            RTRIM(u.USR_STATUS)       AS status,
+            u.USR_EMAIL               AS email,
+            u.usr_dt_last_login       AS ultimo_login
+        FROM usr u
+        WHERE RTRIM(u.USR_STATUS) = 'A'
+          AND u.USR_LOGIN IS NOT NULL
+          AND LTRIM(RTRIM(u.USR_LOGIN)) <> ''
+          {filtro}
+        ORDER BY RTRIM(u.USR_NOME)
+    """)
+
+    # Para cada usuário, busca seus módulos
+    for r in rows:
+        login = str(r["login"]).strip()
+        modulos = query(
+            "SELECT cp_modulo FROM censo_permissoes WHERE RTRIM(cp_login)=? AND cp_ativo='S'",
+            (login,)
+        )
+        r["modulos"] = [m["cp_modulo"] for m in modulos]
+        r["admin"]   = str(r.get("nivel") or "").strip() == "3"
+        if r.get("ultimo_login") and hasattr(r["ultimo_login"], "strftime"):
+            r["ultimo_login"] = r["ultimo_login"].strftime("%d/%m/%Y %H:%M")
+
+    return rows
+
+
+# ── ENDPOINT: Salvar permissões de um usuário ─────────────────────────────────
+class PermissaoRequest(BaseModel):
+    login:       str
+    modulos:     list   # lista de IDs de módulos permitidos
+    login_admin: str    # quem está alterando
+
+@app.post("/api/auth/permissoes")
+def salvar_permissoes(req: PermissaoRequest):
+    """
+    Substitui os módulos de um usuário.
+    Recebe a lista completa de módulos permitidos.
+    """
+    login = req.login.strip()
+    if not login:
+        raise HTTPException(400, "Login obrigatório")
+
+    # Verifica se usuário existe no Pixeon
+    existe = query("SELECT 1 AS ok FROM usr WHERE RTRIM(USR_LOGIN)=?", (login,))
+    if not existe:
+        raise HTTPException(404, "Usuário não encontrado no Pixeon")
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    try:
+        # Remove todas as permissões atuais
+        cur.execute(
+            "DELETE FROM censo_permissoes WHERE RTRIM(cp_login)=?",
+            (login,)
+        )
+        # Insere as novas
+        for modulo in req.modulos:
+            cur.execute("""
+                INSERT INTO censo_permissoes (cp_login, cp_modulo, cp_ativo, cp_dthr_alt, cp_login_alt)
+                VALUES (?, ?, 'S', GETDATE(), ?)
+            """, (login, modulo, req.login_admin.strip()))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(500, f"Erro ao salvar: {e}")
+    finally:
+        conn.close()
+
+    return {"ok": True, "login": login, "modulos": req.modulos}
+
+
+# ── ENDPOINT: Módulos disponíveis ─────────────────────────────────────────────
+@app.get("/api/auth/modulos")
+def auth_modulos():
+    """Retorna lista de todos os módulos do sistema."""
+    return TODOS_MODULOS
+
+[{
+	"resource": "/c:/Dashboard/backend/main.py",
+	"owner": "Pylance4",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "\"app\" is not defined",
+	"source": "Pylance",
+	"startLineNumber": 126,
+	"startColumn": 2,
+	"endLineNumber": 126,
+	"endColumn": 5,
+	"modelVersionId": 194,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Dashboard/backend/main.py",
+	"owner": "Pylance4",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "\"app\" is not defined",
+	"source": "Pylance",
+	"startLineNumber": 197,
+	"startColumn": 2,
+	"endLineNumber": 197,
+	"endColumn": 5,
+	"modelVersionId": 194,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Dashboard/backend/main.py",
+	"owner": "Pylance4",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "\"app\" is not defined",
+	"source": "Pylance",
+	"startLineNumber": 239,
+	"startColumn": 2,
+	"endLineNumber": 239,
+	"endColumn": 5,
+	"modelVersionId": 194,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Dashboard/backend/main.py",
+	"owner": "Pylance4",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 4,
+	"message": "\"app\" is not defined",
+	"source": "Pylance",
+	"startLineNumber": 279,
+	"startColumn": 2,
+	"endLineNumber": 279,
+	"endColumn": 5,
+	"modelVersionId": 194,
+	"origin": "extHost1"
+}]
+
 @app.on_event("startup")
 async def startup_event():
+     # Carrega .env
+    env_path = r"C:\Dashboard\backend\.env"
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    os.environ[k.strip()] = v.strip().strip('"').strip("'")
+    print("OPENAI KEY no startup:", os.environ.get("OPENAI_API_KEY", "NAO")[:10])
+
+    inicializar_tabela_permissoes()
     if _WPP_AVAILABLE:
         try:
             from scheduler import set_query_func, iniciar_scheduler_em_background
@@ -38,12 +660,6 @@ async def startup_event():
         except Exception as e:
             print(f"[Startup] Erro ao iniciar scheduler: {e}")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Em produção, restrinja ao domínio do frontend
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
 
 # ─── Conexão SQL Server ────────────────────────────────────────────────────────
 def get_conn():
@@ -966,94 +1582,33 @@ def comparativo_pacientes(periodo: str = "30d", anos: int = 2):
 # ══════════════════════════════════════════════════════════════════════════════
 # PACIENTES — TOP ATENDIMENTOS E ANIVERSARIANTES
 # ══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/pacientes/top-atendimentos")
-def pacientes_top_atendimentos(
-    periodo: str = "30d",
-    inicio: str = None,
-    fim: str = None,
-    todo_periodo: bool = False,
-    limite: int = 15
-):
-    """
-    Top pacientes por número de atendimentos.
-    todo_periodo=true  → sem filtro de data (histórico completo)
-    inicio+fim         → datas customizadas
-    periodo            → usa periodo_datas()
-    """
-    if todo_periodo:
-        rows = query("""
-            SELECT TOP (?)
-                pac.pac_reg                                             AS cod_paciente,
-                pac.pac_nome                                            AS nome,
-                DATEDIFF(year, pac.pac_nasc, GETDATE())                AS idade,
-                pac.pac_sexo                                            AS sexo,
-                COUNT(DISTINCT osm.osm_serie * 1000000 + osm.osm_num)  AS total_atendimentos,
-                MAX(osm.osm_dthr)                                       AS ultimo_atendimento,
-                cnv.cnv_nome                                            AS convenio
-            FROM osm
-            JOIN pac ON pac.pac_reg = osm.osm_pac
-            LEFT JOIN cnv ON cnv.cnv_cod = osm.osm_cnv AND cnv.cnv_stat = 'A'
-            WHERE pac.pac_dt_obito IS NULL
-            GROUP BY pac.pac_reg, pac.pac_nome, pac.pac_nasc, pac.pac_sexo, cnv.cnv_nome
-            ORDER BY total_atendimentos DESC
-        """, (limite,))
-    else:
-        if not inicio or not fim:
-            inicio, fim = periodo_datas(periodo)
-        rows = query("""
-            SELECT TOP (?)
-                pac.pac_reg                                             AS cod_paciente,
-                pac.pac_nome                                            AS nome,
-                DATEDIFF(year, pac.pac_nasc, GETDATE())                AS idade,
-                pac.pac_sexo                                            AS sexo,
-                COUNT(DISTINCT osm.osm_serie * 1000000 + osm.osm_num)  AS total_atendimentos,
-                MAX(osm.osm_dthr)                                       AS ultimo_atendimento,
-                cnv.cnv_nome                                            AS convenio
-            FROM osm
-            JOIN pac ON pac.pac_reg = osm.osm_pac
-            LEFT JOIN cnv ON cnv.cnv_cod = osm.osm_cnv AND cnv.cnv_stat = 'A'
-            WHERE osm.osm_dthr BETWEEN ? AND ?
-              AND pac.pac_dt_obito IS NULL
-            GROUP BY pac.pac_reg, pac.pac_nome, pac.pac_nasc, pac.pac_sexo, cnv.cnv_nome
-            ORDER BY total_atendimentos DESC
-        """, (limite, inicio, fim))
-    return rows
-
-
 @app.get("/api/pacientes/aniversariantes")
 def pacientes_aniversariantes(mes: int = None):
-    """
-    Aniversariantes do mês informado (1-12).
-    Se mes não informado, usa o mês atual.
-    Usa pac_nasc — campo validado no dicionário Pixeon.
-    """
-    if mes is None:
-        mes = datetime.now().month
-    mes = max(1, min(12, mes))
-    rows = query("""
+    mes_atual = mes or datetime.now().month
+    rows = query(f"""
         SELECT
-            pac.pac_reg                                     AS cod_paciente,
-            pac.pac_nome                                    AS nome,
-            pac.pac_nasc                                    AS nascimento,
-            DATEDIFF(year, pac.pac_nasc, GETDATE())        AS idade,
-            DAY(pac.pac_nasc)                               AS dia,
-            pac.pac_sexo                                    AS sexo,
-            pac.pac_dult                                    AS ultimo_atendimento
+            RTRIM(pac.pac_nome)                         AS nome,
+            DAY(pac.pac_nasc)                           AS dia,
+            DATEDIFF(year, pac.pac_nasc, GETDATE())     AS idade,
+            RTRIM(pac.pac_sexo)                         AS sexo,
+            RTRIM(ISNULL(pac.PAC_FONE,''))              AS fone,
+            RTRIM(ISNULL(pac.PAC_CELULAR,''))           AS celular,
+            RTRIM(ISNULL(pac.pac_ind_whatsapp,''))      AS whatsapp,
+            CONVERT(VARCHAR(10), MAX(osm.osm_dthr), 120) AS ultimo_atendimento
         FROM pac
-        WHERE MONTH(pac.pac_nasc) = ?
+        LEFT JOIN osm ON osm.osm_pac = pac.pac_reg
+        WHERE MONTH(pac.pac_nasc) = {mes_atual}
           AND pac.pac_nasc IS NOT NULL
-          AND pac.pac_dt_obito IS NULL
-        ORDER BY DAY(pac.pac_nasc), pac.pac_nome
-    """, (mes,))
-    for r in rows:
-        if r.get("nascimento"):
-            r["nascimento"] = r["nascimento"].strftime("%d/%m/%Y") if hasattr(r["nascimento"], "strftime") else str(r["nascimento"])
-        if r.get("ultimo_atendimento"):
-            r["ultimo_atendimento"] = r["ultimo_atendimento"].strftime("%d/%m/%Y") if hasattr(r["ultimo_atendimento"], "strftime") else str(r["ultimo_atendimento"])
+          AND (pac.pac_dt_obito IS NULL OR pac.pac_dt_obito = '')
+        GROUP BY
+            RTRIM(pac.pac_nome), DAY(pac.pac_nasc),
+            pac.pac_nasc, RTRIM(pac.pac_sexo),
+            RTRIM(ISNULL(pac.PAC_FONE,'')),
+            RTRIM(ISNULL(pac.PAC_CELULAR,'')),
+            RTRIM(ISNULL(pac.pac_ind_whatsapp,''))
+        ORDER BY DAY(pac.pac_nasc), RTRIM(pac.pac_nome)
+    """)
     return rows
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # PRODUÇÃO MENSAL — grade diária por tipo de atendimento
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1196,8 +1751,155 @@ def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None,
         "dias_restantes":     dias_restantes,
         "dias_uteis_mes":     dias_uteis_mes,
     }
+# Adicione este endpoint no main.py logo após o /api/financeiro/producao-mensal
 
+@app.get("/api/financeiro/producao-mensal/profissionais")
+def producao_mensal_profissionais(ano: int = None, mes: int = None):
+    now = datetime.now()
+    if not ano: ano = now.year
+    if not mes: mes = now.month
+    import calendar
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    inicio = f"{ano}-{mes:02d}-01"
+    fim    = f"{ano}-{mes:02d}-{ultimo_dia}"
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+    def fix_str(s):
+        if not s: return s
+        try:
+            return s.encode("latin-1").decode("utf-8").strip()
+        except:
+            return s.strip()
+    def classificar(nome):
+        if not nome: return "Outros"
+        n = nome.upper()
+        if "CONSULTA" in n: return "Consulta"
+        if "EXAME" in n or "PESQUISA" in n or "DOSAGEM" in n or "ANALISE" in n or "ANALISE" in n: return "Exame"
+        if "RAIO" in n or "ULTRASSOM" in n or "ULTRASSONOGRAFIA" in n or "RADIOGRAFIA" in n or "TOMOGRAFIA" in n: return "Imagem"
+        if "PROCEDIMENTO" in n or "CURATIVO" in n or "SUTURA" in n: return "Procedimento"
+        return "Outros"
+    executado = query(f"""
+        SELECT
+            ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)) AS profissional,
+            RTRIM(esp.esp_nome)                                AS esp_nome,
+            RTRIM(sk.SMK_NOME)                                 AS servico_nome,
+            ISNULL(SUM({vliq}), 0)                             AS producao_executada,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)  AS os_executadas,
+            COUNT(DISTINCT osm.osm_pac)                         AS pacientes
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN smk sk ON sk.SMK_COD = smm.SMM_COD
+        JOIN psv ON psv.psv_cod = COALESCE(smm.SMM_MED, osm.osm_mreq) AND psv.PSV_TIPO = \'M\'
+        LEFT JOIN esp ON esp.esp_cod = sk.SMK_ESP_COD
+        WHERE osm.osm_dthr BETWEEN \'{inicio}\' AND \'{fim} 23:59:59\'
+          AND smm.SMM_SFAT IN (\'A\',\'F\',\'P\')
+        GROUP BY ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)), RTRIM(esp.esp_nome), RTRIM(sk.SMK_NOME)
+    """)
+    solicitado = query(f"""
+        SELECT
+            ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)) AS profissional,
+            RTRIM(sk.SMK_NOME)                                 AS servico_nome,
+            ISNULL(SUM({vliq}), 0)                             AS producao_solicitada,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)  AS os_solicitadas
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN smk sk ON sk.SMK_COD = smm.SMM_COD
+        JOIN psv ON psv.psv_cod = osm.osm_mreq AND psv.PSV_TIPO = \'M\'
+        WHERE osm.osm_dthr BETWEEN \'{inicio}\' AND \'{fim} 23:59:59\'
+          AND smm.SMM_SFAT IN (\'A\',\'F\',\'P\')
+          AND smm.SMM_MED IS NOT NULL
+          AND smm.SMM_MED <> osm.osm_mreq
+        GROUP BY ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)), RTRIM(sk.SMK_NOME)
+    """)
+    from collections import defaultdict
+    merged = defaultdict(lambda: {
+        "especialidades": set(),
+        "classes_exec": set(), "classes_solic": set(),
+        "producao_total": 0, "total_os": 0, "pacientes": 0,
+        "producao_solicitada": 0, "os_solicitadas": 0,
+    })
+    for e in executado:
+        k = e["profissional"]
+        merged[k]["producao_total"] += float(e["producao_executada"] or 0)
+        merged[k]["total_os"]       += int(e["os_executadas"] or 0)
+        merged[k]["pacientes"]      += int(e["pacientes"] or 0)
+        if e.get("esp_nome"): merged[k]["especialidades"].add(fix_str(e["esp_nome"]))
+        merged[k]["classes_exec"].add(classificar(e.get("servico_nome")))
+    for s in solicitado:
+        k = s["profissional"]
+        merged[k]["producao_solicitada"] += float(s["producao_solicitada"] or 0)
+        merged[k]["os_solicitadas"]      += int(s["os_solicitadas"] or 0)
+        merged[k]["classes_solic"].add(classificar(s.get("servico_nome")))
+    result = []
+    for prof, v in merged.items():
+        result.append({
+            "profissional":        prof,
+            "especialidades":      sorted([e for e in v["especialidades"] if e]),
+            "classes_executadas":  sorted(list(v["classes_exec"])),
+            "classes_solicitadas": sorted(list(v["classes_solic"])),
+            "producao_total":      round(v["producao_total"], 2),
+            "total_os":            v["total_os"],
+            "pacientes":           v["pacientes"],
+            "producao_solicitada": round(v["producao_solicitada"], 2),
+            "os_solicitadas":      v["os_solicitadas"],
+        })
+    return sorted(result, key=lambda x: -x["producao_total"])
 
+@app.get("/api/financeiro/producao-mensal/profissional-servicos")
+def producao_profissional_servicos(profissional: str, ano: int = None, mes: int = None):
+    now = datetime.now()
+    if not ano: ano = now.year
+    if not mes: mes = now.month
+
+    import calendar
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    inicio = f"{ano}-{mes:02d}-01"
+    fim    = f"{ano}-{mes:02d}-{ultimo_dia}"
+
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    # Serviços executados
+    executados = query(f"""
+        SELECT
+            RTRIM(sk.SMK_NOME)                                 AS servico,
+            RTRIM(esp.esp_nome)                                AS especialidade,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)  AS qtd_os,
+            COUNT(smm.SMM_NUM)                                 AS qtd_itens,
+            ISNULL(SUM({vliq}), 0)                             AS valor
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN smk sk ON sk.SMK_COD = smm.SMM_COD
+        JOIN psv ON psv.psv_cod = COALESCE(smm.SMM_MED, osm.osm_mreq)
+        LEFT JOIN esp ON esp.esp_cod = sk.SMK_ESP_COD
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)) = '{profissional}'
+        GROUP BY RTRIM(sk.SMK_NOME), RTRIM(esp.esp_nome)
+        ORDER BY valor DESC
+    """)
+
+    # Serviços solicitados
+    solicitados = query(f"""
+        SELECT
+            RTRIM(sk.SMK_NOME)                                 AS servico,
+            RTRIM(esp.esp_nome)                                AS especialidade,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)  AS qtd_os,
+            COUNT(smm.SMM_NUM)                                 AS qtd_itens,
+            ISNULL(SUM({vliq}), 0)                             AS valor
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN smk sk ON sk.SMK_COD = smm.SMM_COD
+        JOIN psv ON psv.psv_cod = osm.osm_mreq
+        LEFT JOIN esp ON esp.esp_cod = sk.SMK_ESP_COD
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND smm.SMM_MED IS NOT NULL
+          AND smm.SMM_MED <> osm.osm_mreq
+          AND ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)) = '{profissional}'
+        GROUP BY RTRIM(sk.SMK_NOME), RTRIM(esp.esp_nome)
+        ORDER BY valor DESC
+    """)
+
+    return { "executados": executados, "solicitados": solicitados }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AGENDA DO MÉDICO
@@ -1424,25 +2126,21 @@ def assistencial_medicos_por_especialidade(periodo: str = "30d", especialidade: 
     rows = query(f"""
         SELECT TOP 20
             ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome))       AS medico,
+            RTRIM(psv.psv_nome)                                      AS nome_completo,
             COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)       AS qtd,
             COUNT(DISTINCT osm.osm_pac)                              AS pacientes,
-            (
-                SELECT ISNULL(SUM(s.SMM_VLR - ISNULL(s.SMM_VLR_ESTORNO,0)),0)
-                FROM smm s
-                WHERE s.SMM_OSM_SERIE = osm.osm_serie
-                  AND s.SMM_OSM = osm.osm_num
-                  AND s.SMM_SFAT IN ('A','F','P')
-            )                                                        AS valor
+            SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) AS valor
         FROM osm
-        JOIN psv  ON psv.psv_cod  = osm.osm_mreq
-        LEFT JOIN agm ON agm.agm_id   = osm.OSM_AGM_ID
-        LEFT JOIN esp ON esp.esp_cod  = COALESCE(psv.psv_esp_cod, agm.AGM_ESP_COD)
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN psv ON psv.psv_cod = osm.osm_mreq
         WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
-          AND osm.osm_atend IN ({atends})
-          AND ISNULL(esp.esp_nome, 'Não informado') = '{especialidade}'
-        GROUP BY ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)),
-                 osm.osm_serie, osm.osm_num, osm.osm_pac
+            AND osm.osm_atend IN ({atends})
+            AND RTRIM(smm.SMM_ESP) = '{especialidade}'
+            AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY ISNULL(RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)), RTRIM(psv.psv_nome)
+        ORDER BY valor DESC
     """)
+    return rows
     # Agrupa por médico
     from collections import defaultdict
     med = defaultdict(lambda: {"qtd":0,"pacientes":set(),"valor":0.0})
@@ -2194,8 +2892,9 @@ def agendamentos_modulo_resumo(periodo: str = "30d"):
                agm_grp.faltantes,
                agm_grp.cancelados,
                agm_grp.taxa_exec,
-               -- Vagas disponíveis via EX_HORARIOS
-               ISNULL(eh_grp.vagas_disp, 0)                                     AS vagas_disp
+               ISNULL(eh_grp.vagas_disp, 0)                                     AS vagas_disp,
+               -- ENCAIXE: pacientes atendidos pelo médico no período que NÃO tinham agendamento
+               ISNULL(enc.encaixe, 0)                                            AS encaixe
         FROM (
             SELECT
                agm.agm_med                                                       AS psv_cod,
@@ -2228,15 +2927,37 @@ def agendamentos_modulo_resumo(periodo: str = "30d"):
             GROUP BY agm.agm_med
         ) agm_grp
         JOIN psv ON psv.psv_cod = agm_grp.psv_cod
-        -- Vagas disponíveis do período via EX_HORARIOS
         LEFT JOIN (
             SELECT HOR_MED, COUNT(*) AS vagas_disp
             FROM EX_HORARIOS
             WHERE HOR_DATA BETWEEN '{inicio}' AND '{fim}'
             GROUP BY HOR_MED
         ) eh_grp ON eh_grp.HOR_MED = agm_grp.psv_cod
+        -- Subquery de encaixe: OSs do médico no período SEM agendamento correspondente
+        LEFT JOIN (
+            SELECT
+                o.osm_mreq                                                      AS psv_cod,
+                COUNT(DISTINCT o.osm_serie * 1000000 + o.osm_num)              AS encaixe
+            FROM osm o
+            WHERE o.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND o.osm_mreq IS NOT NULL
+              AND o.osm_mreq > 0
+              -- Atendimento SEM agendamento: não existe AGM para este paciente
+              -- no mesmo dia e com o mesmo médico dentro da janela de tempo
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM agm a2
+                  WHERE a2.agm_pac = o.osm_pac
+                    AND a2.agm_med = o.osm_mreq
+                    AND CAST(a2.agm_hini AS DATE) = CAST(o.osm_dthr AS DATE)
+                    AND a2.agm_stat NOT IN ('C','B')
+                    AND DATEDIFF(minute, a2.agm_hini, o.osm_dthr) BETWEEN -30 AND 180
+              )
+            GROUP BY o.osm_mreq
+        ) enc ON enc.psv_cod = agm_grp.psv_cod
         ORDER BY agm_grp.marcacoes DESC
     """)
+
     # Por dia
     por_dia = query(f"""
         SELECT CAST(agm.agm_hini AS DATE) AS data,
@@ -2532,6 +3253,72 @@ def wpp_preview(turno: str = "manha"):
     except Exception as e:
         return {"erro": str(e)}
 
+# Adicionar no main.py logo após o endpoint /api/whatsapp/preview
+# (depois da linha que começa com: "    except Exception as e:")
+# (depois do bloco def wpp_preview)
+
+@app.get("/api/debug/fle-colunas")
+def debug_fle_colunas():
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    cols = query("""
+        SELECT COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'fle'
+        ORDER BY ORDINAL_POSITION
+    """)
+    sample = query(f"""
+        SELECT TOP 2 * FROM fle
+        WHERE CAST(FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+        ORDER BY FLE_DTHR_CHEGADA DESC
+    """)
+    for r in sample:
+        for k, v in r.items():
+            if hasattr(v, 'strftime'): r[k] = v.strftime('%Y-%m-%d %H:%M:%S')
+    loc_cols = query("""
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = 'loc' ORDER BY ORDINAL_POSITION
+    """)
+    loc_sample = query("SELECT TOP 5 * FROM loc")
+    return {
+        "fle_colunas": cols,
+        "fle_amostra": sample,
+        "loc_colunas": loc_cols,
+        "loc_amostra": loc_sample,
+    }
+
+@app.get("/api/whatsapp/status")
+def wpp_status():
+    """
+    Health check da sessão WhatsApp.
+    Verifica se o provider está online e com o celular conectado.
+    Retorna:
+      online    : provider acessível
+      conectado : sessão ativa (celular pareado)
+      detalhe   : mensagem explicativa
+    """
+    if not _WPP_AVAILABLE:
+        return {
+            "online":    False,
+            "conectado": False,
+            "provider":  "desconhecido",
+            "status":    "indisponivel",
+            "detalhe":   "whatsapp_sender.py nao encontrado",
+            "ts":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    try:
+        from whatsapp_sender import checar_status_wpp
+        return checar_status_wpp()
+    except Exception as e:
+        return {
+            "online":    False,
+            "conectado": False,
+            "provider":  "erro",
+            "status":    "erro",
+            "detalhe":   str(e)[:200],
+            "ts":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+
 @app.get("/api/estoque/sintetico")
 def estoque_sintetico(data_inicio: str = "2024-01-01", data_fim: str = ""):
     """Relatório sintético de saldos por grupo — como o PDF Sintético."""
@@ -2825,7 +3612,7 @@ def debug_estoque2():
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/estoque/resumo")
-def estoque_resumo(periodo: str = "30d", data_inicio: str = "2024-01-01"):
+def estoque_resumo(periodo: str = "30d", data_inicio: str = "2025-01-01", data_fim: str = ""):
     inicio, fim = periodo_datas(periodo)
     
     # KPIs — filtra apenas materiais com movimentação a partir de data_inicio
@@ -6071,6 +6858,1044 @@ def debug_setores_lab():
         ORDER BY qtd_itens DESC
     """)
     return r1
+# ══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS DOS PAINÉIS TV — Somente leitura da FLE
+# Cole no main.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/painel-fila/senhas")
+def painel_fila_senhas(limite: int = 8):
+    """
+    Painel TV — Senhas chamadas pela recepção (guichês).
+    Fonte: FLE onde FLE_BIP está preenchido (senha do totem)
+    e FLE_DTHR_ATENDIMENTO foi atualizado pelo Smart.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(ISNULL(fle.FLE_BIP, ''))                          AS senha,
+            CAST(fle.FLE_ORDEM AS INT)                              AS ordem,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(psv.psv_nome)                                     AS psv_nome,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            RTRIM(fle.FLE_STR_COD)                                  AS setor,
+            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)        AS chamado_em,
+            RTRIM(ISNULL(fle.fle_pac_nome,
+                   RTRIM(ISNULL(pac.pac_nome,''))))                 AS pac_nome,
+            fle.FLE_PREFERENCIAL                                    AS preferencial,
+            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA,
+                     fle.FLE_DTHR_ATENDIMENTO)                      AS espera_min
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+    """)
+    return rows
+
+
+@app.get("/api/painel-fila/status-senhas")
+def painel_fila_status_senhas():
+    """
+    Status das filas de senha por prestador — lateral do painel TV.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT
+            fle.FLE_PSV_COD                                         AS psv_cod,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS na_fila,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+                     THEN 1 ELSE 0 END)                             AS atendidos,
+            SUM(CASE WHEN fle.FLE_PREFERENCIAL = 'S'
+                      AND fle.FLE_STATUS = 'A'
+                      AND fle.FLE_DTHR_ATENDIMENTO IS NULL
+                     THEN 1 ELSE 0 END)                             AS preferenciais,
+            -- Próxima senha aguardando
+            (SELECT TOP 1 RTRIM(ISNULL(f2.FLE_BIP,
+                'EXL'+RIGHT('000'+CAST(CAST(f2.FLE_ORDEM AS INT) AS VARCHAR),3)))
+             FROM fle f2
+             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
+               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
+               AND f2.FLE_STATUS = 'A'
+             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proxima_senha
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
+                 RTRIM(ISNULL(esp.esp_nome,''))
+        ORDER BY na_fila DESC
+    """)
+    return rows
+
+
+@app.get("/api/painel-fila/pacientes")
+def painel_fila_pacientes(limite: int = 8):
+    """
+    Painel TV — Pacientes chamados pelos médicos no Smart.
+    Fonte: FLE onde FLE_LOC_COD foi preenchido pelo Smart
+    ao chamar o paciente (sem FLE_BIP — são filas de consultório).
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(ISNULL(fle.fle_pac_nome,
+                   RTRIM(ISNULL(pac.pac_nome,''))))                 AS pac_nome,
+            fle.FLE_PAC_REG                                         AS pac_reg,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(psv.psv_nome)                                     AS psv_nome,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            RTRIM(ISNULL(loc.LOC_NOME,''))                          AS local_nome,
+            RTRIM(ISNULL(fle.FLE_LOC_COD,''))                       AS local_cod,
+            RTRIM(fle.FLE_STR_COD)                                  AS setor,
+            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)        AS chamado_em,
+            fle.FLE_PREFERENCIAL                                    AS preferencial,
+            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA,
+                     fle.FLE_DTHR_ATENDIMENTO)                      AS espera_min
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = RTRIM(fle.FLE_LOC_COD)
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+          AND fle.FLE_LOC_COD IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_LOC_COD)) <> ''
+        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+    """)
+    for r in rows:
+        if r.get("pac_nome"):
+            r["pac_nome"] = str(r["pac_nome"]).strip().title()
+    return rows
+
+
+@app.get("/api/painel-fila/status-pacientes")
+def painel_fila_status_pacientes():
+    """
+    Status das filas por médico — lateral do painel de pacientes.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT
+            fle.FLE_PSV_COD                                         AS psv_cod,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            RTRIM(ISNULL(loc.LOC_NOME,''))                          AS local_nome,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS aguardando,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+                     THEN 1 ELSE 0 END)                             AS atendidos,
+            -- Próximo paciente
+            (SELECT TOP 1
+                RTRIM(ISNULL(f2.fle_pac_nome, RTRIM(ISNULL(p2.pac_nome,''))))
+             FROM fle f2
+             LEFT JOIN pac p2 ON p2.pac_reg = f2.FLE_PAC_REG
+             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
+               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
+               AND f2.FLE_STATUS = 'A'
+             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proximo_pac
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = (
+            SELECT TOP 1 RTRIM(f3.FLE_LOC_COD) FROM fle f3
+            WHERE f3.FLE_PSV_COD = fle.FLE_PSV_COD
+              AND CAST(f3.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+              AND f3.FLE_LOC_COD IS NOT NULL
+            ORDER BY f3.FLE_DTHR_ATENDIMENTO DESC
+        )
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
+                 RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(loc.LOC_NOME,''))
+        HAVING SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                         AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END) > 0
+        ORDER BY aguardando DESC
+    """)
+    return rows
+# ══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS DOS PAINÉIS TV — Somente leitura da FLE
+# Cole no main.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/painel-fila/senhas")
+def painel_fila_senhas(limite: int = 8):
+    """
+    Painel TV — Senhas chamadas pela recepção (guichês).
+    Fonte: FLE onde FLE_BIP está preenchido (senha do totem)
+    e FLE_DTHR_ATENDIMENTO foi atualizado pelo Smart.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(ISNULL(fle.FLE_BIP, ''))                          AS senha,
+            CAST(fle.FLE_ORDEM AS INT)                              AS ordem,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(psv.psv_nome)                                     AS psv_nome,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            RTRIM(fle.FLE_STR_COD)                                  AS setor,
+            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)        AS chamado_em,
+            RTRIM(ISNULL(fle.fle_pac_nome,
+                   RTRIM(ISNULL(pac.pac_nome,''))))                 AS pac_nome,
+            fle.FLE_PREFERENCIAL                                    AS preferencial,
+            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA,
+                     fle.FLE_DTHR_ATENDIMENTO)                      AS espera_min
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+    """)
+    return rows
+
+
+@app.get("/api/painel-fila/status-senhas")
+def painel_fila_status_senhas():
+    """
+    Status das filas de senha por prestador — lateral do painel TV.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT
+            fle.FLE_PSV_COD                                         AS psv_cod,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS na_fila,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+                     THEN 1 ELSE 0 END)                             AS atendidos,
+            SUM(CASE WHEN fle.FLE_PREFERENCIAL = 'S'
+                      AND fle.FLE_STATUS = 'A'
+                      AND fle.FLE_DTHR_ATENDIMENTO IS NULL
+                     THEN 1 ELSE 0 END)                             AS preferenciais,
+            -- Próxima senha aguardando
+            (SELECT TOP 1 RTRIM(ISNULL(f2.FLE_BIP,
+                'EXL'+RIGHT('000'+CAST(CAST(f2.FLE_ORDEM AS INT) AS VARCHAR),3)))
+             FROM fle f2
+             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
+               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
+               AND f2.FLE_STATUS = 'A'
+             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proxima_senha
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
+                 RTRIM(ISNULL(esp.esp_nome,''))
+        ORDER BY na_fila DESC
+    """)
+    return rows
+
+
+@app.get("/api/painel-fila/pacientes")
+def painel_fila_pacientes(limite: int = 8):
+    """
+    Painel TV — Pacientes chamados pelos médicos no Smart.
+    FLE_STATUS = 'X' quando o médico chama pelo Smart.
+    FLE_LOC_COD é null — usa setor (FLE_STR_COD) + nome do prestador.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    SETORES = {
+        'RDI': 'Recepção Diagnóstico',
+        'ROC': 'Recepção Ocupacional',
+        'RPS': 'Recepção Pro Saúde',
+        'RCN': 'Recepção Consultórios',
+        'RCI': 'Recepção Censo Imagem',
+    }
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(pac.pac_nome)                                         AS pac_nome,
+            fle.FLE_PAC_REG                                             AS pac_reg,
+            RTRIM(psv.psv_apel)                                         AS psv_apel,
+            RTRIM(psv.psv_nome)                                         AS psv_nome,
+            RTRIM(ISNULL(esp.esp_nome,''))                              AS especialidade,
+            RTRIM(ISNULL(loc.LOC_NOME,''))                              AS local_nome,
+            RTRIM(fle.FLE_STR_COD)                                      AS setor,
+            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)            AS chamado_em,
+            fle.FLE_PREFERENCIAL                                        AS preferencial,
+            DATEDIFF(minute,fle.FLE_DTHR_CHEGADA,
+                     fle.FLE_DTHR_ATENDIMENTO)                          AS espera_min
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = RTRIM(fle.FLE_LOC_COD)
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+          AND fle.FLE_STATUS = 'X'
+          AND (fle.FLE_BIP IS NULL OR LTRIM(RTRIM(fle.FLE_BIP)) = '')
+        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+    """)
+    for r in rows:
+        if r.get("pac_nome"):
+            r["pac_nome"] = str(r["pac_nome"]).strip().title()
+        # Usa nome do setor como local quando LOC_NOME estiver vazio
+        if not r.get("local_nome") or not str(r["local_nome"]).strip():
+            setor = str(r.get("setor") or "").strip()
+            r["local_nome"] = SETORES.get(setor, setor)
+    return rows
+
+
+@app.get("/api/painel-fila/status-pacientes")
+def painel_fila_status_pacientes():
+    """
+    Status das filas por médico — lateral do painel de pacientes.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT
+            fle.FLE_PSV_COD                                         AS psv_cod,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            RTRIM(ISNULL(loc.LOC_NOME,''))                          AS local_nome,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS aguardando,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+                     THEN 1 ELSE 0 END)                             AS atendidos,
+            -- Próximo paciente
+            (SELECT TOP 1
+                RTRIM(ISNULL(f2.fle_pac_nome, RTRIM(ISNULL(p2.pac_nome,''))))
+             FROM fle f2
+             LEFT JOIN pac p2 ON p2.pac_reg = f2.FLE_PAC_REG
+             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
+               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
+               AND f2.FLE_STATUS = 'A'
+             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proximo_pac
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = (
+            SELECT TOP 1 RTRIM(f3.FLE_LOC_COD) FROM fle f3
+            WHERE f3.FLE_PSV_COD = fle.FLE_PSV_COD
+              AND CAST(f3.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+              AND f3.FLE_LOC_COD IS NOT NULL
+            ORDER BY f3.FLE_DTHR_ATENDIMENTO DESC
+        )
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND (fle.FLE_BIP IS NULL OR LTRIM(RTRIM(fle.FLE_BIP)) = '')
+        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
+                 RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(loc.LOC_NOME,''))
+        HAVING SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                         AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END) > 0
+        ORDER BY aguardando DESC
+    """)
+    return rows
+@app.get("/api/debug/fle-senha-chamada")
+def debug_fle_senha_chamada():
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT TOP 5
+            fle.FLE_BIP,
+            fle.FLE_ORDEM,
+            fle.FLE_STATUS,
+            fle.FLE_USR_LOGIN,
+            fle.FLE_USR_ATENDIMENTO,
+            RTRIM(psv.psv_apel)     AS psv_apel,
+            fle.FLE_STR_COD,
+            fle.FLE_LOC_COD,
+            fle.fle_atd_local,
+            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108) AS chamado_em
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+    """)
+    for r in rows:
+        for k, v in r.items():
+            if hasattr(v, 'strftime'): r[k] = v.strftime('%H:%M:%S')
+    return rows
+# ══════════════════════════════════════════════════════════════════════════════
+# ENDPOINTS DOS PAINÉIS TV — Somente leitura da FLE
+# Cole no main.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/painel-fila/senhas")
+def painel_fila_senhas(limite: int = 8):
+    """
+    Painel TV — Senhas chamadas pela recepção (guichês).
+    Guichê = USR_NOME do operador que chamou (FLE_USR_ATENDIMENTO ou FLE_USR_LOGIN).
+    FLE_STATUS = 'E' (totem + chamado) ou 'X' (chamado direto).
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(ISNULL(fle.FLE_BIP, ''))                              AS senha,
+            CAST(fle.FLE_ORDEM AS INT)                                  AS ordem,
+            RTRIM(psv.psv_apel)                                         AS psv_apel,
+            RTRIM(psv.psv_nome)                                         AS psv_nome,
+            RTRIM(ISNULL(esp.esp_nome,''))                              AS especialidade,
+            RTRIM(fle.FLE_STR_COD)                                      AS setor,
+            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)            AS chamado_em,
+            RTRIM(ISNULL(fle.fle_pac_nome,
+                   RTRIM(ISNULL(pac.pac_nome,''))))                     AS pac_nome,
+            fle.FLE_PREFERENCIAL                                        AS preferencial,
+            DATEDIFF(minute,fle.FLE_DTHR_CHEGADA,
+                     fle.FLE_DTHR_ATENDIMENTO)                          AS espera_min,
+            -- Quem chamou: FLE_USR_ATENDIMENTO (totem) ou FLE_USR_LOGIN (direto)
+            RTRIM(ISNULL(
+                ISNULL(usr_a.USR_NOME, fle.FLE_USR_ATENDIMENTO),
+                ISNULL(usr_l.USR_NOME, fle.FLE_USR_LOGIN)
+            ))                                                          AS operador_login,
+            RTRIM(ISNULL(fle.FLE_USR_ATENDIMENTO, fle.FLE_USR_LOGIN))  AS guiche
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        LEFT JOIN usr usr_a ON RTRIM(usr_a.USR_LOGIN) = RTRIM(fle.FLE_USR_ATENDIMENTO)
+        LEFT JOIN usr usr_l ON RTRIM(usr_l.USR_LOGIN) = RTRIM(fle.FLE_USR_LOGIN)
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+    """)
+    return rows
+
+
+@app.get("/api/painel-fila/status-senhas")
+def painel_fila_status_senhas():
+    """
+    Status das filas de senha por prestador — lateral do painel TV.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT
+            fle.FLE_PSV_COD                                         AS psv_cod,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS na_fila,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+                     THEN 1 ELSE 0 END)                             AS atendidos,
+            SUM(CASE WHEN fle.FLE_PREFERENCIAL = 'S'
+                      AND fle.FLE_STATUS = 'A'
+                      AND fle.FLE_DTHR_ATENDIMENTO IS NULL
+                     THEN 1 ELSE 0 END)                             AS preferenciais,
+            -- Próxima senha aguardando
+            (SELECT TOP 1 RTRIM(ISNULL(f2.FLE_BIP,
+                'EXL'+RIGHT('000'+CAST(CAST(f2.FLE_ORDEM AS INT) AS VARCHAR),3)))
+             FROM fle f2
+             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
+               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
+               AND f2.FLE_STATUS = 'A'
+             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proxima_senha
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
+                 RTRIM(ISNULL(esp.esp_nome,''))
+        ORDER BY na_fila DESC
+    """)
+    return rows
+
+
+@app.get("/api/painel-fila/pacientes")
+def painel_fila_pacientes(limite: int = 8):
+    """
+    Painel TV — Pacientes chamados pelos médicos no Smart.
+    FLE_STATUS = 'X' quando o médico chama pelo Smart.
+    FLE_LOC_COD é null — usa setor (FLE_STR_COD) + nome do prestador.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    SETORES = {
+        'RDI': 'Recepção Diagnóstico',
+        'ROC': 'Recepção Ocupacional',
+        'RPS': 'Recepção Pro Saúde',
+        'RCN': 'Recepção Consultórios',
+        'RCI': 'Recepção Censo Imagem',
+    }
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(pac.pac_nome)                                         AS pac_nome,
+            fle.FLE_PAC_REG                                             AS pac_reg,
+            RTRIM(psv.psv_apel)                                         AS psv_apel,
+            RTRIM(psv.psv_nome)                                         AS psv_nome,
+            RTRIM(ISNULL(esp.esp_nome,''))                              AS especialidade,
+            RTRIM(ISNULL(loc.LOC_NOME,''))                              AS local_nome,
+            RTRIM(fle.FLE_STR_COD)                                      AS setor,
+            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)            AS chamado_em,
+            fle.FLE_PREFERENCIAL                                        AS preferencial,
+            DATEDIFF(minute,fle.FLE_DTHR_CHEGADA,
+                     fle.FLE_DTHR_ATENDIMENTO)                          AS espera_min
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = RTRIM(fle.FLE_LOC_COD)
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+          AND fle.FLE_STATUS = 'X'
+          AND (fle.FLE_BIP IS NULL OR LTRIM(RTRIM(fle.FLE_BIP)) = '')
+        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+    """)
+    for r in rows:
+        if r.get("pac_nome"):
+            r["pac_nome"] = str(r["pac_nome"]).strip().title()
+        # Usa nome do setor como local quando LOC_NOME estiver vazio
+        if not r.get("local_nome") or not str(r["local_nome"]).strip():
+            setor = str(r.get("setor") or "").strip()
+            r["local_nome"] = SETORES.get(setor, setor)
+    return rows
+
+
+@app.get("/api/painel-fila/status-pacientes")
+def painel_fila_status_pacientes():
+    """
+    Status das filas por médico — lateral do painel de pacientes.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT
+            fle.FLE_PSV_COD                                         AS psv_cod,
+            RTRIM(psv.psv_apel)                                     AS psv_apel,
+            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
+            RTRIM(ISNULL(loc.LOC_NOME,''))                          AS local_nome,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS aguardando,
+            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
+                     THEN 1 ELSE 0 END)                             AS atendidos,
+            -- Próximo paciente
+            (SELECT TOP 1
+                RTRIM(ISNULL(f2.fle_pac_nome, RTRIM(ISNULL(p2.pac_nome,''))))
+             FROM fle f2
+             LEFT JOIN pac p2 ON p2.pac_reg = f2.FLE_PAC_REG
+             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
+               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
+               AND f2.FLE_STATUS = 'A'
+             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proximo_pac
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = (
+            SELECT TOP 1 RTRIM(f3.FLE_LOC_COD) FROM fle f3
+            WHERE f3.FLE_PSV_COD = fle.FLE_PSV_COD
+              AND CAST(f3.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+              AND f3.FLE_LOC_COD IS NOT NULL
+            ORDER BY f3.FLE_DTHR_ATENDIMENTO DESC
+        )
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND (fle.FLE_BIP IS NULL OR LTRIM(RTRIM(fle.FLE_BIP)) = '')
+        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
+                 RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(loc.LOC_NOME,''))
+        HAVING SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
+                         AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END) > 0
+        ORDER BY aguardando DESC
+    """)
+    return rows
+
+@app.get("/api/debug/scheduler-status")
+def debug_scheduler_status():
+    try:
+        from scheduler import _query_func, HORARIOS
+        return {
+            "query_func_ok": _query_func is not None,
+            "horarios": [f"{h:02d}:{m:02d} ({t})" for h,m,t in HORARIOS],
+        }
+    except Exception as e:
+        return {"erro": str(e)}
+    
+@app.get("/api/debug/esp-multiprofissional")
+def debug_esp_multiprofissional():
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    return query(f"""
+        SELECT DISTINCT
+            RTRIM(psv.psv_apel)                     AS apelido,
+            RTRIM(ISNULL(psv.psv_esp_cod,''))       AS esp_cod,
+            RTRIM(ISNULL(esp.esp_nome,''))          AS especialidade,
+            psv.psv_cod                             AS psv_cod
+        FROM agm
+        JOIN psv ON psv.psv_cod = agm.agm_med
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        WHERE CAST(agm.agm_hini AS DATE) = '{hoje}'
+          AND agm.agm_pac > 0
+        ORDER BY psv.psv_apel
+    """)
+"""
+═══════════════════════════════════════════════════════════════════════════════
+ENDPOINTS — Módulo PacientesDB
+Cole este bloco no main.py, antes do endpoint /api/health
+
+Tabelas validadas no banco:
+  pac         → pac_reg, pac_nome, pac_nasc, pac_sexo, pac_dreg, pac_dult,
+                pac_dt_obito, PAC_END (logradouro), PAC_CID (cód. cidade)
+  osm         → osm_pac, osm_dthr, osm_cnv, osm_serie, osm_num
+  cnv         → cnv_cod, cnv_nome
+  PAC_END_COL → PAC_END_COL_PAC_REG (FK pac), PAC_END_COL_END (logradouro)
+
+NOTA SOBRE BAIRROS:
+  O banco não possui campo de bairro estruturado.
+  PAC_END contém texto livre ("RUA H", "RUA G12", "goitacaz, lt 9, qd 29").
+  A estratégia adotada é normalizar o logradouro para extrair o nome da rua/via
+  como agrupador — funciona bem para Parauapebas (ruas identificadas por letras).
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+
+
+
+def _normalizar_rua(end: str) -> str:
+    """
+    Normaliza texto livre de endereço para extrair o nome/identificador da via.
+    Exemplos:
+      "RUA H"              → "Rua H"
+      "RUA G12"            → "Rua G12"
+      "AV Q QD 238 LT 03"  → "Av Q"
+      "goitacaz, lt 9"     → "Goitacaz"
+      "h"                  → "Rua H"   (letra solta vira rua)
+      ""                   → "Não informado"
+    """
+    if not end or not end.strip():
+        return "Não informado"
+
+    s = end.strip().upper()
+
+    # Remove prefixos repetidos
+    for prefix in ["RUA:", "RUA ", "R ", "R. ", "AV ", "AV. ", "AVENIDA ", "TRAVESSA ", "TRV "]:
+        if s.startswith(prefix):
+            tipo = "Rua" if "RUA" in prefix or prefix in ("R ", "R. ") else \
+                   "Av"  if "AV"  in prefix else "Tv"
+            resto = s[len(prefix):].strip()
+            # Pega só o nome/identificador da via (antes de QD, LT, Nº, vírgula)
+            nome = _re.split(r'[\s,]+(?:QD|LT|Q\d|LOT|LOTE|N[Oº]|\d{2,})', resto)[0].strip()
+            return f"{tipo} {nome.title()}" if nome else "Não informado"
+
+    # Letra solta (ex: "H", "W") → "Rua X"
+    if _re.fullmatch(r'[A-Z]', s):
+        return f"Rua {s}"
+
+    # Número + letra (ex: "G12", "B5")
+    if _re.fullmatch(r'[A-Z]\d+', s):
+        return f"Rua {s.title()}"
+
+    # Caso geral: pega até a primeira vírgula ou QD/LT
+    nome = _re.split(r'[\s,]+(?:QD|LT|Q\d|LOT|LOTE|N[Oº]|\d{3,})', s)[0].strip()
+    return nome.title() if nome else "Não informado"
+
+
+# ─── MAPA DE CALOR: DISTRIBUIÇÃO POR LOGRADOURO ──────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAPEAMENTO RUA → BAIRRO (Correios Parauapebas - PA)
+# Fonte: Lista de CEPs Parauapebas nov/2025
+# ══════════════════════════════════════════════════════════════════════════════
+
+_MAPA_BAIRRO = {
+    # Ruas numeradas com zero à esquerda → Cidade Nova
+    "rua 01":"Cidade Nova","rua 02":"Cidade Nova","rua 03":"Cidade Nova",
+    "rua 04":"Cidade Nova","rua 05":"Cidade Nova","rua 06":"Cidade Nova",
+    "rua 07":"Cidade Nova","rua 08":"Cidade Nova","rua 09":"Cidade Nova",
+    # Avenidas identificadas
+    "av brasil":"Rio Verde","av para":"Liberdade I",
+    "av jk":"Rio Verde","av buriti":"Liberdade I",
+    "av castanheira":"Cidade Jardim","av princesa isabel":"Liberdade I",
+    "av gabriel pimenta":"Rio Verde","av imperatriz":"Maranhão",
+    "av cristo rei":"Apoena","av cristo reis":"Apoena",
+    "av apostolo paulo":"Betânia","av paru":"Polo Moveleiro",
+    "av castelo branco":"Rio Verde","av pernambuco":"Liberdade I",
+    # Ruas por letra → Bairro União
+    "rua a":"União","rua b":"União","rua c":"União","rua d":"União",
+    "rua e":"União","rua f":"União","rua g":"União","rua h":"União",
+    "rua i":"União","rua j":"União","rua k":"União","rua l":"União",
+    "rua m":"União","rua n":"União","rua o":"União","rua p":"União",
+    "rua q":"União","rua r":"União","rua s":"União","rua t":"União",
+    "rua u":"União","rua v":"União","rua w":"União","rua x":"União",
+    "rua y":"União","rua z":"União",
+    # Letras soltas → União
+    "a":"União","b":"União","c":"União","d":"União","e":"União",
+    "f":"União","g":"União","h":"União","i":"União","j":"União",
+    "k":"União","l":"União","m":"União","n":"União","o":"União",
+    "p":"União","q":"União","r":"União","s":"União","t":"União",
+    "u":"União","v":"União","w":"União","x":"União","y":"União","z":"União",
+    # Ruas numeradas → Cidade Nova
+    "rua 1":"Cidade Nova","rua 2":"Cidade Nova","rua 3":"Cidade Nova",
+    "rua 4":"Cidade Nova","rua 5":"Cidade Nova","rua 6":"Cidade Nova",
+    "rua 7":"Cidade Nova","rua 8":"Cidade Nova","rua 9":"Cidade Nova",
+    "rua 10":"Cidade Nova","rua 11":"Cidade Nova","rua 12":"Cidade Nova",
+    "rua 13":"Cidade Nova","rua 14":"Cidade Nova","rua 15":"Cidade Nova",
+    "rua 16":"Cidade Nova","rua 17":"Cidade Nova","rua 18":"Cidade Nova",
+    "rua 19":"Cidade Nova","rua 20":"Cidade Nova",
+    # Ruas numeradas em Primavera
+    "rua 1 primavera":"Primavera","rua 2 primavera":"Primavera",
+    # Avenidas letradas → Maranhão / Beira Rio
+    "av a":"Maranhão","av i":"Beira Rio","av q":"Maranhão",
+    "avenida a":"Maranhão","avenida i":"Beira Rio",
+    # Ruas com nome — mapeadas do PDF dos Correios
+    "angela diniz":"Guanabara","angela diniz":"da Paz",
+    "araguaia":"da Paz",
+    "jatoba":"Parque dos Carajás","jatoба":"Parque dos Carajás",
+    "arara":"Parque dos Carajás",
+    "goitacaz":"Parque dos Carajás",
+    "bororo":"Parque dos Carajás",
+    "espanha":"Vila Rica",
+    "belem":"Palmares Sul",
+    "sao luis":"Primavera","são luis":"Primavera","são luís":"Primavera",
+    "sao marcos":"Betânia","são marcos":"Betânia",
+    "daniela perez":"Nova Vida",
+    "tocantins":"Rio Verde",
+    "santa maria":"Guanabara",
+    "bela vista":"Rio Verde",
+    "manoel bandeira":"da Paz",
+    "fortaleza":"Rio Verde",
+    "gaspar viana":"Liberdade II",
+    "teotonio vilela":"Liberdade I","teotônio vilela":"Liberdade I",
+    "manaus":"Primavera",
+    "gervásio antônio morás":"Jardim América",
+    "gervásio moraes":"Jardim América",
+    "liberdade":"da Paz",
+    "sol poente":"da Paz",
+    "bom jardim":"Guanabara",
+    "graça aranha":"Guanabara",
+    "jorge amado":"Guanabara",
+    "rui barbosa":"Guanabara",
+    "mané garrincha":"Guanabara",
+    "chico mendes":"da Paz",
+    "marabá":"da Paz",
+    "castro alves":"da Paz",
+    "araguaia":"da Paz",
+    "paz":"da Paz",
+    "tiradentes":"Rio Verde",
+    "getúlio vargas":"Rio Verde","getulio vargas":"Rio Verde",
+    "tocantins":"Rio Verde",
+    "ceará":"Rio Verde","ceara":"Rio Verde",
+    "amazonas":"Rio Verde",
+    "minas gerais":"Rio Verde",
+    "paraíso":"Paraíso","paraiso":"Paraíso",
+    "esplanada":"Esplanada",
+    "linha verde":"Linha Verde",
+    "caetanópolis":"Caetanópolis","caetanopolis":"Caetanópolis",
+    "guanabara":"Guanabara",
+    "morada nova":"Morada Nova",
+    "jardim america":"Jardim América","jardim américa":"Jardim América",
+    "parque carajás":"Parque dos Carajás","parque dos carajas":"Parque dos Carajás",
+    "parque nacoes":"Parque das Nações","parque nações":"Parque das Nações",
+    "sao lucas":"São Lucas","são lucas":"São Lucas",
+    "santa luzia":"Santa Luzia",
+    "nova carajas":"Nova Carajás","nova carajás":"Nova Carajás",
+    "nova vida":"Nova Vida",
+    "beira rio":"Beira Rio",
+    "brasilia":"Brasília","brasília":"Brasília",
+    "jardim planalto":"Jardim Planalto",
+    "jardim canada":"Jardim Canadá","jardim canadá":"Jardim Canadá",
+    "apoena":"Apoena",
+    "amazonia":"Amazônia","amazônia":"Amazônia",
+    "novo brasil":"Novo Brasil",
+    "alvorada":"Alvorada","alvorá":"Alvorada",
+    "minerios":"Minérios","minérios":"Minérios",
+    "polo industrial":"Polo Industrial",
+    "polo moveleiro":"Polo Moveleiro",
+    "tropical":"Tropical",
+    "betania":"Betânia","betânia":"Betânia",
+    "habitar feliz":"Habitar Feliz",
+    "novo horizonte":"Novo Horizonte",
+    "novo viver":"Novo Viver",
+    "vale do sol":"Vale do Sol",
+    "vila rica":"Vila Rica",
+    "fap":"FAP",
+    "palmares ii":"Palmares II","palmares 2":"Palmares II",
+    "palmares sul":"Palmares Sul",
+    "cidade jardim":"Cidade Jardim",
+    "cidade nova":"Cidade Nova",
+    "primavera":"Primavera",
+    "maranhao":"Maranhão","maranhão":"Maranhão",
+    "liberdade i":"Liberdade I","liberdade 1":"Liberdade I",
+    "liberdade ii":"Liberdade II","liberdade 2":"Liberdade II",
+    "rio verde":"Rio Verde",
+    "uniao":"União","união":"União",
+}
+
+def _rua_para_bairro(end_raw: str) -> str:
+    """
+    Tenta mapear o logradouro do paciente para um bairro real de Parauapebas.
+    Usa o dicionário dos Correios. Retorna o bairro ou None se não encontrar.
+    """
+    if not end_raw or not end_raw.strip():
+        return None
+
+    s = end_raw.strip().lower()
+
+    # Remove prefixos de tipo de logradouro
+    for pfx in ["rua:", "r. ", "r ", "av. ", "av ", "avenida ", "travessa ", "tv ", "trv "]:
+        if s.startswith(pfx):
+            s_sem = s[len(pfx):].strip()
+            # Tenta com prefixo original também
+            chave_com = s.rstrip()
+            if chave_com in _MAPA_BAIRRO:
+                return _MAPA_BAIRRO[chave_com]
+            # Pega só o nome (antes de QD, LT, número grande)
+            import re as _re2
+            nome = _re2.split(r'[,\s]+(?:qd|lt|q\d|lot|lote|n[oº]|\d{2,})', s_sem)[0].strip()
+            if nome in _MAPA_BAIRRO:
+                return _MAPA_BAIRRO[nome]
+            if s_sem in _MAPA_BAIRRO:
+                return _MAPA_BAIRRO[s_sem]
+            break
+
+    # Tenta match direto
+    if s in _MAPA_BAIRRO:
+        return _MAPA_BAIRRO[s]
+
+    # Tenta match parcial para nomes compostos
+    for chave, bairro in _MAPA_BAIRRO.items():
+        if len(chave) > 4 and chave in s:
+            return bairro
+
+    return None
+
+
+@app.get("/api/pacientesdb/por-bairro")
+def pacdb_por_bairro(periodo: str = "30d", setor: str = ""):
+    """
+    Agrupa pacientes por BAIRRO REAL usando mapeamento dos Correios.
+    PAC_END → normaliza → mapeia para bairro → agrupa.
+    """
+    inicio, fim = periodo_datas(periodo)
+    filtro_setor = f"AND RTRIM(osm.OSM_STR) = '{setor}'" if setor else ""
+
+    rows = query(f"""
+        SELECT
+            RTRIM(ISNULL(NULLIF(pac.PAC_END,''), '')) AS rua_raw,
+            COUNT(DISTINCT osm.osm_pac)               AS total,
+            SUM(CASE WHEN CAST(pac.pac_dreg AS DATE)
+                          BETWEEN '{inicio}' AND '{fim}'
+                     THEN 1 ELSE 0 END)               AS novos,
+            SUM(CASE WHEN cnt_osm.qtd > 1 THEN 1 ELSE 0 END) AS retorno,
+            CAST(COUNT(DISTINCT osm.osm_pac) * 100.0 /
+                NULLIF((
+                    SELECT COUNT(DISTINCT o2.osm_pac)
+                    FROM osm o2
+                    WHERE o2.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+                ), 0) AS DECIMAL(5,1))                AS pct_total
+        FROM osm
+        JOIN pac ON pac.pac_reg = osm.osm_pac
+        LEFT JOIN (
+            SELECT osm_pac, COUNT(*) AS qtd
+            FROM osm
+            WHERE osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+            GROUP BY osm_pac
+        ) cnt_osm ON cnt_osm.osm_pac = osm.osm_pac
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          {filtro_setor}
+          AND (pac.pac_dt_obito IS NULL OR pac.pac_dt_obito = '')
+        GROUP BY RTRIM(ISNULL(NULLIF(pac.PAC_END,''), ''))
+        ORDER BY total DESC
+    """)
+
+    from collections import defaultdict
+    agrupado = defaultdict(lambda: {"bairro":"","total":0,"novos":0,"retorno":0,"pct_total":0.0})
+
+    for r in rows:
+        rua_raw = r.get("rua_raw") or ""
+        bairro = _rua_para_bairro(rua_raw)
+        if not bairro:
+            bairro = _normalizar_rua(rua_raw)  # fallback para logradouro normalizado
+
+        agrupado[bairro]["bairro"]    = bairro
+        agrupado[bairro]["total"]    += r.get("total") or 0
+        agrupado[bairro]["novos"]    += r.get("novos") or 0
+        agrupado[bairro]["retorno"]  += r.get("retorno") or 0
+        agrupado[bairro]["pct_total"] = round(
+            (agrupado[bairro]["pct_total"] or 0) + (r.get("pct_total") or 0), 1
+        )
+
+    resultado = sorted(agrupado.values(), key=lambda x: x["total"], reverse=True)
+    return [r for r in resultado if r["bairro"] != "Não informado" or r["total"] > 5][:40]
+
+
+# ─── CRESCIMENTO DA BASE ──────────────────────────────────────────────────────
+
+@app.get("/api/pacientesdb/crescimento-base")
+def pacdb_crescimento_base(periodo: str = "ano", setor: str = ""):
+    """Novos cadastros mês a mês no período."""
+    inicio, fim = periodo_datas(periodo)
+    rows = query(f"""
+        SELECT
+            FORMAT(pac.pac_dreg, 'MMM/yy') AS mes,
+            YEAR(pac.pac_dreg)              AS ano,
+            MONTH(pac.pac_dreg)             AS mes_num,
+            COUNT(*)                        AS novos
+        FROM pac
+        WHERE CAST(pac.pac_dreg AS DATE) BETWEEN '{inicio}' AND '{fim}'
+          AND (pac.pac_dt_obito IS NULL OR pac.pac_dt_obito = '')
+        GROUP BY FORMAT(pac.pac_dreg, 'MMM/yy'),
+                 YEAR(pac.pac_dreg), MONTH(pac.pac_dreg)
+        ORDER BY ano, mes_num
+    """)
+    return rows
+
+
+# ─── RETORNO VS NOVOS POR MÊS ────────────────────────────────────────────────
+
+@app.get("/api/pacientesdb/retorno-vs-novos")
+def pacdb_retorno_vs_novos(periodo: str = "ano", setor: str = ""):
+    """
+    Por mês: pacientes que vieram pela 1ª vez (novos) vs. que já tinham vindo antes (retorno).
+    Usa a data do 1º atendimento no histórico completo como referência.
+    """
+    inicio, fim = periodo_datas(periodo)
+    rows = query(f"""
+        WITH primeira_os AS (
+            SELECT osm_pac, MIN(osm_dthr) AS dt_primeira
+            FROM osm
+            GROUP BY osm_pac
+        ),
+        periodo_osm AS (
+            SELECT DISTINCT
+                osm.osm_pac,
+                YEAR(osm.osm_dthr)           AS ano,
+                MONTH(osm.osm_dthr)          AS mes_num,
+                FORMAT(osm.osm_dthr,'MMM/yy') AS mes,
+                po.dt_primeira
+            FROM osm
+            JOIN primeira_os po ON po.osm_pac = osm.osm_pac
+            WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+        )
+        SELECT
+            mes,
+            ano,
+            mes_num,
+            COUNT(DISTINCT CASE
+                WHEN CAST(dt_primeira AS DATE) BETWEEN '{inicio}' AND '{fim}'
+                THEN osm_pac END)  AS novos,
+            COUNT(DISTINCT CASE
+                WHEN CAST(dt_primeira AS DATE) < '{inicio}'
+                THEN osm_pac END)  AS retorno
+        FROM periodo_osm
+        GROUP BY mes, ano, mes_num
+        ORDER BY ano, mes_num
+    """)
+    return rows
+
+
+# ─── TOP PACIENTES COM LOGRADOURO ─────────────────────────────────────────────
+
+@app.get("/api/pacientes/top-atendimentos")
+def pacientes_top_atendimentos(
+    periodo: str      = "30d",
+    inicio: str       = "",
+    fim: str          = "",
+    todo_periodo: bool = False,
+    limite: int       = 20,
+    setor: str        = "",
+):
+    """
+    Top pacientes por número de atendimentos.
+    Inclui logradouro (PAC_END) como campo 'bairro' para o frontend.
+    SUBSTITUI o endpoint existente — adiciona o campo bairro.
+    """
+    if todo_periodo:
+        ini_sql = "1900-01-01"
+        fim_sql = datetime.now().strftime("%Y-%m-%d")
+    elif inicio and fim:
+        ini_sql, fim_sql = inicio, fim
+    else:
+        ini_sql, fim_sql = periodo_datas(periodo)
+
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(pac.pac_nome)                                           AS nome,
+            DATEDIFF(year, pac.pac_nasc, GETDATE())                       AS idade,
+            RTRIM(pac.pac_sexo)                                           AS sexo,
+            RTRIM(ISNULL(cnv.cnv_nome,''))                                AS convenio,
+            RTRIM(ISNULL(pac.PAC_END,''))                                 AS bairro,
+            COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT) * 1000000 + osm.osm_num)  AS total_atendimentos,
+            MAX(osm.osm_dthr)                                             AS ultimo_atendimento
+        FROM osm
+        JOIN pac ON pac.pac_reg = osm.osm_pac
+        LEFT JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE osm.osm_dthr BETWEEN '{ini_sql}' AND '{fim_sql} 23:59:59'
+          AND (pac.pac_dt_obito IS NULL OR pac.pac_dt_obito = '')
+        GROUP BY RTRIM(pac.pac_nome), pac.pac_nasc,
+                 RTRIM(pac.pac_sexo), RTRIM(ISNULL(cnv.cnv_nome,'')),
+                 RTRIM(ISNULL(pac.PAC_END,''))
+        ORDER BY total_atendimentos DESC
+    """)
+    return rows
+
+@app.get("/api/pacientes/servicos-por-sexo")
+def pacientes_servicos_por_sexo(
+    periodo: str = "30d",
+    limite: int  = 10,
+    sexo: str    = "",
+    setor: str   = "",
+):
+    inicio, fim = periodo_datas(periodo)
+    filtro_sexo = f"AND RTRIM(pac.pac_sexo) = '{sexo}'" if sexo in ("M","F") else "AND RTRIM(pac.pac_sexo) IN ('M','F')"
+    filtro_setor = f"AND RTRIM(osm.OSM_STR) = '{setor}'" if setor else ""
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(smk.SMK_NOME)  AS nome_exame,
+            RTRIM(pac.pac_sexo)  AS sexo,
+            COUNT(*)             AS qtd
+        FROM SMM smm
+        JOIN OSM osm ON osm.OSM_SERIE = smm.SMM_OSM_SERIE AND osm.OSM_NUM = smm.SMM_OSM
+        JOIN PAC pac ON pac.pac_reg = osm.osm_pac
+        JOIN SMK smk ON RTRIM(smk.SMK_COD) = RTRIM(smm.SMM_COD)
+                     AND RTRIM(smk.SMK_TIPO) = RTRIM(smm.SMM_TPCOD)
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          {filtro_sexo}
+          {filtro_setor}
+          AND smk.SMK_NOME IS NOT NULL
+          AND LTRIM(RTRIM(smk.SMK_NOME)) <> ''
+        GROUP BY RTRIM(smk.SMK_NOME), RTRIM(pac.pac_sexo)
+        ORDER BY qtd DESC
+    """)
+    return rows
+
+
+@app.get("/api/pacientes/servicos-comparativo")
+def pacientes_servicos_comparativo(
+    periodo: str = "30d",
+    limite: int  = 15,
+    setor: str   = "",
+):
+    inicio, fim = periodo_datas(periodo)
+    rows = query(f"""
+        SELECT
+            RTRIM(smk.SMK_NOME) AS nome_exame,
+            SUM(CASE WHEN RTRIM(pac.pac_sexo) = 'M' THEN 1 ELSE 0 END) AS masculino,
+            SUM(CASE WHEN RTRIM(pac.pac_sexo) = 'F' THEN 1 ELSE 0 END) AS feminino,
+            COUNT(*) AS total
+        FROM SMM smm
+        JOIN OSM osm ON osm.OSM_SERIE = smm.SMM_OSM_SERIE AND osm.OSM_NUM = smm.SMM_OSM
+        JOIN PAC pac ON pac.pac_reg = osm.osm_pac
+        JOIN SMK smk ON RTRIM(smk.SMK_COD) = RTRIM(smm.SMM_COD)
+                     AND RTRIM(smk.SMK_TIPO) = RTRIM(smm.SMM_TPCOD)
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND RTRIM(pac.pac_sexo) IN ('M','F')
+          AND smk.SMK_NOME IS NOT NULL
+          AND LTRIM(RTRIM(smk.SMK_NOME)) <> ''
+        GROUP BY RTRIM(smk.SMK_NOME)
+        HAVING COUNT(*) > 0
+        ORDER BY COUNT(*) DESC
+        OFFSET 0 ROWS FETCH NEXT {limite} ROWS ONLY
+    """)
+    return rows
 
 @app.get("/api/health")
 def health():
@@ -6080,6 +7905,27 @@ def health():
         return {"status": "ok", "db": "conectado", "ts": datetime.now().isoformat()}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
+    
+# ── SERVE FRONTEND — FINAL DO ARQUIVO ────────────────────────────────────────
+if os.path.exists(DIST):
+    app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
+
+    @app.get("/")
+    def serve_index():
+        return FileResponse(os.path.join(DIST, "index.html"))
+
+    @app.get("/{full_path:path}")
+
+    def serve_spa(full_path: str):
+        blocked = [".env", "config.py", ".key", ".crt", "main.py"]
+        if any(full_path.endswith(b) for b in blocked):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        f = os.path.join(DIST, full_path)
+        if os.path.exists(f) and not os.path.isdir(f):
+            return FileResponse(f)
+        return FileResponse(os.path.join(DIST, "index.html"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

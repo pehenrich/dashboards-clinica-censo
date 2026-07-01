@@ -1,22 +1,16 @@
-﻿{
-  "name": "Dashboard Clínica Censo",
+{
+  "name": "Censo · Gestão Clínica",
   "short_name": "Censo",
-  "description": "Dashboard Smart Pixeon - Clínica Censo",
+  "description": "Plataforma de Gestão Clínica — Smart Pixeon · Parauapebas · PA",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#DADADA",
+  "background_color": "#8B1A1A",
   "theme_color": "#8B1A1A",
-  "orientation": "any",
+  "orientation": "portrait-primary",
   "icons": [
-    {
-      "src": "/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png"
-    },
-    {
-      "src": "/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png"
-    }
+    { "src": "/icon-192.png",          "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png",          "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

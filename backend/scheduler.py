@@ -56,40 +56,50 @@ def verificar_e_enviar():
                 print(f"[Scheduler] Erro no envio: {e}")
 
 def loop_scheduler():
-    """Loop que verifica a cada 60 segundos."""
+    import logging
+    logging.basicConfig(
+        filename="C:\\Dashboard\\backend\\scheduler.log",
+        level=logging.INFO,
+        format="%(asctime)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    log = logging.getLogger()
+    log.info("Scheduler iniciado.")
     print(f"[Scheduler] Iniciado. Horários programados: {[f'{h:02d}:{m:02d}' for h,m,_ in HORARIOS]}")
     ultimo_envio = {}
 
     while True:
-        agora = datetime.now()
-        chave = agora.strftime("%Y-%m-%d-%H-%M")
-
-        # 0=seg, 1=ter, 2=qua, 3=qui, 4=sex, 5=sab, 6=dom
+        agora      = datetime.now()
         dia_semana = agora.weekday()
         eh_domingo = dia_semana == 6
         eh_sabado  = dia_semana == 5
 
         for hora, minuto, turno in HORARIOS:
-            # Domingo: não envia nada
             if eh_domingo:
                 continue
-            # Sábado: manhã normal, fechamento às 11:30
             if eh_sabado and turno == "fechamento":
                 if not (agora.hour == 11 and agora.minute == 30):
                     continue
             elif agora.hour != hora or agora.minute != minuto:
                 continue
 
-            chave_turno = f"{agora.strftime('%Y-%m-%d')}-{turno}"
-            if chave_turno not in ultimo_envio:
-                ultimo_envio[chave_turno] = True
-                print(f"[Scheduler] {agora.strftime('%H:%M')} — disparando {turno} (dia={dia_semana})")
-                threading.Thread(
-                    target=lambda t=turno: enviar_resumo(_query_func, turno=t),
-                    daemon=True
-                ).start()
+            chave = f"{agora.strftime('%Y-%m-%d')}-{turno}"
+            if chave not in ultimo_envio:
+                ultimo_envio[chave] = True
+                log.info(f"Disparando turno={turno}")
+                print(f"[Scheduler] {agora.strftime('%H:%M')} — disparando {turno}")
+                try:
+                    resultado = enviar_resumo(_query_func, turno=turno)
+                    log.info(f"Envio ok: {resultado}")
+                    print(f"[Scheduler] Envio ok")
+                except Exception as e:
+                    log.error(f"Erro no envio: {e}")
+                    print(f"[Scheduler] Erro: {e}")
 
-        time.sleep(55)  # Verifica a cada 55 segundos
+        hoje = datetime.now().strftime("%Y-%m-%d")
+        ultimo_envio = {k: v for k, v in ultimo_envio.items() if k.startswith(hoje)}
+
+        time.sleep(30)  # Verifica a cada 55 segundos
 
 def iniciar_scheduler_em_background():
     """Inicia o scheduler em thread de background (chamado pelo main.py)."""

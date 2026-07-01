@@ -2,17 +2,21 @@ import { useState, useEffect, useRef, createContext, useContext } from "react";
 const MobileCtx = createContext(false);
 const useMobile = () => useContext(MobileCtx);
 import PainelTV from "./PainelTV";
+import PacientesDB from "./PacientesDB";
+import ModuloContratos from "./ModuloContratos";
+import Login, { AuthProvider, useAuth, AdminPermissoes } from "./Login";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   ComposedChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from "recharts";
+import Home from "./Home";
 
 const BACKEND_TUNNEL = "https://breaking-sarah-gmc-drum.trycloudflare.com";
 const API = import.meta.env.VITE_API_URL || (
   window.location.hostname === "localhost" || window.location.hostname.startsWith("192.168.")
-    ? `http://${window.location.hostname}:8000`
-    : BACKEND_TUNNEL
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : "https://breaking-sarah-gmc-drum.trycloudflare.com"
 );
 
 const CORES_ANOS = ["#8B1A1A","#D97706","#7C3AED","#059669","#0891B2"];
@@ -297,6 +301,211 @@ function GraficoComparativoAnual({ titulo, subtitulo, endpoint, deps, dataKey, f
 
 // ── COMPARATIVO FATURAMENTO ANUAL ────────────────────────────────────────────
 
+
+function ProducaoProfissionais({ ano, mes, API }) {
+  const [dados,     setDados]     = useState([]);
+  const [loading,   setLoading]   = useState(false);
+  const [busca,     setBusca]     = useState("");
+  const [espFiltro, setEspFiltro] = useState("");
+  const [ordenar,   setOrdenar]   = useState("total_gerado");
+  const [classeFiltro, setClasseFiltro] = useState("");
+  const [expandido, setExpandido] = useState(null);
+  const [detalhe,   setDetalhe]   = useState({});
+  const [loadDet,   setLoadDet]   = useState(false);
+
+  const brl = v => v != null ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v) : "--";
+  const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "--";
+
+  useEffect(() => {
+    if (!ano || !mes) return;
+    setLoading(true);
+    fetch(API + "/api/financeiro/producao-mensal/profissionais?ano=" + ano + "&mes=" + mes)
+      .then(r => r.json())
+      .then(d => {
+        const enriched = (d || []).map(p => ({
+          ...p,
+          total_gerado: (p.producao_total || 0) + (p.producao_solicitada || 0),
+        }));
+        setDados(enriched);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [ano, mes]);
+
+  const handleExpandir = async (prof) => {
+    if (expandido === prof) { setExpandido(null); return; }
+    setExpandido(prof);
+    if (detalhe[prof]) return;
+    setLoadDet(true);
+    try {
+      const r = await fetch(API + "/api/financeiro/producao-mensal/profissional-servicos?profissional=" + encodeURIComponent(prof) + "&ano=" + ano + "&mes=" + mes);
+      const d = await r.json();
+      setDetalhe(prev => ({ ...prev, [prof]: d }));
+    } catch {}
+    setLoadDet(false);
+  };
+
+  const filtrados = dados
+    .filter(p => !busca || (p.profissional||"").toLowerCase().includes(busca.toLowerCase()))
+    .filter(p => !espFiltro || (p.especialidades||[]).includes(espFiltro))
+    .sort((a, b) => (b[ordenar]||0) - (a[ordenar]||0))
+    .filter(p => !classeFiltro || (p.classes_executadas||[]).includes(classeFiltro) || (p.classes_solicitadas||[]).includes(classeFiltro))
+
+const COLUNAS = [
+  { id: "producao_total",      label: "Executado" },
+  { id: "producao_solicitada", label: "Solicitado" },
+];
+
+  const totalExec  = filtrados.reduce((s, p) => s + (p.producao_total || 0), 0);
+  const totalSolic = filtrados.reduce((s, p) => s + (p.producao_solicitada || 0), 0);
+
+  return (
+    <div style={{ background:"#fff", borderRadius:16, padding:"20px 24px", boxShadow:"0 1px 4px rgba(0,0,0,0.07)" }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:10 }}>
+        <div style={{ fontSize:14, fontWeight:800, color:"#111827" }}>Produção por Profissional</div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+          <input placeholder="Buscar profissional..." value={busca} onChange={e=>setBusca(e.target.value)}
+            style={{ padding:"7px 12px", borderRadius:8, border:"1px solid #E5E7EB", fontSize:12, outline:"none", width:170 }}/>
+          <select value={espFiltro} onChange={e=>setEspFiltro(e.target.value)}
+            style={{ padding:"7px 12px", borderRadius:8, border:"1px solid #E5E7EB", fontSize:12, outline:"none", background:"#fff", cursor:"pointer" }}>
+            <option value="">Todas especialidades</option>
+            {[...new Set(dados.flatMap(p=>p.especialidades||[]))].sort().map(e=>(<option key={e} value={e}>{e}</option>))}
+          </select>
+          <select value={classeFiltro} onChange={e=>setClasseFiltro(e.target.value)}
+            style={{ padding:"7px 12px", borderRadius:8, border:"1px solid #E5E7EB", fontSize:12, outline:"none", background:"#fff", cursor:"pointer" }}>
+            <option value="">Todas as classes</option>
+            <option value="Consulta">Consulta</option>
+            <option value="Exame">Exame</option>
+            <option value="Imagem">Imagem</option>
+            <option value="Procedimento">Procedimento</option>
+          </select>
+          <div style={{ display:"flex", gap:4 }}>
+            {COLUNAS.map(c=>(
+              <button key={c.id} onClick={()=>setOrdenar(c.id)} style={{
+                padding:"6px 14px", borderRadius:8, fontSize:11, fontWeight:700, cursor:"pointer",
+                border:"1px solid "+(ordenar===c.id?"#8B1A1A":"#E5E7EB"),
+                background:ordenar===c.id?"#8B1A1A":"#fff",
+                color:ordenar===c.id?"#fff":"#6B7280",
+              }}>{c.label}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Totais do filtro */}
+      {filtrados.length > 0 && (
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:16 }}>
+          <div style={{ background:"#F9FAFB", borderRadius:10, padding:"10px 14px", borderLeft:"3px solid #8B1A1A" }}>
+            <div style={{ fontSize:10, fontWeight:700, color:"#6B7280", textTransform:"uppercase", marginBottom:2 }}>Executado</div>
+            <div style={{ fontSize:16, fontWeight:800, color:"#8B1A1A" }}>{brl(totalExec)}</div>
+            <div style={{ fontSize:10, color:"#9CA3AF" }}>{filtrados.reduce((s,p)=>s+(p.total_os||0),0).toLocaleString("pt-BR")} OSs</div>
+          </div>
+          <div style={{ background:"#F9FAFB", borderRadius:10, padding:"10px 14px", borderLeft:"3px solid #0891B2" }}>
+            <div style={{ fontSize:10, fontWeight:700, color:"#6B7280", textTransform:"uppercase", marginBottom:2 }}>Solicitado</div>
+            <div style={{ fontSize:16, fontWeight:800, color:"#0891B2" }}>{brl(totalSolic)}</div>
+            <div style={{ fontSize:10, color:"#9CA3AF" }}>{filtrados.reduce((s,p)=>s+(p.os_solicitadas||0),0).toLocaleString("pt-BR")} OSs</div>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ textAlign:"center", padding:32, color:"#9CA3AF" }}>Carregando...</div>
+      ) : filtrados.length === 0 ? (
+        <div style={{ textAlign:"center", padding:32, color:"#9CA3AF" }}>Sem dados</div>
+      ) : (
+        <>
+          <div style={{ display:"grid", gridTemplateColumns:"28px 1fr 130px 130px", gap:8, padding:"6px 10px", fontSize:10, fontWeight:700, color:"#9CA3AF", textTransform:"uppercase", borderBottom:"1px solid #F3F4F6", marginBottom:4 }}>
+            <span>#</span>
+            <span>Profissional</span>
+            <span style={{ textAlign:"right" }}>Executado</span>
+            <span style={{ textAlign:"right" }}>Solicitado</span>
+            <span style={{ textAlign:"right" }}>Total Gerado</span>
+          </div>
+
+          {filtrados.map((p, i) => (
+            <div key={i} style={{
+              display:"grid", gridTemplateColumns:"28px 1fr 130px 130px", gap:8,
+              padding:"12px 10px", alignItems:"center",
+              background:i%2===0?"#FAFAFA":"#fff", borderRadius:10, marginBottom:2,
+            }}>
+              <span style={{ fontSize:11, fontWeight:700, color:"#D1D5DB" }}>{i+1}</span>
+
+              <div>
+                <div style={{ fontSize:13, fontWeight:700, color:"#111827", cursor:"pointer" }}
+                  onClick={() => handleExpandir(p.profissional)}>
+                  {expandido === p.profissional ? "▼ " : "▶ "}{p.profissional}
+                </div>
+                <div style={{ fontSize:10, color:"#9CA3AF", marginTop:1 }}>
+                  {(p.especialidades||[]).slice(0,3).join(" · ")}
+                  {(p.especialidades||[]).length > 3 ? ` +${(p.especialidades||[]).length - 3}` : ""}
+                </div>
+                {p.total_gerado > 0 && (
+                  <div style={{ display:"flex", height:3, background:"#F3F4F6", borderRadius:2, marginTop:4, overflow:"hidden" }}>
+                    <div style={{ width:((p.producao_total/p.total_gerado)*100)+"%", background:"#8B1A1A", height:"100%" }}/>
+                    <div style={{ width:((p.producao_solicitada/p.total_gerado)*100)+"%", background:"#0891B2", height:"100%" }}/>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontSize:13, fontWeight:700, color:"#8B1A1A" }}>{brl(p.producao_total)}</div>
+                <div style={{ fontSize:10, color:"#9CA3AF" }}>{num(p.total_os)} OSs · {num(p.pacientes)} pac.</div>
+              </div>
+
+              <div style={{ textAlign:"right" }}>
+                <div style={{ fontSize:13, fontWeight:700, color:"#0891B2" }}>{brl(p.producao_solicitada)}</div>
+                <div style={{ fontSize:10, color:"#9CA3AF" }}>{num(p.os_solicitadas)} OSs</div>
+              </div>
+
+              {expandido === p.profissional && (
+                <div style={{ gridColumn:"1/-1", marginTop:8, background:"#F9FAFB", borderRadius:10, padding:"12px 14px" }}>
+                  {loadDet && !detalhe[p.profissional] ? (
+                    <div style={{ color:"#9CA3AF", fontSize:12 }}>Carregando...</div>
+                  ) : (
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                      <div>
+                        <div style={{ fontSize:11, fontWeight:700, color:"#8B1A1A", marginBottom:8, textTransform:"uppercase" }}>Executado</div>
+                        {(detalhe[p.profissional]?.executados || []).map((s, j) => (
+                          <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", borderBottom:"1px solid #F3F4F6" }}>
+                            <div>
+                              <div style={{ fontSize:12, color:"#374151" }}>{s.servico}</div>
+                              <div style={{ fontSize:10, color:"#9CA3AF" }}>{s.especialidade}</div>
+                            </div>
+                            <div style={{ textAlign:"right" }}>
+                              <div style={{ fontSize:12, fontWeight:700, color:"#8B1A1A" }}>{brl(s.valor)}</div>
+                              <div style={{ fontSize:10, color:"#9CA3AF" }}>{num(s.qtd_itens)}x</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div>
+                        <div style={{ fontSize:11, fontWeight:700, color:"#0891B2", marginBottom:8, textTransform:"uppercase" }}>Solicitado</div>
+                        {(detalhe[p.profissional]?.solicitados || []).map((s, j) => (
+                          <div key={j} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", borderBottom:"1px solid #F3F4F6" }}>
+                            <div>
+                              <div style={{ fontSize:12, color:"#374151" }}>{s.servico}</div>
+                              <div style={{ fontSize:10, color:"#9CA3AF" }}>{s.especialidade}</div>
+                            </div>
+                            <div style={{ textAlign:"right" }}>
+                              <div style={{ fontSize:12, fontWeight:700, color:"#0891B2" }}>{brl(s.valor)}</div>
+                              <div style={{ fontSize:10, color:"#9CA3AF" }}>{num(s.qtd_itens)}x</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── PRODUÇÃO MENSAL ───────────────────────────────────────────────────────────
 const DIAS_SEMANA = ["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"];
 
@@ -459,6 +668,7 @@ function GraficoProducaoAnual() {
 
 
 // ── PRODUÇÃO MENSAL ───────────────────────────────────────────────────────────
+
 function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
   const hoje     = new Date();
   const hojeStr  = `${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,"0")}-${String(hoje.getDate()).padStart(2,"0")}`;
@@ -530,6 +740,7 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
             ))}
           </select>
           <PainelMetas metaDiaria={metaDiaria} metaMensal={metaMensal} onSalvar={salvar} />
+          
         </div>
 
         {/* Legenda */}
@@ -550,7 +761,7 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
 
       {/* ── KPIs ── */}
       {data && !loading && (
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:12, marginBottom:20 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))", gap:12, marginBottom:20 }}>
           {[
             { label:"Ocupacional",   val:data.total_ocupacional,  color:"#8B5CF6", sub:null },
             { label:"Assistencial",  val:data.total_assistencial, color:"#8B1A1A", sub:null },
@@ -566,7 +777,7 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
           ].map((k,i) => (
             <div key={i} style={{ background:"#fff", borderRadius:12, padding:"16px 18px", borderTop:`3px solid ${k.color}`, boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
               <div style={{ fontSize:10, color:C.faint, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:6 }}>{k.label}</div>
-              <div style={{ fontSize:20, fontWeight:800, color:k.color, lineHeight:1.1 }}>{fmt(k.val)}</div>
+              <div style={{ fontSize:17, fontWeight:800, color:k.color, lineHeight:1.1 }}>{fmt(k.val)}</div>
               {k.sub && <div style={{ fontSize:11, color:C.sub, marginTop:4 }}>{k.sub}</div>}
             </div>
           ))}
@@ -872,6 +1083,7 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
           </table>
         </div>
       )}
+      <ProducaoProfissionais ano={ano} mes={mes} API={API} />
     </div>
   );
 }
@@ -2393,6 +2605,8 @@ const IconMonitor = ({ size=18, color="currentColor" }) => (
 );
 
 const Icon = ({ name, size=18, color="currentColor" }) => {
+  if (name === "layers")        return <IconLayers        size={size} color={color}/>;
+  if (name === "users")         return <IconUsers         size={size} color={color}/>;
   if (name === "stethoscope")   return <IconStethoscope   size={size} color={color}/>;
   if (name === "brain")         return <IconBrain         size={size} color={color}/>;
   if (name === "hardhat")       return <IconHardhat       size={size} color={color}/>;
@@ -2401,6 +2615,7 @@ const Icon = ({ name, size=18, color="currentColor" }) => {
   if (name === "money-trend")   return <IconMoneyTrend    size={size} color={color}/>;
   if (name === "box")           return <IconBox           size={size} color={color}/>;
   if (name === "monitor")       return <IconMonitor       size={size} color={color}/>;
+  if (name === "home")          return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>;
   const p = {
     dollar:    "M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6",
     trending:  "M23 6l-9.5 9.5-5-5L1 18M17 6h6v6",
@@ -3430,7 +3645,8 @@ function TabelaMedicosAgenda({ medicos, periodo }) {
     }
   };
 
-  const cols = ["#","Médico","Turno","Vagas","Agendados","Atendidos","Faltantes","Cancelados","Abs.%"];
+  // ← MUDANÇA 1: adicionado "Encaixe" entre "Faltantes" e "Cancelados"
+  const cols = ["#","Médico","Turno","Vagas","Agendados","Atendidos","Faltantes","Encaixe","Cancelados","Abs.%"];
 
   return (
     <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
@@ -3468,7 +3684,7 @@ function TabelaMedicosAgenda({ medicos, periodo }) {
                   {m.turno==="manha" ? "☀ Manhã" : m.turno==="tarde" ? "🌙 Tarde" : "—"}
                 </span>
               </td>
-              {/* Vagas disponíveis */}
+              {/* Vagas */}
               <td style={{ padding:"10px 12px", textAlign:"right", color:"#6B7280" }}>
                 {num(m.vagas_disp)}
               </td>
@@ -3484,6 +3700,22 @@ function TabelaMedicosAgenda({ medicos, periodo }) {
               <td style={{ padding:"10px 12px", textAlign:"right", fontWeight:600, color:"#F59E0B" }}>
                 {num(m.faltantes)}
               </td>
+
+              {/* ← MUDANÇA 2: nova célula Encaixe */}
+              <td style={{ padding:"10px 12px", textAlign:"right" }}>
+                {(m.encaixe || 0) > 0 ? (
+                  <span style={{
+                    display:"inline-flex", alignItems:"center", justifyContent:"center",
+                    padding:"2px 9px", borderRadius:12, fontSize:11, fontWeight:700,
+                    background:"#EDE9FE", color:"#7C3AED", border:"1px solid #DDD6FE",
+                  }}>
+                    +{num(m.encaixe)}
+                  </span>
+                ) : (
+                  <span style={{ color:"#D1D5DB", fontSize:12 }}>—</span>
+                )}
+              </td>
+
               {/* Cancelados */}
               <td style={{ padding:"10px 12px", textAlign:"right", color:"#EF4444", fontWeight:600 }}>
                 {num(m.cancelados)}
@@ -3506,9 +3738,10 @@ function TabelaMedicosAgenda({ medicos, periodo }) {
             </tr>
 
             {/* Dropdown detalhamento por convênio */}
+            {/* ← MUDANÇA 3: colSpan de 8 → 9 por causa da nova coluna */}
             {aberto === i && (
               <tr key={`det-${i}`}>
-                <td colSpan={8} style={{ padding:0, background:"#F0F7FF",
+                <td colSpan={9} style={{ padding:0, background:"#F0F7FF",
                   borderBottom:"2px solid #BFDBFE" }}>
                   <div style={{ padding:"12px 48px" }}>
                     <div style={{ fontSize:11, fontWeight:700, color:"#6B1010",
@@ -3558,7 +3791,6 @@ function TabelaMedicosAgenda({ medicos, periodo }) {
                               </tr>
                             );
                           })}
-                          {/* Total */}
                           <tr style={{ background:"#F5E0E0" }}>
                             <td style={{ padding:"7px 12px", fontWeight:800, color:"#6B1010" }}>Total</td>
                             <td style={{ padding:"7px 12px", textAlign:"right", fontWeight:800, color:"#6B1010" }}>
@@ -3584,6 +3816,7 @@ function TabelaMedicosAgenda({ medicos, periodo }) {
     </table>
   );
 }
+
 
 function SecaoModuloAgendamentos({ periodo }) {
   const { data, loading, error } = useFetch("/api/modulo/agendamentos/resumo", { periodo }, 30000);
@@ -4053,19 +4286,45 @@ function SecaoModuloAgendamentos({ periodo }) {
 // NAVEGAÇÃO
 // ══════════════════════════════════════════════════════════════════════════════
 const NAV = [
-  { id:"assistencial", label:"Assistencial",            icon:"stethoscope",    color:"#8B1A1A", desc:"Consultas, emergências e cirurgias" },
-  { id:"ocupacional",  label:"Med. Ocupacional",        icon:"hardhat",        color:"#D97706", desc:"Adm · Per · Dem · Retorno" },
-  { id:"servicos",     label:"Serviços Especializados", icon:"brain",          color:"#8B5CF6", desc:"Psi, Nutri, Fono, Radiologia, Cardio…" },
-  { id:"laboratorio",  label:"Laboratório",             icon:"microscope",     color:"#10B981", desc:"Análises clínicas e exames de sangue" },
-  { id:"agendamentos", label:"Agendamentos",            icon:"calendar-clock", color:"#7C3AED", desc:"Agenda médica e indicadores" },
-  { id:"producao",     label:"Produção Mensal",         icon:"money-trend",    color:"#0891B2", desc:"Meta e provisionamento mensal" },
-  { id:"estoque",      label:"Estoque",                 icon:"box",            color:"#0D9488", desc:"Posição, giro e validade" },
-  { id:"painel_tv",    label:"Painel TV",               icon:"monitor",        color:"#7C3AED", desc:"Tempo real · para telão" },
+  { id: "home", label: "Home", icon: "home", color: "#8B1A1A" },
+  { id:"contratos",  label:"Contratos",             icon:"layers",         color:"#0D9488", desc:"Gestão de contratos" },
+  { id:"assistencial",label:"Assistencial",          icon:"stethoscope",    color:"#8B1A1A", desc:"Consultas, emergências e cirurgias" },
+  { id:"ocupacional", label:"Med. Ocupacional",      icon:"hardhat",        color:"#D97706", desc:"Adm · Per · Dem · Retorno" },
+  { id:"servicos",    label:"Serviços Especializados",icon:"brain",         color:"#8B5CF6", desc:"Psi, Nutri, Fono, Radiologia, Cardio…" },
+  { id:"laboratorio", label:"Laboratório",           icon:"microscope",     color:"#10B981", desc:"Análises clínicas e exames de sangue" },
+  { id:"agendamentos",label:"Agendamentos",          icon:"calendar-clock", color:"#7C3AED", desc:"Agenda médica e indicadores" },
+  { id:"producao",    label:"Produção Mensal",       icon:"money-trend",    color:"#0891B2", desc:"Meta e provisionamento mensal" },
+  { id:"pacientesdb", label:"Pacientes DB",          icon:"users",          color:"#0891B2", desc:"Base · logradouros · ranking · aniversários" },
+  { id:"estoque",     label:"Estoque",               icon:"box",            color:"#0D9488", desc:"Posição, giro e validade" },
+  { id:"painel_tv",   label:"Painel TV",             icon:"monitor",        color:"#7C3AED", desc:"Tempo real · para telão" },
+  { id:"admin", label:"Permissões", icon:"settings", color:"#374151", desc:"Gerenciar acessos" },
 ];
 
+const IconLayers = ({ size=18, color="currentColor" }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="12 2 2 7 12 12 22 7 12 2"/>
+    <polyline points="2 17 12 22 22 17"/>
+    <polyline points="2 12 12 17 22 12"/>
+  </svg>
+);
+
+const IconUsers = ({ size=18, color="currentColor" }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
+    <circle cx="9" cy="7" r="4"/>
+    <path d="M23 21v-2a4 4 0 00-3-3.87"/>
+    <path d="M16 3.13a4 4 0 010 7.75"/>
+  </svg>
+);
 const RENDER_MAP = {
+  home:         (p) => <Home periodoGlobal={p}/>,
+  admin: () => <AdminPermissoes/>,
+  contratos: () => <ModuloContratos/>,
+  admin: () => <AdminPermissoes/>,
+  contratos: () => <ModuloContratos/>,
   assistencial: (p) => <SecaoModuloAssistencial periodo={p}/>,
   ocupacional:  (p) => <SecaoModuloOcupacional  periodo={p}/>,
+  pacientesdb: (p) => <PacientesDB periodo={p}/>,
   servicos:     (p) => <SecaoModuloServicos     periodo={p}/>,
   laboratorio:  (p) => <SecaoModuloLaboratorio  periodo={p}/>,
   agendamentos: (p) => <SecaoModuloAgendamentos periodo={p}/>,
@@ -5424,9 +5683,18 @@ function SecaoEstoque({ periodo }) {
   );
 }
 
-
+function AppWithLogin() {
+  const { user, login } = useAuth();
+  if (!user) return <Login onLogin={login} />;
+  return <AppInner />;
+}
 export default function App() {
-  const [page,           setPage]           = useState("assistencial");
+  return <AuthProvider><AppWithLogin /></AuthProvider>;
+}
+
+function AppInner() {
+  const { user, logout, podeVer } = useAuth();
+  const [page,           setPage]           = useState("home");
   const [period,         setPeriod]         = useState("30d");
   const [online,         setOnline]         = useState(null);
   const [collapsed,      setCollapsed]      = useState(false);
@@ -5473,6 +5741,28 @@ export default function App() {
           {online===null?"…":online?"Online":"Offline"}
         </div>
         <div style={{ width:1, height:22, background:"#E5E7EB", flexShrink:0 }}/>
+
+        {/* Usuário logado */}
+        <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ fontSize:12, fontWeight:700, color:"#111827", lineHeight:1.2 }}>
+              {user?.nome?.split(" ").slice(0,2).join(" ") || user?.login}
+            </div>
+            {user?.admin && (
+              <div style={{ fontSize:10, color:"#8B1A1A", fontWeight:700 }}>Admin</div>
+            )}
+          </div>
+          <button onClick={logout} style={{
+            padding:"5px 12px", borderRadius:8,
+            border:"1px solid #E5E7EB", background:"#F9F9F9",
+            color:"#6B7280", fontSize:11, fontWeight:700,
+            cursor:"pointer", transition:"all 0.12s",
+          }}
+            onMouseEnter={e => { e.target.style.background="#FEF2F2"; e.target.style.color="#8B1A1A"; e.target.style.borderColor="#8B1A1A"; }}
+            onMouseLeave={e => { e.target.style.background="#F9F9F9"; e.target.style.color="#6B7280"; e.target.style.borderColor="#E5E7EB"; }}>
+            Sair
+          </button>
+        </div>
 
         {/* Período */}
         <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, position:"relative" }}>
@@ -5561,7 +5851,7 @@ export default function App() {
           </div>
 
           <div style={{ flex:1, overflowY:"auto", padding:collapsed?"6px":"10px" }}>
-            {NAV.map(n => {
+            {NAV.filter(n => n.id === "admin" ? user?.admin : podeVer(n.id)).map(n => {
               const active = page === n.id;
               return collapsed ? (
                 <button key={n.id} onClick={()=>setPage(n.id)} title={n.label}
