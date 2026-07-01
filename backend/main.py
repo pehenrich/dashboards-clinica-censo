@@ -7925,6 +7925,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
               AND fle.FLE_PAC_REG > 0
               AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
               {filtro_setor}
         ),
         esperas AS (
@@ -8001,6 +8002,7 @@ def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str 
         WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
           AND fle.FLE_PAC_REG > 0
           AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+          AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
           {filtro_setor}
           {filtro_recep}
         GROUP BY

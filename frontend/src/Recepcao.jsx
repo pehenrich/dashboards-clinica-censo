@@ -113,8 +113,8 @@ export default function Recepcao({ periodo = "30d" }) {
 
       {/* KPI Cards */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <KpiCard label="Total de atendimentos" value={num(totalPacientes)} color="#8B1A1A" />
-        <KpiCard label="Espera média" value={min(esperaMedia)} sub="Do check-in à abertura da OS" color="#D97706" />
+        <KpiCard label="Total de pacientes" value={num(totalPacientes)} color="#8B1A1A" />
+        <KpiCard label="Tempo médio de recepção" value={min(esperaMedia)} sub="Do registro até abertura da OS" color="#D97706" />
         <KpiCard label="Produção financeira" value={brl(producaoTotal)} sub="Valor das OS abertas" color="#10B981" />
         <KpiCard label="Recepcionistas" value={num(ranking.length)} color="#7C3AED" />
       </div>
@@ -133,8 +133,8 @@ export default function Recepcao({ periodo = "30d" }) {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ background: "#F9FAFB" }}>
-                  {["#", "Recepcionista", "Recepção", "Pacientes", "Espera Média", "Produção"].map(h => (
-                    <th key={h} style={{ padding: "8px 12px", textAlign: h === "#" || h === "Pacientes" || h === "Espera Média" || h === "Produção" ? "center" : "left", fontWeight: 700, color: "#6B7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: "1px solid #E5E7EB" }}>
+                  {["#", "Recepcionista", "Recepção", "Pacientes", "Tempo Recepção", "Produção"].map(h => (
+                    <th key={h} style={{ padding: "8px 12px", textAlign: h === "#" || h === "Pacientes" || h === "Tempo Recepção" || h === "Produção" ? "center" : "left", fontWeight: 700, color: "#6B7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: "1px solid #E5E7EB" }}>
                       {h}
                     </th>
                   ))}
