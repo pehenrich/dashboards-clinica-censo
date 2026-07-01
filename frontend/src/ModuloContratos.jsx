@@ -97,8 +97,8 @@ export default function ModuloContratos() {
 
       {/* Info cards */}
       <div style={{
-        display: "grid", gridTemplateColumns: "repeat(3, 1fr)",
-        gap: 12, maxWidth: 520, width: "100%",
+        display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+        gap: 12, width: "100%",
       }}>
         {[
           { icon: "📋", titulo: "Contratos Ativos",   desc: "Visualize todos os contratos vigentes" },

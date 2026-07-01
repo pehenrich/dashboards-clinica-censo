@@ -618,7 +618,10 @@ const SETORES = [
   { cod:"RDI", nome:"Diagnóstico" },
 ];
 
+const useIsMobile = () => { const [m, setM] = useState(window.innerWidth < 768); useEffect(() => { const fn = () => setM(window.innerWidth < 768); window.addEventListener("resize", fn); return () => window.removeEventListener("resize", fn); }, []); return m; };
+
 export default function PacientesDB({periodo="30d"}) {
+  const isMobile = useIsMobile();
   const [setor, setSetor] = useState("");
 
   const {data:resumo,loading:lR}=useFetch("/api/pacientes/resumo",{periodo,setor});
@@ -655,7 +658,7 @@ export default function PacientesDB({periodo="30d"}) {
       </div>
 
       {/* ROW 1 — KPIs */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:12}}>
         <KPI label="Atendidos"       value={num(resumo?.pacientes_atendidos)} accent={C.red}    loading={lR} icon="👥"/>
         <KPI label="Novos Cadastros" value={num(resumo?.novos_cadastros)}     accent={C.green}  loading={lR} icon="✨" sub="no periodo" trend="up"/>
         <KPI label="Retorno"         value={num(resumo?.retorno)}             accent={C.blue}   loading={lR} icon="🔄" sub="mais de 1 atendimento"/>
@@ -670,7 +673,7 @@ export default function PacientesDB({periodo="30d"}) {
       <MapaCalor periodo={periodo} setor={setor}/>
       
       {/* ROW 3 — Crescimento + Retorno vs Novos */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"1fr":"1fr 1fr",gap:12}}>
         <CrescimentoBase setor={setor}/>
         <RetornoVsNovos setor={setor}/>
       </div>

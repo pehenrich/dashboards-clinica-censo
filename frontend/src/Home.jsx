@@ -182,7 +182,10 @@ function Alertas({ dados }) {
   );
 }
 
+const useIsMobile = () => { const [m, setM] = useState(window.innerWidth < 768); useEffect(() => { const fn = () => setM(window.innerWidth < 768); window.addEventListener("resize", fn); return () => window.removeEventListener("resize", fn); }, []); return m; };
+
 export default function Home({ periodoGlobal }) {
+  const isMobile = useIsMobile();
   const [setor,   setSetor]   = useState("todos");
   const [dados,   setDados]   = useState(null);
   const [loading, setLoading] = useState(true);
@@ -361,7 +364,7 @@ export default function Home({ periodoGlobal }) {
           </div>
 
           {/* Rankings */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>
             <div style={{ background: "#fff", borderRadius: 14, padding: "18px 20px", boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 14 }}>🏆 Top Convênios</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
