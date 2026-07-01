@@ -7949,6 +7949,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             FROM chegadas c
             JOIN osm o ON o.osm_pac = c.FLE_PAC_REG
                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+                      AND RTRIM(o.osm_str) = c.setor_cod
             JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_OSM_SERIE = o.osm_serie
             GROUP BY c.login_recep, c.setor_cod
         )
@@ -8015,6 +8016,39 @@ def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str 
     for r in rows:
         if hasattr(r.get("data"), "strftime"):
             r["data"] = r["data"].strftime("%Y-%m-%d")
+    return rows or []
+
+
+@app.get("/api/recepcao/convenios")
+def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str = ""):
+    """Breakdown de convênios por recepcionista: quantidade de OS abertas."""
+    inicio, fim = periodo_datas(periodo)
+    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+    filtro_recep = f"AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) = '{recepcionista}'" if recepcionista else ""
+    rows = query(f"""
+        WITH base AS (
+            SELECT DISTINCT
+                RTRIM(ISNULL(cnv.CNV_NOME, CAST(osm.osm_cnv AS VARCHAR(50)))) AS convenio,
+                osm.osm_num,
+                osm.osm_serie
+            FROM fle
+            JOIN osm ON osm.osm_pac = fle.FLE_PAC_REG
+                    AND CAST(osm.osm_dthr AS DATE) = CAST(fle.FLE_DTHR_CHEGADA AS DATE)
+                    AND osm.osm_dthr >= fle.FLE_DTHR_CHEGADA
+                    AND RTRIM(osm.osm_str) = RTRIM(fle.FLE_STR_COD)
+            LEFT JOIN cnv ON cnv.CNV_COD = osm.osm_cnv
+            WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND fle.FLE_PAC_REG > 0
+              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+              {filtro_setor}
+              {filtro_recep}
+        )
+        SELECT convenio, COUNT(*) AS total_os
+        FROM base
+        GROUP BY convenio
+        ORDER BY total_os DESC
+    """)
     return rows or []
 
 
