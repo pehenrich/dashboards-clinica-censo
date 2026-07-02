@@ -138,13 +138,22 @@ function ColunaRecepcaoTV({ cod, nome, cor }) {
 }
 
 function PainelTV() {
-  const META_DIARIA = 45000;
+  // Meta diária real (mesma configurada no módulo Produção Mensal) — evita
+  // divergir do valor hardcoded que ficava fixo em 45000 independente do que
+  // era salvo em /api/metas.
+  const [metaDiaria, setMetaDiaria] = useState(45000);
+  useEffect(() => {
+    fetch(`${API}/api/metas`)
+      .then(r => r.json())
+      .then(d => { if (d?.producao?.meta_diaria != null) setMetaDiaria(d.producao.meta_diaria); })
+      .catch(() => {});
+  }, []);
   const [setor,    setSetor]    = useState("");
   const [isFS,     setIsFS]     = useState(false);
   const ref = { current: null };
 
   const { data: resumo,  loading: lR } = usePainelFetch(
-    `/api/painel/resumo-hoje?meta_diaria=${META_DIARIA}${setor ? `&setor=${setor}` : ""}`
+    `/api/painel/resumo-hoje?meta_diaria=${metaDiaria}${setor ? `&setor=${setor}` : ""}`
   );
   const { data: medicos,    loading: lM  } = usePainelFetch(
     `/api/painel/medicos-ativos${setor ? `?setor=${setor}` : ""}`
@@ -452,7 +461,7 @@ function PainelTV() {
             <div style={{ fontSize:14, color:"#94A3B8", fontWeight:600, marginBottom:2 }}>META DO DIA</div>
             <div style={{ display:"flex", alignItems:"baseline", gap:10 }}>
               <span style={{ fontSize:32, fontWeight:900, color:corMeta }}>{brl(resumo?.faturamento)}</span>
-              <span style={{ fontSize:16, color:"#64748B" }}>de {brl(META_DIARIA)}</span>
+              <span style={{ fontSize:16, color:"#64748B" }}>de {brl(metaDiaria)}</span>
             </div>
           </div>
           <div style={{ textAlign:"right" }}>
