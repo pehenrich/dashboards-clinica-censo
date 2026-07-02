@@ -2936,6 +2936,78 @@ def laboratorio_por_recepcao(periodo: str = "30d", setor: str = ""):
     return rows
 
 
+@app.get("/api/modulo/laboratorio/tempo-coleta")
+def laboratorio_tempo_coleta(periodo: str = "30d", setor: str = "", recepcao: str = ""):
+    """
+    Tempo entre a chegada do paciente na recepção (FLE_DTHR_CHEGADA) e a coleta
+    da amostra laboratorial (SMM_DTHR_COLETA), quebrado por ponto de recepção.
+    """
+    inicio, fim = periodo_datas(periodo)
+    esp_sql = ",".join(f"'{c}'" for c in ALL_LAB_ESP)
+
+    if setor == "diagnostico":
+        filtro_setor = "AND osm.osm_atend IN ('ASS','EME','CRG','TAM')"
+    elif setor == "ocupacional":
+        filtro_setor = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
+    else:
+        filtro_setor = ""
+
+    recepcao_cod = "".join(ch for ch in recepcao if ch.isalnum())[:6]
+    if recepcao_cod:
+        filtro_setor += f" AND RTRIM(osm.osm_str) = '{recepcao_cod}'"
+
+    rows = query(f"""
+        WITH chegadas AS (
+            -- Uma linha por (paciente, dia): primeira chegada registrada na recepção
+            SELECT fle.FLE_PAC_REG, CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg,
+                   MIN(fle.FLE_DTHR_CHEGADA) AS chegada_min
+            FROM fle
+            WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND fle.FLE_PAC_REG > 0
+            GROUP BY fle.FLE_PAC_REG, CAST(fle.FLE_DTHR_CHEGADA AS DATE)
+        ),
+        coletas AS (
+            -- Uma linha por (paciente, dia, recepção): primeira coleta de amostra lab
+            SELECT osm.osm_pac AS pac, CAST(osm.osm_dthr AS DATE) AS data_col,
+                   RTRIM(osm.osm_str) AS recepcao_cod,
+                   MIN(smm.SMM_DTHR_COLETA) AS coleta_min
+            FROM smm
+            JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+            WHERE smm.SMM_ESP IN ({esp_sql})
+              AND smm.SMM_SFAT IN ('A','F','P')
+              AND smm.SMM_DTHR_COLETA IS NOT NULL
+              AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              {filtro_setor}
+            GROUP BY osm.osm_pac, CAST(osm.osm_dthr AS DATE), RTRIM(osm.osm_str)
+        ),
+        pares AS (
+            SELECT k.recepcao_cod,
+                   DATEDIFF(minute, c.chegada_min, k.coleta_min) AS espera_min
+            FROM coletas k
+            JOIN chegadas c ON c.FLE_PAC_REG = k.pac AND c.data_cheg = k.data_col
+            WHERE DATEDIFF(minute, c.chegada_min, k.coleta_min) BETWEEN 0 AND 300
+        )
+        SELECT
+            recepcao_cod,
+            AVG(CAST(espera_min AS FLOAT)) AS tempo_medio_min,
+            MIN(espera_min)                AS tempo_min_min,
+            MAX(espera_min)                AS tempo_max_min,
+            COUNT(*)                       AS amostras
+        FROM pares
+        GROUP BY recepcao_cod
+        ORDER BY amostras DESC
+    """)
+
+    total_amostras = sum(r["amostras"] for r in rows)
+    media_geral = (sum(r["tempo_medio_min"] * r["amostras"] for r in rows) / total_amostras) if total_amostras else None
+
+    return {
+        "media_min": media_geral,
+        "amostras": total_amostras,
+        "por_recepcao": rows,
+    }
+
+
 # ── AGENDAMENTOS (já existe, mas adicionando financeiro) ─────────────────────
 
 @app.get("/api/modulo/agendamentos/medico-detalhe")

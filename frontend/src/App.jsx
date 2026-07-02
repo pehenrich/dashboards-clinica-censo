@@ -3077,6 +3077,7 @@ const Icon = ({ name, size=18, color="currentColor" }) => {
     wifi:      "M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01",
     activity:  "M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01",
     document:  "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M8 13h8M8 17h8M8 9h1",
+    clock:     "M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2",
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -4183,6 +4184,10 @@ function SecaoModuloLaboratorio({ periodo }) {
   const { data: porRecepcaoData, loading: lRecep } = useFetch("/api/modulo/laboratorio/por-recepcao", { periodo: periodoEfetivo, setor });
   const porRecepcao = porRecepcaoData || [];
 
+  const { data: tempoColetaData, loading: lColeta } = useFetch("/api/modulo/laboratorio/tempo-coleta", { periodo: periodoEfetivo, setor, recepcao });
+  const tempoColeta = tempoColetaData?.por_recepcao || [];
+  const min = v => v != null ? `${Math.round(v)} min` : "—";
+
   return (
     <div style={{ animation:"fadeIn 0.35s ease" }}>
       {error && <Err msg={error.message}/>}
@@ -4290,7 +4295,36 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
         <ModuloCard label="Produção"  value={brl(fin.faturamento)}     color="#10B981" loading={loading} icon="dollar"/>
         <ModuloCard label="Ticket / OS"  value={brl(fin.ticket_medio)}    color="#F59E0B" loading={loading} icon="trending"
           sub="faturamento ÷ nº de OSs"/>
+        <ModuloCard label="Recepção → Coleta" value={min(tempoColetaData?.media_min)} color="#0891B2" loading={lColeta} icon="clock"
+          sub={tempoColetaData?.amostras ? `${num(tempoColetaData.amostras)} amostras` : ""}/>
       </div>
+
+      {/* Tempo até a Coleta — desde a chegada na recepção até a coleta da amostra */}
+      <Card title="Tempo até a Coleta" subtitle="Da chegada na recepção até a coleta da amostra laboratorial, por ponto de recepção" style={{ marginBottom:16 }}>
+        {lColeta ? <Skeleton h={140}/> : tempoColeta.length === 0 ? (
+          <div style={{ padding:"32px", textAlign:"center", color:C.faint, fontSize:12 }}>Sem coletas com chegada registrada no período</div>
+        ) : (
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:14 }}>
+            {RECEPCOES_LAB_PRODUCAO.map(rc => {
+              const r = tempoColeta.find(x => x.recepcao_cod === rc.cod);
+              const cor = RECEPCAO_LAB_CORES[rc.cod] || "#64748B";
+              return (
+                <div key={rc.cod} style={{
+                  background:`linear-gradient(135deg, ${cor}22 0%, ${cor}0A 100%)`,
+                  borderRadius:12, padding:"16px 18px", border:`1.5px solid ${cor}35`,
+                }}>
+                  <div style={{ fontSize:13, fontWeight:800, color:"#111827", marginBottom:12 }}>{rc.nome}</div>
+                  <div style={{ fontSize:10, color:cor, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.05em" }}>Tempo médio</div>
+                  <div style={{ fontSize:28, fontWeight:900, color:cor, lineHeight:1.15 }}>{r ? min(r.tempo_medio_min) : "—"}</div>
+                  <div style={{ fontSize:11, color:"#6B7280", marginTop:10, fontWeight:600 }}>
+                    {r ? `${num(r.amostras)} amostras · min ${min(r.tempo_min_min)} · max ${min(r.tempo_max_min)}` : "sem amostras no período"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
 
       {/* Produção por Recepção — Diagnóstico, Consultórios, Ocupacional, Censo Imagem */}
       <Card title="Produção por Recepção" subtitle="Faturamento, OS e pacientes de exames laboratoriais, por ponto de recepção" style={{ marginBottom:16 }}>
