@@ -2936,11 +2936,19 @@ def laboratorio_por_recepcao(periodo: str = "30d", setor: str = ""):
     return rows
 
 
+def _agrega_tempo(rows):
+    total_amostras = sum(r["amostras"] for r in rows)
+    media_geral = (sum(r["tempo_medio_min"] * r["amostras"] for r in rows) / total_amostras) if total_amostras else None
+    return {"media_min": media_geral, "amostras": total_amostras, "por_recepcao": rows}
+
+
 @app.get("/api/modulo/laboratorio/tempo-coleta")
 def laboratorio_tempo_coleta(periodo: str = "30d", setor: str = "", recepcao: str = ""):
     """
-    Tempo entre a chegada do paciente na recepção (FLE_DTHR_CHEGADA) e a coleta
-    da amostra laboratorial (SMM_DTHR_COLETA), quebrado por ponto de recepção.
+    Duas métricas de tempo até a coleta da amostra laboratorial (SMM_DTHR_COLETA),
+    quebradas por ponto de recepção:
+    - senha_coleta: da emissão da senha na recepção (FLE_DTHR_CHEGADA) até a coleta
+    - os_coleta: da abertura da OS (osm_dthr) até o registro da coleta
     """
     inicio, fim = periodo_datas(periodo)
     esp_sql = ",".join(f"'{c}'" for c in ALL_LAB_ESP)
@@ -2956,9 +2964,9 @@ def laboratorio_tempo_coleta(periodo: str = "30d", setor: str = "", recepcao: st
     if recepcao_cod:
         filtro_setor += f" AND RTRIM(osm.osm_str) = '{recepcao_cod}'"
 
-    rows = query(f"""
+    rows_senha = query(f"""
         WITH chegadas AS (
-            -- Uma linha por (paciente, dia): primeira chegada registrada na recepção
+            -- Uma linha por (paciente, dia): primeira senha emitida na recepção
             SELECT fle.FLE_PAC_REG, CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg,
                    MIN(fle.FLE_DTHR_CHEGADA) AS chegada_min
             FROM fle
@@ -2998,13 +3006,33 @@ def laboratorio_tempo_coleta(periodo: str = "30d", setor: str = "", recepcao: st
         ORDER BY amostras DESC
     """)
 
-    total_amostras = sum(r["amostras"] for r in rows)
-    media_geral = (sum(r["tempo_medio_min"] * r["amostras"] for r in rows) / total_amostras) if total_amostras else None
+    rows_os = query(f"""
+        WITH pares AS (
+            SELECT RTRIM(osm.osm_str) AS recepcao_cod,
+                   DATEDIFF(minute, osm.osm_dthr, smm.SMM_DTHR_COLETA) AS espera_min
+            FROM smm
+            JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+            WHERE smm.SMM_ESP IN ({esp_sql})
+              AND smm.SMM_SFAT IN ('A','F','P')
+              AND smm.SMM_DTHR_COLETA IS NOT NULL
+              AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              {filtro_setor}
+        )
+        SELECT
+            recepcao_cod,
+            AVG(CAST(espera_min AS FLOAT)) AS tempo_medio_min,
+            MIN(espera_min)                AS tempo_min_min,
+            MAX(espera_min)                AS tempo_max_min,
+            COUNT(*)                       AS amostras
+        FROM pares
+        WHERE espera_min BETWEEN 0 AND 300
+        GROUP BY recepcao_cod
+        ORDER BY amostras DESC
+    """)
 
     return {
-        "media_min": media_geral,
-        "amostras": total_amostras,
-        "por_recepcao": rows,
+        "senha_coleta": _agrega_tempo(rows_senha),
+        "os_coleta":    _agrega_tempo(rows_os),
     }
 
 

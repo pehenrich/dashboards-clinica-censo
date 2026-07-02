@@ -4203,7 +4203,10 @@ function SecaoModuloLaboratorio({ periodo }) {
   const porRecepcao = porRecepcaoData || [];
 
   const { data: tempoColetaData, loading: lColeta } = useFetch("/api/modulo/laboratorio/tempo-coleta", { periodo: periodoEfetivo, setor, recepcao });
-  const tempoColeta = tempoColetaData?.por_recepcao || [];
+  const senhaColeta = tempoColetaData?.senha_coleta || {};
+  const osColeta    = tempoColetaData?.os_coleta || {};
+  const senhaColetaPorRecepcao = senhaColeta.por_recepcao || [];
+  const osColetaPorRecepcao    = osColeta.por_recepcao || [];
   const min = v => v != null ? `${Math.round(v)} min` : "—";
 
   const { data: producaoProfissionalData, loading: lProfissional } = useFetch("/api/modulo/laboratorio/producao-por-profissional", { periodo: periodoEfetivo, setor, recepcao });
@@ -4316,18 +4319,50 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
         <ModuloCard label="Produção"  value={brl(fin.faturamento)}     color="#10B981" loading={loading} icon="dollar"/>
         <ModuloCard label="Ticket / OS"  value={brl(fin.ticket_medio)}    color="#F59E0B" loading={loading} icon="trending"
           sub="faturamento ÷ nº de OSs"/>
-        <ModuloCard label="Recepção → Coleta" value={min(tempoColetaData?.media_min)} color="#0891B2" loading={lColeta} icon="clock"
-          sub={tempoColetaData?.amostras ? `${num(tempoColetaData.amostras)} amostras` : ""}/>
+        <ModuloCard label="Senha → Coleta" value={min(senhaColeta.media_min)} color="#0891B2" loading={lColeta} icon="clock"
+          sub={senhaColeta.amostras ? `${num(senhaColeta.amostras)} amostras` : ""}/>
+        <ModuloCard label="OS → Coleta" value={min(osColeta.media_min)} color="#7C3AED" loading={lColeta} icon="clock"
+          sub={osColeta.amostras ? `${num(osColeta.amostras)} amostras` : ""}/>
       </div>
 
-      {/* Tempo até a Coleta — desde a chegada na recepção até a coleta da amostra */}
-      <Card title="Tempo até a Coleta" subtitle="Da chegada na recepção até a coleta da amostra laboratorial, por ponto de recepção" style={{ marginBottom:16 }}>
-        {lColeta ? <Skeleton h={140}/> : tempoColeta.length === 0 ? (
-          <div style={{ padding:"32px", textAlign:"center", color:C.faint, fontSize:12 }}>Sem coletas com chegada registrada no período</div>
+      {/* Tempo até a Coleta — duas métricas, por ponto de recepção */}
+      <Card title="Tempo até a Coleta" subtitle="Duas etapas do trajeto até a coleta da amostra laboratorial, por ponto de recepção" style={{ marginBottom:16 }}>
+        <div style={{ fontSize:12, fontWeight:800, color:"#0891B2", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:10 }}>
+          Emissão da senha → Coleta
+        </div>
+        {lColeta ? <Skeleton h={140}/> : senhaColetaPorRecepcao.length === 0 ? (
+          <div style={{ padding:"20px", textAlign:"center", color:C.faint, fontSize:12 }}>Sem coletas com senha registrada no período</div>
+        ) : (
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:14, marginBottom:24 }}>
+            {RECEPCOES_LAB_PRODUCAO.map(rc => {
+              const r = senhaColetaPorRecepcao.find(x => x.recepcao_cod === rc.cod);
+              const cor = RECEPCAO_LAB_CORES[rc.cod] || "#64748B";
+              return (
+                <div key={rc.cod} style={{
+                  background:`linear-gradient(135deg, ${cor}22 0%, ${cor}0A 100%)`,
+                  borderRadius:12, padding:"16px 18px", border:`1.5px solid ${cor}35`,
+                }}>
+                  <div style={{ fontSize:13, fontWeight:800, color:"#111827", marginBottom:12 }}>{rc.nome}</div>
+                  <div style={{ fontSize:10, color:cor, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.05em" }}>Tempo médio</div>
+                  <div style={{ fontSize:28, fontWeight:900, color:cor, lineHeight:1.15 }}>{r ? min(r.tempo_medio_min) : "—"}</div>
+                  <div style={{ fontSize:11, color:"#6B7280", marginTop:10, fontWeight:600 }}>
+                    {r ? `${num(r.amostras)} amostras · min ${min(r.tempo_min_min)} · max ${min(r.tempo_max_min)}` : "sem amostras no período"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ fontSize:12, fontWeight:800, color:"#7C3AED", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:10 }}>
+          Abertura da OS → Coleta
+        </div>
+        {lColeta ? <Skeleton h={140}/> : osColetaPorRecepcao.length === 0 ? (
+          <div style={{ padding:"20px", textAlign:"center", color:C.faint, fontSize:12 }}>Sem coletas com OS registrada no período</div>
         ) : (
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:14 }}>
             {RECEPCOES_LAB_PRODUCAO.map(rc => {
-              const r = tempoColeta.find(x => x.recepcao_cod === rc.cod);
+              const r = osColetaPorRecepcao.find(x => x.recepcao_cod === rc.cod);
               const cor = RECEPCAO_LAB_CORES[rc.cod] || "#64748B";
               return (
                 <div key={rc.cod} style={{
