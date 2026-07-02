@@ -4441,18 +4441,30 @@ def estoque_por_grupo(periodo: str = "30d"):
 # PAINEL TV — TEMPO REAL (atualiza a cada 30s)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Setores (osm_str) cuja produção deve ser somada junto com outro setor no Painel TV.
+# PSI (Psicologia) soma junto com RCN (Recepção Consultórios) a pedido do usuário.
+SETOR_MERGE_PAINEL = {"RCN": ["RCN", "PSI"]}
+
+def _filtro_osm_str_painel(setor: str) -> str:
+    if setor == "OCUP_TIPO":
+        return "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
+    if not setor:
+        return ""
+    codigos = SETOR_MERGE_PAINEL.get(setor, [setor])
+    lista = ",".join(f"'{c}'" for c in codigos)
+    return f"AND RTRIM(osm.osm_str) IN ({lista})"
+
+
 @app.get("/api/painel/resumo-hoje")
 def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
     """
     KPIs do dia atual em tempo real.
     setor='OCUP_TIPO' → filtra por TIPO de atendimento ocupacional (osm_atend), não pela
     recepção física — usado pra bater com o KPI "Ocupacional" do painel geral.
+    setor='RCN' → soma também a produção de Psicologia (osm_str='PSI').
     """
     hoje = datetime.now().strftime("%Y-%m-%d")
-    if setor == "OCUP_TIPO":
-        filtro_str = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
-    else:
-        filtro_str = f"AND RTRIM(osm.osm_str) = '{setor}'" if setor else ""
+    filtro_str = _filtro_osm_str_painel(setor)
 
     # Atendimentos e faturamento do dia
     fat = query(f"""
@@ -4538,10 +4550,7 @@ def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
     # Tempo de espera — lógica unificada para todos os setores:
     # FLE_DTHR_CHEGADA (chegada do paciente) → osm_dthr (abertura da OS = início do atendimento)
     # Deduplica com TOP 1 para pegar a chegada mais recente antes da OS de cada paciente
-    if setor == "OCUP_TIPO":
-        filtro_str_espera = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
-    else:
-        filtro_str_espera = f"AND RTRIM(osm.osm_str) = '{setor}'" if setor else ""
+    filtro_str_espera = _filtro_osm_str_painel(setor)
     espera = query(f"""
         SELECT
             AVG(espera_min)  AS espera_media_min,
@@ -4623,15 +4632,30 @@ def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
 
 
 
+# Único filtro de setor exibido no Painel TV: Consultórios, Diagnóstico,
+# Ocupacional e Censo Imagem — Psicologia (PSI) soma dentro de Consultórios
+# (RCN) e qualquer outro código (Laboratório, salas avulsas etc.) fica de fora.
+SETORES_PAINEL_PERMITIDOS = ["RCN", "RDI", "ROC", "RCI"]
+
 @app.get("/api/painel/setores")
 def painel_setores():
-    """Setores ativos hoje — OSM como fonte principal, espera média via FLE."""
+    """Setores ativos hoje — restrito a Consultórios/Diagnóstico/Ocupacional/Censo Imagem."""
     hoje = datetime.now().strftime("%Y-%m-%d")
+    permitidos_sql = ",".join(f"'{c}'" for c in SETORES_PAINEL_PERMITIDOS)
     rows = query(f"""
-        SELECT TOP 12
-            RTRIM(osm.osm_str)                                   AS setor_cod,
+        WITH base AS (
+            SELECT
+                CASE WHEN RTRIM(osm.osm_str) = 'PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END AS setor_cod,
+                osm.osm_serie, osm.osm_num, osm.osm_pac, osm.osm_dthr
+            FROM osm
+            WHERE CAST(osm.osm_dthr AS DATE) = '{hoje}'
+              AND osm.osm_str IS NOT NULL
+              AND LTRIM(RTRIM(osm.osm_str)) <> ''
+        )
+        SELECT
+            b.setor_cod,
             RTRIM(str.str_nome)                                  AS setor_nome,
-            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)   AS atendimentos,
+            COUNT(DISTINCT b.osm_serie*1000000+b.osm_num)        AS atendimentos,
             -- espera media: FLE chegada → OS abertura, deduplificado por paciente
             (SELECT AVG(t.espera_min) FROM (
                 SELECT DISTINCT osm2.osm_serie, osm2.osm_num,
@@ -4646,14 +4670,12 @@ def painel_setores():
                         osm2.osm_dthr) AS espera_min
                 FROM osm osm2
                 WHERE CAST(osm2.osm_dthr AS DATE) = '{hoje}'
-                  AND RTRIM(osm2.osm_str) = RTRIM(osm.osm_str)
+                  AND (CASE WHEN RTRIM(osm2.osm_str) = 'PSI' THEN 'RCN' ELSE RTRIM(osm2.osm_str) END) = b.setor_cod
             ) t WHERE t.espera_min BETWEEN 1 AND 120)            AS espera_media_min
-        FROM osm
-        LEFT JOIN str ON str.str_cod = osm.osm_str
-        WHERE CAST(osm.osm_dthr AS DATE) = '{hoje}'
-          AND osm.osm_str IS NOT NULL
-          AND LTRIM(RTRIM(osm.osm_str)) <> ''
-        GROUP BY RTRIM(osm.osm_str), RTRIM(str.str_nome)
+        FROM base b
+        LEFT JOIN str ON RTRIM(str.str_cod) = b.setor_cod
+        WHERE b.setor_cod IN ({permitidos_sql})
+        GROUP BY b.setor_cod, RTRIM(str.str_nome)
         ORDER BY atendimentos DESC
     """)
     return rows
