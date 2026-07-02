@@ -474,7 +474,7 @@ function GraficoComparativoAnual({ titulo, subtitulo, endpoint, deps, dataKey, f
 // ── COMPARATIVO FATURAMENTO ANUAL ────────────────────────────────────────────
 
 
-function ProducaoProfissionais({ ano, mes, API }) {
+function ProducaoProfissionais({ ano, mes, API, setAno, setMes }) {
   const [dados,     setDados]     = useState([]);
   const [loading,   setLoading]   = useState(false);
   const [busca,     setBusca]     = useState("");
@@ -537,6 +537,24 @@ const COLUNAS = [
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:10 }}>
         <div style={{ fontSize:14, fontWeight:800, color:"#111827" }}>Produção por Profissional</div>
         <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+          {setMes && setAno && (
+            <>
+              <select value={mes} onChange={e=>setMes(Number(e.target.value))} title="Mês" style={{
+                padding:"7px 12px", borderRadius:8, border:"1px solid #E5E7EB", fontSize:12,
+                outline:"none", background:"#fff", cursor:"pointer", fontWeight:600, color:"#111827",
+              }}>
+                {MESES_PT.map((m,i) => <option key={i+1} value={i+1}>{m}</option>)}
+              </select>
+              <select value={ano} onChange={e=>setAno(Number(e.target.value))} title="Ano" style={{
+                padding:"7px 12px", borderRadius:8, border:"1px solid #E5E7EB", fontSize:12,
+                outline:"none", background:"#fff", cursor:"pointer", fontWeight:600, color:"#111827",
+              }}>
+                {[new Date().getFullYear()-2, new Date().getFullYear()-1, new Date().getFullYear()].map(a=>(
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+            </>
+          )}
           <input placeholder="Buscar profissional..." value={busca} onChange={e=>setBusca(e.target.value)}
             style={{ padding:"7px 12px", borderRadius:8, border:"1px solid #E5E7EB", fontSize:12, outline:"none", width:170 }}/>
           <select value={espFiltro} onChange={e=>setEspFiltro(e.target.value)}
@@ -1472,7 +1490,7 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
           </table>
         </div>
       )}
-      <ProducaoProfissionais ano={ano} mes={mes} API={API} />
+      <ProducaoProfissionais ano={ano} mes={mes} API={API} setAno={setAno} setMes={setMes} />
     </div>
   );
 }
