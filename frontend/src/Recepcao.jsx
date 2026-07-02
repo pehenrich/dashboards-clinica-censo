@@ -18,7 +18,6 @@ const RECEPCOES = [
   { cod: "RCN", nome: "Consultórios" },
   { cod: "RDI", nome: "Diagnóstico" },
   { cod: "ROC", nome: "Ocupacional" },
-  { cod: "RPS", nome: "Pro Saúde" },
   { cod: "RCI", nome: "Censo Imagem" },
 ];
 
@@ -95,6 +94,16 @@ export default function Recepcao({ periodo = "30d" }) {
   const [sortDir, setSortDir] = useState("desc");
   const [porConvenio, setPorConvenio] = useState([]);
   const [loadingConvAgg, setLoadingConvAgg] = useState(true);
+  const [metas, setMetas] = useState(null);
+  const [loadingMetas, setLoadingMetas] = useState(true);
+
+  useEffect(() => {
+    setLoadingMetas(true);
+    fetch(`${API}/api/recepcao/metas?periodo=${periodo}&setor=${setor}`)
+      .then(r => r.json())
+      .then(d => { setMetas(d || null); setLoadingMetas(false); })
+      .catch(() => setLoadingMetas(false));
+  }, [periodo, setor]);
 
   useEffect(() => {
     setLoadingRank(true);
@@ -237,6 +246,83 @@ Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.
         <KpiCard label="Tempo médio de recepção" value={min(esperaMedia)} sub="Do registro até abertura da OS" color="#D97706" />
         <KpiCard label="Produção financeira" value={brl(producaoTotal)} sub="Valor das OS abertas" color="#10B981" />
         <KpiCard label="Recepcionistas" value={num(ranking.length)} color="#7C3AED" />
+      </div>
+
+      {/* Metas de Recepção — calculadas a partir do histórico dos últimos 3 meses */}
+      <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 2 }}>Metas de Recepção</div>
+        <div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 14 }}>
+          Metas calculadas com base na média histórica dos últimos 3 meses
+          {metas?.periodo_historico ? ` (${metas.periodo_historico.inicio} a ${metas.periodo_historico.fim})` : ""}
+        </div>
+
+        {loadingMetas ? <Skeleton h={160} /> : (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "#059669", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+              💰 Meta de Produção por Recepção
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 10, marginBottom: 20 }}>
+              {(metas?.producao_por_recepcao || []).map(p => {
+                const cor = p.pct == null ? "#9CA3AF" : p.pct >= 100 ? "#059669" : p.pct >= 60 ? "#D97706" : "#DC2626";
+                return (
+                  <div key={p.recepcao_cod} style={{
+                    background: `linear-gradient(135deg, ${cor}18 0%, ${cor}08 100%)`,
+                    borderRadius: 12, padding: "12px 14px", border: `1.5px solid ${cor}35`,
+                  }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#111827", marginBottom: 8 }}>
+                      {p.recepcao_nome.replace(/^Recepção /, "")}
+                    </div>
+                    <div style={{ fontSize: 16, fontWeight: 900, color: cor }}>{brl(p.atual)}</div>
+                    <div style={{ fontSize: 10, color: "#6B7280", marginBottom: 6 }}>
+                      de {p.meta_mensal ? brl(p.meta_mensal) : "—"} (meta mensal)
+                    </div>
+                    <div style={{ height: 6, background: "#F1F5F9", borderRadius: 3, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${Math.min(100, p.pct || 0)}%`, background: cor, borderRadius: 3, transition: "width 0.6s" }}/>
+                    </div>
+                    <div style={{ fontSize: 10, color: cor, fontWeight: 700, marginTop: 4 }}>
+                      {p.pct != null ? `${p.pct}% da meta` : "sem histórico"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ fontSize: 11, fontWeight: 800, color: "#D97706", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+              ⏱ Meta de Tempo Médio de Atendimento por Recepcionista
+            </div>
+            <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 10 }}>
+              Meta: até <b>{min(metas?.meta_tempo_atendimento_min)}</b> (média histórica geral) · chegada até abertura da OS
+            </div>
+            {recepPorTempo.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 24, color: "#9CA3AF", fontSize: 12 }}>Sem dados de tempo no período</div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 8 }}>
+                {recepPorTempo.map(r => {
+                  const metaMin = metas?.meta_tempo_atendimento_min;
+                  const dentro = metaMin != null && r.espera_media_min <= metaMin;
+                  const cor = metaMin == null ? "#9CA3AF" : dentro ? "#059669" : "#DC2626";
+                  return (
+                    <div key={`${r.login_recep}|${r.setor_cod}`} style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "8px 12px", borderRadius: 8, background: `${cor}10`, border: `1px solid ${cor}30`,
+                    }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {r.nome_recep || r.login_recep}
+                        </div>
+                        <div style={{ fontSize: 10, color: "#9CA3AF" }}>{r.setor_nome}</div>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 8 }}>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: cor }}>{min(r.espera_media_min)}</div>
+                        <div style={{ fontSize: 9, fontWeight: 700, color: cor }}>{metaMin == null ? "" : dentro ? "✓ dentro" : "✕ acima"}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* Ranking */}

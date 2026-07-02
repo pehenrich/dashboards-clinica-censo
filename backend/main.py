@@ -8482,10 +8482,125 @@ def pacientes_servicos_comparativo(
 RECEPCOES = {
     "RDI": "Recepção Diagnóstico",
     "ROC": "Recepção Ocupacional",
-    "RPS": "Recepção Pro Saúde",
     "RCN": "Recepção Consultórios",
     "RCI": "Recepção Censo Imagem",
 }
+
+@app.get("/api/recepcao/metas")
+def recepcao_metas(periodo: str = "30d", setor: str = ""):
+    """
+    Metas de recepção calculadas com base no histórico dos últimos 3 meses
+    completos anteriores ao mês atual:
+    - producao_por_recepcao: meta mensal de produção financeira por recepção
+      (média histórica), comparada com o total do período selecionado
+    - meta_tempo_atendimento_min: meta única de tempo médio de atendimento
+      (chegada → abertura da OS), calculada como a média histórica geral
+      entre todas as recepcionistas/recepções — a comparação por
+      recepcionista no período atual já vem de /api/recepcao/ranking
+    """
+    inicio, fim = periodo_datas(periodo)
+    filtro_setor_fle = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+
+    # Janela histórica: os 3 meses completos anteriores ao mês atual
+    hoje = datetime.now()
+    hist_fim_dt = hoje.replace(day=1) - timedelta(days=1)
+    mes_ini = hist_fim_dt.month - 2
+    ano_ini = hist_fim_dt.year
+    if mes_ini <= 0:
+        mes_ini += 12
+        ano_ini -= 1
+    hist_inicio = hist_fim_dt.replace(year=ano_ini, month=mes_ini, day=1).strftime("%Y-%m-%d")
+    hist_fim = hist_fim_dt.strftime("%Y-%m-%d")
+    n_meses = 3
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    def producao_por_setor(dt_ini, dt_fim):
+        # Mesma atribuição "primeiro contato" já usada em /api/recepcao/ranking:
+        # um paciente conta pra recepção que o atendeu primeiro naquele dia.
+        rows = query(f"""
+            WITH chegadas_prod AS (
+                SELECT setor_cod, FLE_PAC_REG, data_cheg
+                FROM (
+                    SELECT RTRIM(fle.FLE_STR_COD) AS setor_cod, fle.FLE_PAC_REG,
+                        CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY fle.FLE_PAC_REG, CAST(fle.FLE_DTHR_CHEGADA AS DATE)
+                            ORDER BY fle.FLE_DTHR_CHEGADA ASC
+                        ) AS rn
+                    FROM fle
+                    WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{dt_ini}' AND '{dt_fim} 23:59:59'
+                      AND fle.FLE_PAC_REG > 0
+                      AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+                      AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+                      AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
+                      {filtro_setor_fle}
+                ) x WHERE rn = 1
+            )
+            SELECT c.setor_cod, SUM({vliq}) AS producao
+            FROM chegadas_prod c
+            JOIN osm o ON o.osm_pac = c.FLE_PAC_REG AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+            JOIN smm ON smm.SMM_OSM = o.osm_num AND smm.SMM_OSM_SERIE = o.osm_serie
+            WHERE smm.SMM_SFAT IN ('A','F','P')
+            GROUP BY c.setor_cod
+        """)
+        return {r["setor_cod"]: float(r["producao"] or 0) for r in rows}
+
+    hist_producao = producao_por_setor(hist_inicio, hist_fim)
+    atual_producao = producao_por_setor(inicio, fim)
+
+    producao_por_recepcao = []
+    for cod, nome in RECEPCOES.items():
+        if setor and cod != setor:
+            continue
+        meta_mensal = hist_producao.get(cod, 0) / n_meses
+        atual = atual_producao.get(cod, 0)
+        producao_por_recepcao.append({
+            "recepcao_cod": cod,
+            "recepcao_nome": nome,
+            "meta_mensal": meta_mensal,
+            "atual": atual,
+            "pct": round(atual / meta_mensal * 100, 1) if meta_mensal else None,
+        })
+
+    # Meta única de tempo de atendimento: média histórica geral (chegada -> abertura da OS)
+    hist_tempo = query(f"""
+        WITH chegadas AS (
+            SELECT RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login_recep,
+                RTRIM(fle.FLE_STR_COD) AS setor_cod, fle.FLE_PAC_REG, fle.FLE_DTHR_CHEGADA,
+                CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg
+            FROM fle
+            WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{hist_inicio}' AND '{hist_fim} 23:59:59'
+              AND fle.FLE_PAC_REG > 0
+              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
+              {filtro_setor_fle}
+        ),
+        esperas_agg AS (
+            SELECT c.login_recep, c.setor_cod,
+                AVG(CAST(CASE WHEN e.espera_min BETWEEN 0 AND 120 THEN e.espera_min ELSE NULL END AS FLOAT)) AS espera_media_min
+            FROM chegadas c
+            OUTER APPLY (
+                SELECT DATEDIFF(minute, c.FLE_DTHR_CHEGADA,
+                    (SELECT TOP 1 o.osm_dthr FROM osm o
+                     WHERE o.osm_pac = c.FLE_PAC_REG
+                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+                       AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
+                     ORDER BY o.osm_dthr ASC)) AS espera_min
+            ) e
+            GROUP BY c.login_recep, c.setor_cod
+        )
+        SELECT AVG(espera_media_min) AS media_geral
+        FROM esperas_agg WHERE espera_media_min IS NOT NULL
+    """)
+    meta_tempo_min = hist_tempo[0]["media_geral"] if hist_tempo and hist_tempo[0]["media_geral"] is not None else None
+
+    return {
+        "periodo_historico": {"inicio": hist_inicio, "fim": hist_fim, "meses": n_meses},
+        "producao_por_recepcao": producao_por_recepcao,
+        "meta_tempo_atendimento_min": meta_tempo_min,
+    }
+
 
 @app.get("/api/recepcao/ranking")
 def recepcao_ranking(periodo: str = "30d", setor: str = ""):
