@@ -8,7 +8,7 @@ import Recepcao from "./Recepcao";
 import Login, { AuthProvider, useAuth, AdminPermissoes } from "./Login";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
-  ComposedChart, Area,
+  ComposedChart, Area, ReferenceLine,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from "recharts";
 import Home from "./Home";
@@ -85,6 +85,15 @@ function useFetch(path, deps = {}, intervalMs = 0) {
   return { data, loading, error };
 }
 
+// Reduz a fonte do valor conforme o comprimento do texto, para nunca cortar (ex: valores em R$)
+function fitFontSize(value, base, min) {
+  const len = String(value ?? "").length;
+  if (len <= 7) return base;
+  if (len <= 10) return Math.round(base * 0.85);
+  if (len <= 13) return Math.round(base * 0.7);
+  return min;
+}
+
 // ── KPI CARD ──────────────────────────────────────────────────────────────────
 function KPI({ label, value, sub, deltaUp, loading, accent }) {
   const ac = accent || "#8B1A1A";
@@ -92,22 +101,22 @@ function KPI({ label, value, sub, deltaUp, loading, accent }) {
   const isDown = deltaUp === false;
   return (
     <div style={{
-      background: `linear-gradient(135deg, ${ac}14 0%, ${ac}05 100%)`,
+      background: `linear-gradient(135deg, ${ac}38 0%, ${ac}12 100%)`,
       borderRadius: 16, padding: "20px 22px",
-      border: `1.5px solid ${ac}25`,
-      boxShadow: `0 4px 20px ${ac}10, 0 1px 3px rgba(0,0,0,0.05)`,
+      border: `1.5px solid ${ac}55`,
+      boxShadow: `0 6px 20px ${ac}20, 0 1px 3px rgba(0,0,0,0.05)`,
       display: "flex", flexDirection: "column", gap: 8, minWidth: 0,
       position: "relative", overflow: "hidden",
     }}>
       <div style={{
         position:"absolute", right:-12, top:-12,
         width:72, height:72, borderRadius:"50%",
-        background:`${ac}10`, pointerEvents:"none",
+        background:`${ac}22`, pointerEvents:"none",
       }}/>
       <span style={{ fontSize:10, color: ac, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.1em" }}>{label}</span>
       {loading
         ? <div style={{ height:34, width:"65%", background:`${ac}20`, borderRadius:8, animation:"pulse 1.5s infinite" }}/>
-        : <div style={{ fontSize:24, fontWeight:900, color:"#111827", lineHeight:1.05, letterSpacing:"-0.5px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{value}</div>
+        : <div style={{ fontSize:fitFontSize(value,24,13), fontWeight:900, color:"#111827", lineHeight:1.15, letterSpacing:"-0.5px", overflowWrap:"anywhere" }}>{value}</div>
       }
       {sub && (
         <span style={{
@@ -161,31 +170,134 @@ function Card({ children, title, subtitle, action, accent, style: ex={} }) {
 
 // Componente hero para cabeçalho de módulo com gradiente
 function ModuleHero({ title, subtitle, cor, stats, loading }) {
+  const mobile = useMobile();
   return (
     <div style={{
       background: `linear-gradient(135deg, ${cor} 0%, ${cor}CC 100%)`,
-      borderRadius: 20, padding: "28px 32px", marginBottom: 20,
+      borderRadius: 20, padding: mobile ? "20px 18px" : "28px 32px", marginBottom: 20,
       boxShadow: `0 8px 32px ${cor}40`,
       position:"relative", overflow:"hidden",
     }}>
       <div style={{ position:"absolute", right:-30, top:-30, width:200, height:200, borderRadius:"50%", background:"rgba(255,255,255,0.07)", pointerEvents:"none" }}/>
       <div style={{ position:"absolute", right:60, bottom:-60, width:160, height:160, borderRadius:"50%", background:"rgba(255,255,255,0.05)", pointerEvents:"none" }}/>
       <div style={{ position:"relative" }}>
-        <div style={{ fontSize:20, fontWeight:900, color:"#fff", marginBottom:4, letterSpacing:"-0.3px" }}>{title}</div>
-        {subtitle && <div style={{ fontSize:13, color:"rgba(255,255,255,0.75)", marginBottom:24, fontWeight:500 }}>{subtitle}</div>}
+        <div style={{ fontSize: mobile?17:20, fontWeight:900, color:"#fff", marginBottom:4, letterSpacing:"-0.3px" }}>{title}</div>
+        {subtitle && <div style={{ fontSize:13, color:"rgba(255,255,255,0.75)", marginBottom: mobile?16:24, fontWeight:500 }}>{subtitle}</div>}
         {stats && (
-          <div style={{ display:"grid", gridTemplateColumns:`repeat(${stats.length},1fr)`, gap:16 }}>
+          <div style={{ display:"grid", gridTemplateColumns:`repeat(auto-fit,minmax(${mobile?100:130}px,1fr))`, gap: mobile?10:16 }}>
             {stats.map((s,i) => (
-              <div key={i} style={{ background:"rgba(255,255,255,0.15)", borderRadius:12, padding:"12px 16px", backdropFilter:"blur(4px)" }}>
-                <div style={{ fontSize:10, color:"rgba(255,255,255,0.8)", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4 }}>{s.label}</div>
-                <div style={{ fontSize:22, fontWeight:900, color:"#fff", lineHeight:1 }}>
+              <div key={i} style={{ background:"rgba(255,255,255,0.15)", borderRadius:12, padding: mobile?"10px 12px":"12px 16px", backdropFilter:"blur(4px)", minWidth:0 }}>
+                <div style={{ fontSize:10, color:"rgba(255,255,255,0.8)", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.label}</div>
+                <div style={{ fontSize:fitFontSize(s.value,22,13), fontWeight:900, color:"#fff", lineHeight:1.15, overflowWrap:"anywhere" }}>
                   {loading ? <span style={{ opacity:0.4 }}>—</span> : s.value}
                 </div>
-                {s.sub && <div style={{ fontSize:10, color:"rgba(255,255,255,0.7)", marginTop:3 }}>{s.sub}</div>}
+                <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginTop:3 }}>
+                  {s.sub && <span style={{ fontSize:10, color:"rgba(255,255,255,0.7)" }}>{s.sub}</span>}
+                  {!loading && s.trend != null && (
+                    <span style={{
+                      fontSize:10, fontWeight:800, padding:"1px 6px", borderRadius:99,
+                      color: s.trend >= 0 ? "#065F46" : "#7F1D1D",
+                      background: s.trend >= 0 ? "rgba(209,250,229,0.9)" : "rgba(254,226,226,0.9)",
+                    }}>
+                      {s.trend >= 0 ? "↑" : "↓"} {Math.abs(s.trend).toFixed(1)}%
+                    </span>
+                  )}
+                </div>
               </div>
             ))}
           </div>
         )}
+        {stats?.some(s => s.trend != null) && (
+          <div style={{ fontSize:10, color:"rgba(255,255,255,0.55)", marginTop:10 }}>
+            ↑↓ variação vs. período anterior equivalente
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Barra de progresso de meta mensal por módulo — persiste via /api/metas
+function MetaModulo({ modulo, cor, atual, periodo }) {
+  const [meta, setMeta] = useState(undefined); // undefined = carregando, null = sem meta definida
+  const [editando, setEditando] = useState(false);
+  const [tmp, setTmp] = useState("");
+  const [salvando, setSalvando] = useState(false);
+
+  useEffect(() => {
+    let cancelado = false;
+    fetch(`${API}/api/metas`)
+      .then(r => r.json())
+      .then(d => { if (!cancelado) setMeta(d?.[modulo]?.meta_mensal ?? null); })
+      .catch(() => { if (!cancelado) setMeta(null); });
+    return () => { cancelado = true; };
+  }, [modulo]);
+
+  if (periodo !== "30d" || meta === undefined) return null; // meta é mensal — só faz sentido no mês atual
+
+  const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
+
+  const salvar = async () => {
+    const valor = Number(tmp);
+    if (!valor || valor <= 0) return;
+    setSalvando(true);
+    try {
+      await fetch(`${API}/api/metas/${modulo}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meta_mensal: valor }),
+      });
+      setMeta(valor);
+      setEditando(false);
+    } catch (e) {}
+    setSalvando(false);
+  };
+
+  if (!meta) {
+    return editando ? (
+      <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", background:"#fff", borderRadius:12, padding:"10px 14px", border:`1.5px solid ${cor}30`, marginBottom:16 }}>
+        <span style={{ fontSize:12, color:"#6B7280", fontWeight:700 }}>Meta mensal (R$):</span>
+        <input type="number" value={tmp} onChange={e=>setTmp(e.target.value)} autoFocus
+          style={{ padding:"6px 10px", borderRadius:8, border:"1px solid #E5E7EB", width:140, fontSize:13, fontWeight:700 }}/>
+        <button onClick={salvar} disabled={salvando} style={{ background:cor, color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", fontWeight:700, fontSize:12, cursor:"pointer" }}>Salvar</button>
+        <button onClick={()=>setEditando(false)} style={{ background:"transparent", border:"none", color:"#9CA3AF", cursor:"pointer", fontSize:12 }}>Cancelar</button>
+      </div>
+    ) : (
+      <button onClick={()=>{ setTmp(""); setEditando(true); }} style={{
+        background:"transparent", border:`1.5px dashed ${cor}50`, borderRadius:10, padding:"8px 14px",
+        color:cor, fontSize:12, fontWeight:700, cursor:"pointer", marginBottom:16,
+      }}>+ Definir meta mensal</button>
+    );
+  }
+
+  const pctMeta = Math.min(100, ((atual||0)/meta)*100);
+  const corBarra = pctMeta >= 100 ? "#059669" : pctMeta >= 70 ? cor : pctMeta >= 40 ? "#D97706" : "#DC2626";
+
+  return (
+    <div style={{ background:"#fff", borderRadius:14, padding:"14px 18px", marginBottom:16,
+      border:"1px solid #E5E7EB", boxShadow:"0 1px 3px rgba(0,0,0,0.06)" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, flexWrap:"wrap", gap:6 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:11, fontWeight:800, color:"#6B7280", textTransform:"uppercase", letterSpacing:"0.06em" }}>🎯 Meta Mensal</span>
+          <span style={{ fontSize:12, fontWeight:700, color:corBarra }}>{pctMeta.toFixed(0)}%</span>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          {editando ? (
+            <>
+              <input type="number" value={tmp} onChange={e=>setTmp(e.target.value)} autoFocus
+                style={{ padding:"4px 8px", borderRadius:6, border:"1px solid #E5E7EB", width:110, fontSize:12 }}/>
+              <button onClick={salvar} disabled={salvando} style={{ background:cor, color:"#fff", border:"none", borderRadius:6, padding:"4px 10px", fontWeight:700, fontSize:11, cursor:"pointer" }}>Salvar</button>
+              <button onClick={()=>setEditando(false)} style={{ background:"transparent", border:"none", color:"#9CA3AF", cursor:"pointer", fontSize:11 }}>Cancelar</button>
+            </>
+          ) : (
+            <>
+              <span style={{ fontSize:12, color:"#374151" }}>{brl(atual)} <span style={{color:"#9CA3AF"}}>de</span> {brl(meta)}</span>
+              <button onClick={()=>{ setTmp(meta); setEditando(true); }} style={{ background:"transparent", border:"none", color:"#9CA3AF", cursor:"pointer", fontSize:14 }} title="Editar meta">⚙</button>
+            </>
+          )}
+        </div>
+      </div>
+      <div style={{ height:8, background:"#F1F5F9", borderRadius:4, overflow:"hidden" }}>
+        <div style={{ height:"100%", background:corBarra, borderRadius:4, width:`${pctMeta}%`, transition:"width 0.6s ease" }}/>
       </div>
     </div>
   );
@@ -576,18 +688,37 @@ const DIAS_SEMANA = ["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"];
 function useMetas() {
   const [metaDiaria, setMetaDiaria] = useState(45000);
   const [metaMensal, setMetaMensal] = useState(1200000);
+  const [metaSabado, setMetaSabado] = useState(45000);
 
-  const salvar = (diaria, mensal) => {
+  useEffect(() => {
+    fetch(`${API}/api/metas`)
+      .then(r => r.json())
+      .then(d => {
+        const m = d?.producao;
+        if (m?.meta_diaria != null) setMetaDiaria(m.meta_diaria);
+        if (m?.meta_mensal != null) setMetaMensal(m.meta_mensal);
+        if (m?.meta_sabado != null) setMetaSabado(m.meta_sabado);
+      })
+      .catch(() => {});
+  }, []);
+
+  const salvar = (diaria, mensal, sabado) => {
     setMetaDiaria(Number(diaria));
     setMetaMensal(Number(mensal));
+    setMetaSabado(Number(sabado));
+    fetch(`${API}/api/metas/producao`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meta_diaria: Number(diaria), meta_mensal: Number(mensal), meta_sabado: Number(sabado) }),
+    }).catch(() => {});
   };
-  return { metaDiaria, metaMensal, salvar };
+  return { metaDiaria, metaMensal, metaSabado, salvar };
 }
 
-function PainelMetas({ metaDiaria, metaMensal, onSalvar }) {
+function PainelMetas({ metaDiaria, metaMensal, metaSabado, onSalvar }) {
   const [aberto,   setAberto]   = useState(false);
   const [tmpD, setTmpD] = useState(metaDiaria);
   const [tmpM, setTmpM] = useState(metaMensal);
+  const [tmpS, setTmpS] = useState(metaSabado);
 
   const inputStyle = {
     padding:"7px 10px", borderRadius:8, border:`1px solid ${"#EAEDF2"}`,
@@ -598,7 +729,7 @@ function PainelMetas({ metaDiaria, metaMensal, onSalvar }) {
 
   return (
     <div style={{ position:"relative" }}>
-      <button onClick={() => { setTmpD(metaDiaria); setTmpM(metaMensal); setAberto(v=>!v); }} style={{
+      <button onClick={() => { setTmpD(metaDiaria); setTmpM(metaMensal); setTmpS(metaSabado); setAberto(v=>!v); }} style={{
         padding:"6px 14px", borderRadius:8, border:`1px solid ${"#EAEDF2"}`,
         background: aberto ? "#F59E0B" : "#fff",
         color: aberto ? "#0F172A" : "#6B7280",
@@ -626,6 +757,16 @@ function PainelMetas({ metaDiaria, metaMensal, onSalvar }) {
             </div>
           </div>
 
+          <div style={{ marginBottom:14 }}>
+            <label style={labelStyle}>Meta Sábado (R$)</label>
+            <input type="number" value={tmpS}
+              onChange={e => setTmpS(Number(e.target.value))}
+              style={inputStyle} step={1000} min={0} />
+            <div style={{ fontSize:10, color:"#6B7280", marginTop:4 }}>
+              Meta diária específica para sábados
+            </div>
+          </div>
+
           <div style={{ marginBottom:20 }}>
             <label style={labelStyle}>Meta Mensal (R$)</label>
             <input type="number" value={tmpM}
@@ -637,7 +778,7 @@ function PainelMetas({ metaDiaria, metaMensal, onSalvar }) {
           </div>
 
           <div style={{ display:"flex", gap:8 }}>
-            <button onClick={() => { onSalvar(tmpD, tmpM); setAberto(false); }} style={{
+            <button onClick={() => { onSalvar(tmpD, tmpM, tmpS); setAberto(false); }} style={{
               flex:1, padding:"8px", borderRadius:8, border:"none", cursor:"pointer",
               background:"#10B981", color:"#0F172A", fontSize:12, fontWeight:800,
             }}>Salvar</button>
@@ -649,6 +790,79 @@ function PainelMetas({ metaDiaria, metaMensal, onSalvar }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ── OCUPACIONAL vs ASSISTENCIAL — quando uma ultrapassou a outra ────────────
+function GraficoOcupVsAssist() {
+  const [meses, setMeses] = useState(24);
+  const { data, loading } = useFetch("/api/financeiro/ocupacional-vs-assistencial", { meses });
+  const MESES_ABREV = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+  const brlFull = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
+  const brlK = v => v != null ? `R$${(v/1000).toFixed(0)}k` : "—";
+
+  const chartData = (data||[]).map(r => ({
+    label: `${MESES_ABREV[r.mes-1]}/${String(r.ano).slice(2)}`,
+    ocupacional: r.ocupacional,
+    assistencial: r.assistencial,
+  }));
+
+  // Detecta o(s) mês(es) em que a liderança trocou de lado
+  const cruzamentos = [];
+  for (let i = 1; i < chartData.length; i++) {
+    const antes = chartData[i-1].assistencial - chartData[i-1].ocupacional;
+    const agora = chartData[i].assistencial - chartData[i].ocupacional;
+    if (antes !== 0 && agora !== 0 && Math.sign(antes) !== Math.sign(agora)) {
+      cruzamentos.push({
+        label: chartData[i].label,
+        quem: agora > 0 ? "Assistencial" : "Ocupacional",
+      });
+    }
+  }
+  const ultimoCruzamento = cruzamentos[cruzamentos.length - 1];
+
+  return (
+    <Card title="Ocupacional vs. Assistencial" subtitle="Produção mensal lado a lado — identifica quando uma ultrapassou a outra"
+      style={{ marginBottom:16 }}
+      action={
+        <div style={{ display:"flex", gap:4 }}>
+          {[12,24,36].map(n => (
+            <button key={n} onClick={()=>setMeses(n)} style={{
+              padding:"4px 10px", borderRadius:6, fontSize:12, fontWeight:700, cursor:"pointer",
+              border:`1px solid ${meses===n?"#8B1A1A":"#E5E7EB"}`,
+              background:meses===n?"#FDF2F2":"#fff",
+              color:meses===n?"#8B1A1A":"#6B7280",
+            }}>{n}m</button>
+          ))}
+        </div>
+      }>
+      {loading ? <Skeleton h={260}/> : (
+        <div>
+          {ultimoCruzamento && (
+            <div style={{ background:"#FFFBEB", border:"1px solid #FDE68A", borderRadius:10, padding:"8px 14px", marginBottom:12, fontSize:12, color:"#92400E" }}>
+              🔄 Última virada: <strong>{ultimoCruzamento.quem}</strong> passou a liderar em <strong>{ultimoCruzamento.label}</strong>
+              {cruzamentos.length > 1 && ` (${cruzamentos.length} viradas no período exibido)`}
+            </div>
+          )}
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={chartData} margin={{top:4,right:16,bottom:0,left:0}}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false}/>
+              <XAxis dataKey="label" tick={{fontSize:10,fill:"#9CA3AF"}} axisLine={false} tickLine={false} interval="preserveStartEnd"/>
+              <YAxis tickFormatter={brlK} tick={{fontSize:11,fill:"#9CA3AF"}} axisLine={false} tickLine={false} width={52}/>
+              <Tooltip formatter={(v,name)=>[brlFull(v), name]}
+                contentStyle={{ background:"#fff", border:"1px solid #E5E7EB", borderRadius:10,
+                  boxShadow:"0 4px 16px rgba(0,0,0,0.12)", fontSize:12 }}/>
+              <Legend iconSize={10} wrapperStyle={{fontSize:12,paddingTop:8}}/>
+              {cruzamentos.map((c,i) => (
+                <ReferenceLine key={i} x={c.label} stroke="#D97706" strokeDasharray="4 4" strokeWidth={1.5}/>
+              ))}
+              <Line type="monotone" dataKey="ocupacional"  name="Ocupacional"  stroke="#8B5CF6" strokeWidth={2.5} dot={{r:2}} activeDot={{r:5}}/>
+              <Line type="monotone" dataKey="assistencial" name="Assistencial" stroke="#8B1A1A" strokeWidth={2.5} dot={{r:2}} activeDot={{r:5}}/>
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -739,10 +953,16 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
   const [ano,    setAno]    = useState(hoje.getFullYear());
   const [mes,    setMes]    = useState(hoje.getMonth() + 1);
   const [hover,  setHover]  = useState(null); // { data, x, y }
-  const { metaDiaria, metaMensal, salvar } = useMetas();
+  const { metaDiaria, metaMensal, metaSabado, salvar } = useMetas();
   const { data, loading } = useFetch("/api/financeiro/producao-mensal", {
     ano, mes, meta_diaria: metaDiaria, meta_mensal_fixa: metaMensal,
   });
+
+  // Sábados têm meta própria (metaSabado) — todos os outros dias usam metaDiaria.
+  const ehSabado = (dataStr) => !!dataStr && new Date(dataStr + "T12:00:00").getDay() === 6;
+  const metaDoDia = (dataStr) => ehSabado(dataStr) ? metaSabado : metaDiaria;
+  // Meta média de uma semana, ponderada pelos dias com produção nela (mistura dias úteis e sábado)
+  const metaSemanaCalc = (diasV) => diasV.length ? diasV.reduce((s,d)=>s+metaDoDia(d.data),0)/diasV.length : metaDiaria;
 
   const fmt = (v) => v != null
     ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2}).format(v) : "—";
@@ -772,12 +992,25 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
   const falta    = data ? metaMensal - data.total_geral : 0;
   const necessario = data?.dias_restantes > 0 ? falta / data.dias_restantes : 0;
 
+  // Meta média do mês, ponderada por quantos dias úteis vs sábados existem (Seg–Sáb, sem domingo)
+  const metaMediaMensal = (() => {
+    const ultimoDia = new Date(ano, mes, 0).getDate();
+    let uteis = 0, sabados = 0;
+    for (let d = 1; d <= ultimoDia; d++) {
+      const dow = new Date(ano, mes - 1, d).getDay();
+      if (dow === 0) continue;
+      if (dow === 6) sabados++; else uteis++;
+    }
+    const total = uteis + sabados;
+    return total > 0 ? (uteis*metaDiaria + sabados*metaSabado) / total : metaDiaria;
+  })();
+
   const DIAS_NOME = ["Segunda","Terça","Quarta","Quinta","Sexta","Sábado"];
 
-  // Cor da célula baseada na performance vs meta
+  // Cor da célula baseada na performance vs meta (sábado usa metaSabado)
   const corCelula = (cel) => {
     if (!cel?.total) return null;
-    const pct = cel.total / metaDiaria;
+    const pct = cel.total / metaDoDia(cel.data);
     if (pct >= 1)    return { bg:"#F0FDF4", border:"#BBF7D0", dot:"#10B981" };
     if (pct >= 0.8)  return { bg:"#FFFBEB", border:"#FDE68A", dot:"#F59E0B" };
     return             { bg:"#FFF1F2", border:"#FECDD3", dot:"#F43F5E" };
@@ -826,7 +1059,7 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
         <div style={{ flex:1, minWidth:200 }}>
           <div style={{ fontSize:20, fontWeight:900, color:"#fff", marginBottom:4 }}>Produção Mensal</div>
           <div style={{ fontSize:13, color:"rgba(255,255,255,0.7)", marginBottom:20 }}>{MESES_PT[mes-1]} de {ano}</div>
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:12 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
             {[
               { l:"Realizado",   v:brlFmt(data?.total_geral),   s:null },
               { l:"Meta Mensal", v:brlFmt(metaMensal),           s:null },
@@ -887,7 +1120,7 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
               <option key={a} value={a}>{a}</option>
             ))}
           </select>
-          <PainelMetas metaDiaria={metaDiaria} metaMensal={metaMensal} onSalvar={salvar} />
+          <PainelMetas metaDiaria={metaDiaria} metaMensal={metaMensal} metaSabado={metaSabado} onSalvar={salvar} />
           
         </div>
 
@@ -909,18 +1142,18 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
 
       {/* ── KPIs ── */}
       {data && !loading && (
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))", gap:12, marginBottom:20 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:12, marginBottom:20 }}>
           {[
             { label:"Ocupacional",   val:data.total_ocupacional,  color:"#8B5CF6", sub:null },
             { label:"Assistencial",  val:data.total_assistencial, color:"#8B1A1A", sub:null },
             { label:"Total Geral",   val:data.total_geral,        color:"#10B981", sub:`${data.dias_com_producao} dias com produção` },
-            { label:"Média Diária",  val:data.media_diaria,       color: data.media_diaria>=metaDiaria?"#10B981":"#F59E0B",
-              sub: data.media_diaria>=metaDiaria ? "↑ acima da meta" : `↓ meta ${fmt(metaDiaria)}/dia` },
+            { label:"Média Diária",  val:data.media_diaria,       color: data.media_diaria>=metaMediaMensal?"#10B981":"#F59E0B",
+              sub: data.media_diaria>=metaMediaMensal ? "↑ acima da meta" : `↓ meta ${fmt(metaMediaMensal)}/dia` },
             { label:"Projeção",      val:projecao,                color: projecao>=metaMensal?"#10B981":"#F59E0B",
               sub:`${data.dias_restantes||0} dias restantes` },
             { label: falta<=0?"Meta Atingida ✓":"Necessário/Dia",
               val: falta<=0 ? Math.abs(falta) : necessario,
-              color: falta<=0 ? "#10B981" : necessario<=metaDiaria*1.3 ? "#F59E0B" : "#EF4444",
+              color: falta<=0 ? "#10B981" : necessario<=metaMediaMensal*1.3 ? "#F59E0B" : "#EF4444",
               sub: falta<=0 ? `Superou em ${fmt(Math.abs(falta))}` : `faltam ${fmt(falta)}` },
           ].map((k,i) => (
             <div key={i} style={{ background:"#fff", borderRadius:12, padding:"16px 18px", borderTop:`3px solid ${k.color}`, boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
@@ -977,7 +1210,8 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
             const totOcup = diasV.reduce((s,d) => s+(d.ocupacional||0),0);
             const totAss  = diasV.reduce((s,d) => s+(d.assistencial||0),0);
             const media   = diasV.length > 0 ? totSem/diasV.length : 0;
-            const corMedia = media===0?C.faint:media>=metaDiaria?"#10B981":"#EF4444";
+            const metaSem  = metaSemanaCalc(diasV);
+            const corMedia = media===0?C.faint:media>=metaSem?"#10B981":"#EF4444";
 
             return (
               <div key={si} style={{ display:"grid", gridTemplateColumns:"60px repeat(6,1fr) 140px 120px", borderBottom:`1px solid ${C.border}` }}>
@@ -1041,7 +1275,7 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
                             <div style={{ position:"absolute", bottom:0, left:0, right:0, height:3, background:"#EEEEEE" }}>
                               <div style={{
                                 height:"100%",
-                                width:`${Math.min(100,(cel.total/metaDiaria)*100)}%`,
+                                width:`${Math.min(100,(cel.total/metaDoDia(cel.data))*100)}%`,
                                 background: c?.dot,
                                 borderRadius:"0 2px 2px 0",
                               }}/>
@@ -1070,7 +1304,7 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
                     <>
                       <div style={{ fontSize:13, fontWeight:800, color:corMedia }}>{fmt(media)}</div>
                       <div style={{ fontSize:10, color:C.faint, marginTop:2 }}>
-                        {media >= metaDiaria ? "↑ acima" : `↓ ${((media/metaDiaria)*100).toFixed(0)}% da meta`}
+                        {media >= metaSem ? "↑ acima" : `↓ ${((media/metaSem)*100).toFixed(0)}% da meta`}
                       </div>
                     </>
                   ) : <span style={{ color:C.faint, fontSize:12 }}>—</span>}
@@ -1092,8 +1326,8 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
                 <div style={{ fontSize:10, color:C.blue }}>As: {fmt(data.total_assistencial)}</div>
               </div>
               <div style={{ padding:"12px", textAlign:"right" }}>
-                <div style={{ fontSize:14, fontWeight:800, color: data.media_diaria>=metaDiaria?"#10B981":"#EF4444" }}>{fmt(data.media_diaria)}</div>
-                <div style={{ fontSize:10, color:C.faint }}>meta: {fmt(metaDiaria)}</div>
+                <div style={{ fontSize:14, fontWeight:800, color: data.media_diaria>=metaMediaMensal?"#10B981":"#EF4444" }}>{fmt(data.media_diaria)}</div>
+                <div style={{ fontSize:10, color:C.faint }}>meta: {fmt(metaMediaMensal)}</div>
               </div>
             </div>
           )}
@@ -1105,8 +1339,9 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
       {hover?.cel?.total > 0 && (() => {
         const cel  = hover.cel;
         const r    = hover.rect;
-        const pctD = Math.min(100, ((cel.total||0)/metaDiaria)*100).toFixed(1);
-        const corD = cel.total >= metaDiaria ? "#10B981" : cel.total >= metaDiaria*0.8 ? "#F59E0B" : "#F43F5E";
+        const metaC = metaDoDia(cel.data);
+        const pctD = Math.min(100, ((cel.total||0)/metaC)*100).toFixed(1);
+        const corD = cel.total >= metaC ? "#10B981" : cel.total >= metaC*0.8 ? "#F59E0B" : "#F43F5E";
         return (
           <div style={{
             position:"fixed",
@@ -1133,8 +1368,8 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
               </div>
               <div style={{ height:1, background:C.border, margin:"4px 0" }}/>
               <div style={{ display:"flex", justifyContent:"space-between" }}>
-                <span style={{ fontSize:12, color:C.sub }}>Meta do dia</span>
-                <span style={{ fontSize:12, fontWeight:700, color:C.sub }}>{fmt(metaDiaria)}</span>
+                <span style={{ fontSize:12, color:C.sub }}>Meta do dia{ehSabado(cel.data) ? " (sábado)" : ""}</span>
+                <span style={{ fontSize:12, fontWeight:700, color:C.sub }}>{fmt(metaC)}</span>
               </div>
               {/* Barra de progresso */}
               <div>
@@ -1150,6 +1385,9 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
           </div>
         );
       })()}
+
+      {/* ── OCUPACIONAL vs ASSISTENCIAL ── */}
+      <GraficoOcupVsAssist/>
 
       {/* ── COMPARATIVO ANUAL ── */}
       <GraficoProducaoAnual/>
@@ -1176,10 +1414,11 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
                 const totOc  = diasV.reduce((s,d)=>s+(d.ocupacional||0),0);
                 const totAs  = diasV.reduce((s,d)=>s+(d.assistencial||0),0);
                 const media  = diasV.length>0 ? totSem/diasV.length : 0;
-                const vsMeta = media - metaDiaria;
+                const metaSem = metaSemanaCalc(diasV);
+                const vsMeta = media - metaSem;
                 const diasFut= semana.filter(d=>d?.data>hojeStr&&d?.dia).length;
                 const proj   = totSem + (media>0?media*diasFut:0);
-                const corM   = media===0?C.faint:media>=metaDiaria?"#10B981":"#EF4444";
+                const corM   = media===0?C.faint:media>=metaSem?"#10B981":"#EF4444";
                 return (
                   <tr key={si} style={{ borderBottom:`1px solid ${C.border}` }}
                     onMouseEnter={e=>e.currentTarget.style.background="#F2F2F2"}
@@ -1200,9 +1439,9 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
                         <span style={{ fontSize:11, color:C.amber, fontWeight:700 }}>Proj: {fmt(proj)}</span>
                       ) : (
                         <span style={{ padding:"3px 10px", borderRadius:20, fontSize:11, fontWeight:700,
-                          background:media>=metaDiaria?"#D1FAE5":"#FEE2E2",
-                          color:media>=metaDiaria?"#059669":"#DC2626" }}>
-                          {media>=metaDiaria?"✓ Acima":"✕ Abaixo"}
+                          background:media>=metaSem?"#D1FAE5":"#FEE2E2",
+                          color:media>=metaSem?"#059669":"#DC2626" }}>
+                          {media>=metaSem?"✓ Acima":"✕ Abaixo"}
                         </span>
                       )}
                     </td>
@@ -1217,9 +1456,9 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
                 <td style={{ padding:"12px 14px", textAlign:"right", color:"#8B5CF6", fontWeight:800 }}>{fmt(data.total_ocupacional)}</td>
                 <td style={{ padding:"12px 14px", textAlign:"right", color:C.blue, fontWeight:800 }}>{fmt(data.total_assistencial)}</td>
                 <td style={{ padding:"12px 14px", textAlign:"right", color:"#10B981", fontWeight:800, fontSize:14 }}>{fmt(data.total_geral)}</td>
-                <td style={{ padding:"12px 14px", textAlign:"right", color:data.media_diaria>=metaDiaria?"#10B981":"#EF4444", fontWeight:800 }}>{fmt(data.media_diaria)}</td>
-                <td style={{ padding:"12px 14px", textAlign:"right", color:data.media_diaria>=metaDiaria?"#10B981":"#EF4444", fontWeight:700 }}>
-                  {`${data.media_diaria-metaDiaria>=0?"+":""}${fmt(data.media_diaria-metaDiaria)}`}
+                <td style={{ padding:"12px 14px", textAlign:"right", color:data.media_diaria>=metaMediaMensal?"#10B981":"#EF4444", fontWeight:800 }}>{fmt(data.media_diaria)}</td>
+                <td style={{ padding:"12px 14px", textAlign:"right", color:data.media_diaria>=metaMediaMensal?"#10B981":"#EF4444", fontWeight:700 }}>
+                  {`${data.media_diaria-metaMediaMensal>=0?"+":""}${fmt(data.media_diaria-metaMediaMensal)}`}
                 </td>
                 <td style={{ padding:"12px 14px", textAlign:"right" }}>
                   <span style={{ padding:"3px 12px", borderRadius:20, fontSize:11, fontWeight:800,
@@ -1260,7 +1499,7 @@ function SecaoFinanceiro({ periodo, modulo }) {
       {eR && <Err msg={eR.message} />}
 
       {/* KPIs principais */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
         <KPI label="Faturado" value={brl(resumo?.faturamento)} loading={lR}
           sub={periodo==="30d" ? `${num(resumo?.total_os)} OSs · mês atual` : periodo==="90d" ? `${num(resumo?.total_os)} OSs · últimos 3 meses` : `${num(resumo?.total_os)} OSs · últimos 7 dias`}
           accent={"#8B1A1A"} />
@@ -1389,7 +1628,7 @@ function SecaoLaboratorio({ periodo }) {
 
       <div style={{ padding:"16px 20px" }}>
         {/* Cards por setor com dados reais */}
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:8, marginBottom:16 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:8, marginBottom:16 }}>
           {SETORES_CONFIG.map((s,i) => {
             const d = mapaSetores[s.cod];
             const color = CORES_LAB[i % CORES_LAB.length];
@@ -1508,7 +1747,7 @@ DADOS — Módulo Assistencial (período: ${periodo}):
 Destaque desempenho dos médicos, alertas de queda e sugestões para aumentar a produção.`}
         />
         {/* KPIs */}
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:12, marginBottom:16 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:12, marginBottom:16 }}>
           <div style={{ background:"#EEEEEE", borderRadius:10, padding:"14px 16px", borderTop:`3px solid ${"#8B1A1A"}` }}>
             <div style={{ fontSize:11, color:"#6B7280", fontWeight:700, textTransform:"uppercase", marginBottom:6 }}>Total Atendimentos</div>
             <div style={{ fontSize:28, fontWeight:900, color:"#111827" }}>{lR ? "..." : num(resumo?.total_atendimentos)}</div>
@@ -1664,7 +1903,7 @@ Destaque tipos de exame em crescimento, alertas e oportunidades de captação de
           }}
         />
         {/* KPIs */}
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:10, marginBottom:16 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:10, marginBottom:16 }}>
           {tipos.map(t => (
             <div key={t.key} style={{
               background:"#EEEEEE", borderRadius:10, padding:"12px 14px",
@@ -1680,7 +1919,7 @@ Destaque tipos de exame em crescimento, alertas e oportunidades de captação de
         </div>
 
         {/* Métricas gerais */}
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:10, marginBottom:16 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:10, marginBottom:16 }}>
           <div style={{ background:"#EEEEEE", borderRadius:10, padding:"12px 14px", borderTop:`3px solid ${"#8B1A1A"}` }}>
             <div style={{ fontSize:10, color:"#6B7280", fontWeight:700, textTransform:"uppercase", marginBottom:6 }}>Total OSs</div>
             <div style={{ fontSize:24, fontWeight:800, color:"#111827" }}>{lR ? "..." : num(resumo?.total_os)}</div>
@@ -1766,7 +2005,7 @@ function SecaoAtendimentos({ periodo, modulo }) {
   return (
     <>
       {eR && <Err msg={eR.message} />}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
         <KPI label="Total Atendimentos" value={num(resumo?.total_atendimentos)} loading={lR} accent={"#8B1A1A"} />
         <KPI label="Assistencial"       value={num(resumo?.assistencial)}       loading={lR} accent={"#10B981"}  />
         <KPI label="Med. Ocupacional"   value={num(resumo?.med_ocup)}           loading={lR} accent={"#6B2525"} />
@@ -2110,13 +2349,13 @@ function PainelAgendaMedico() {
                   {lMes ? <div style={{ padding:20 }}><Skeleton h={280} /></div> : (
                     <div style={{ padding:"12px 16px" }}>
                       {/* Header dias */}
-                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:4, marginBottom:6 }}>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:4, marginBottom:6 }}>
                         {["Seg","Ter","Qua","Qui","Sex","Sáb"].map(d => (
                           <div key={d} style={{ textAlign:"center", fontSize:10, fontWeight:800, color:"#6B7280", padding:"4px 0" }}>{d}</div>
                         ))}
                       </div>
                       {semanasCal.map((sem, si) => (
-                        <div key={si} style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:4, marginBottom:4 }}>
+                        <div key={si} style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:4, marginBottom:4 }}>
                           {sem.map((cel, ci) => {
                             if (!cel) return <div key={ci} />;
                             const temAgenda  = cel.total > 0;
@@ -2225,7 +2464,7 @@ function SecaoAgendamentos({ periodo, modulo }) {
   return (
     <>
       {eR && <Err msg={eR.message} />}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
         <KPI label="Total Agendado"  value={num(resumo?.total)}               loading={lR} accent={"#8B1A1A"} />
         <KPI label="Executados"      value={num(resumo?.realizados)}          loading={lR} accent={"#10B981"} deltaUp={true} />
         <KPI label="Cancelados"      value={num(resumo?.cancelados)}          loading={lR} accent={"#EF4444"}   deltaUp={false} />
@@ -2314,6 +2553,10 @@ const periodoParaLabel = (periodo) => {
   if (periodo === "hoje") return `Hoje (${now.toLocaleDateString("pt-BR")})`;
   if (periodo === "30d")  return `${MESES_PT[now.getMonth()]} de ${now.getFullYear()}`;
   if (periodo === "ano")  return `Ano ${now.getFullYear()}`;
+  if (periodo?.startsWith?.("mes:")) {
+    const [ano, mes] = periodo.slice(4).split("-");
+    return `${MESES_PT[Number(mes)-1] || mes} de ${ano}`;
+  }
   return periodo;
 };
 
@@ -2588,7 +2831,7 @@ function SecaoPacientes({ periodo, modulo }) {
   return (
     <>
       {eR && <Err msg={eR.message} />}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:16, marginBottom:16 }}>
         <KPI label="Atendidos"       value={num(resumo?.pacientes_atendidos)} loading={lR} accent={"#8B1A1A"} />
         <KPI label="Novos Cadastros" value={num(resumo?.novos_cadastros)}     loading={lR} accent={"#10B981"} deltaUp={true} />
         <KPI label="Retorno"         value={num(resumo?.retorno)}             loading={lR} accent={"#6B2525"} deltaUp={true} sub="mais de 1 atend." />
@@ -2832,6 +3075,8 @@ const Icon = ({ name, size=18, color="currentColor" }) => {
     settings:  "M12 15a3 3 0 100-6 3 3 0 000 6zM19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z",
     check:     "M20 6L9 17l-5-5",
     wifi:      "M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01",
+    activity:  "M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01",
+    document:  "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M8 13h8M8 17h8M8 9h1",
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -2849,33 +3094,33 @@ const Icon = ({ name, size=18, color="currentColor" }) => {
 function ModuloCard({ label, value, sub, color, loading, icon }) {
   return (
     <div style={{
-      background: `linear-gradient(135deg, ${color}16 0%, ${color}06 100%)`,
+      background: `linear-gradient(135deg, ${color}3A 0%, ${color}14 100%)`,
       borderRadius: 16, padding: "18px 20px",
-      border: `1.5px solid ${color}28`,
-      boxShadow: `0 4px 16px ${color}12, 0 1px 4px rgba(0,0,0,0.05)`,
+      border: `1.5px solid ${color}55`,
+      boxShadow: `0 6px 18px ${color}22, 0 1px 4px rgba(0,0,0,0.05)`,
       display: "flex", flexDirection: "column", gap: 10,
       position: "relative", overflow: "hidden",
     }}>
-      <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${color}0C`, pointerEvents:"none" }}/>
+      <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${color}20`, pointerEvents:"none" }}/>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         {icon && (
           <div style={{
             width:38, height:38, borderRadius:11,
             background: color,
             display:"flex", alignItems:"center", justifyContent:"center",
-            boxShadow: `0 4px 12px ${color}45`,
+            boxShadow: `0 4px 12px ${color}60`,
           }}>
             <Icon name={icon} size={18} color="#fff"/>
           </div>
         )}
       </div>
       {loading
-        ? <div style={{ height:32, width:"60%", background:`${color}20`, borderRadius:7, animation:"pulse 1.5s infinite" }}/>
-        : <div style={{ fontSize:26, fontWeight:900, color:"#111827", lineHeight:1, letterSpacing:"-0.5px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{value}</div>
+        ? <div style={{ height:32, width:"60%", background:`${color}30`, borderRadius:7, animation:"pulse 1.5s infinite" }}/>
+        : <div style={{ fontSize:fitFontSize(value,26,14), fontWeight:900, color:"#111827", lineHeight:1.15, letterSpacing:"-0.5px", overflowWrap:"anywhere" }}>{value}</div>
       }
       <div>
-        <span style={{ fontSize:10, color:"#64748B", fontWeight:800, textTransform:"uppercase", letterSpacing:"0.08em" }}>{label}</span>
-        {sub && <div style={{ fontSize:11, color:color, fontWeight:700, marginTop:3, background:`${color}14`, borderRadius:5, padding:"2px 7px", display:"inline-block" }}>{sub}</div>}
+        <span style={{ fontSize:10, color:color, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.08em" }}>{label}</span>
+        {sub && <div style={{ fontSize:11, color:"#fff", fontWeight:700, marginTop:3, background:color, borderRadius:5, padding:"2px 7px", display:"inline-block" }}>{sub}</div>}
       </div>
     </div>
   );
@@ -3052,6 +3297,7 @@ function SecaoModuloAssistencial({ periodo }) {
   const { data, loading, error } = useFetch("/api/modulo/assistencial/resumo", { periodo });
   const fin = data?.financeiro || {};
   const op  = data?.operacional || {};
+  const v   = data?.variacoes || {};
   const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
   const brlK = v => v != null ? `R$${(Number(v)/1000).toFixed(0)}k` : "—";
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
@@ -3066,12 +3312,14 @@ function SecaoModuloAssistencial({ periodo }) {
         cor="#8B1A1A"
         loading={loading}
         stats={[
-          { label:"Guias Abertas",      value: num(fin.total_os),        sub: `${num(fin.pacientes_unicos)} pac.` },
-          { label:"Produção Líquida",   value: brlK(fin.faturamento),    sub: `Ticket: ${brl(fin.ticket_medio)}` },
+          { label:"Guias Abertas",      value: num(fin.total_os),        sub: `${num(fin.pacientes_unicos)} pac.`, trend: v.total_os },
+          { label:"Produção Líquida",   value: brlK(fin.faturamento),    sub: `Ticket: ${brl(fin.ticket_medio)}`, trend: v.faturamento },
           { label:"Pend. Faturamento",  value: brlK(fin.val_aberto),     sub: "guias não faturadas" },
-          { label:"Atendimentos",       value: num(op.total_atendimentos) },
+          { label:"Atendimentos",       value: num((op.consultas_medicas||0) + (op.equipe_mult||0) + (op.exames_diag||0)), sub: "consultas + serviços + exames" },
         ]}
       />
+
+      <MetaModulo modulo="assistencial" cor="#8B1A1A" atual={fin.faturamento} periodo={periodo}/>
 
       <BriefingCard
         cor="#8B1A1A"
@@ -3084,33 +3332,46 @@ DADOS — Módulo Assistencial (período: ${periodoParaLabel(periodo)}):
 - Pacientes atendidos: ${fin.pacientes_unicos ?? "n/d"}
 - Produção financeira: ${brl(fin.faturamento)}
 - Ticket médio por paciente: ${fin.faturamento > 0 && fin.pacientes_unicos > 0 ? brl(fin.faturamento / fin.pacientes_unicos) : "n/d"}
-- Total de atendimentos: ${op.total_atendimentos ?? "n/d"}
+- Total de atendimentos (consultas + serviços + exames): ${((op.consultas_medicas||0) + (op.equipe_mult||0) + (op.exames_diag||0)) || "n/d"}
 
 Destaque desempenho, alertas de queda e sugestões para aumentar a produção assistencial.`}
       />
 
       {/* KPIs linha 1 */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:12 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:12 }}>
         <ModuloCard label="Total Guias"         value={num(fin.total_os)}           color="#8B1A1A" loading={loading} icon="bar"/>
         <ModuloCard label="Pacientes Atendidos" value={num(fin.pacientes_unicos)}   color="#8B5CF6" loading={loading} icon="users"
           sub={fin.faturamento > 0 && fin.pacientes_unicos > 0
             ? `Ticket/pac: ${brl(fin.faturamento / fin.pacientes_unicos)}`
             : null}/>
         {/* Card Produção com cálculo detalhado */}
-        <div style={{ background:"#fff", borderRadius:14, padding:"16px 18px",
-          border:"1px solid #E5E7EB", boxShadow:"0 1px 3px rgba(0,0,0,0.06)",
-          borderTop:"3px solid #10B981", position:"relative" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
-            <span style={{ fontSize:10, color:"#10B981", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em" }}>$ Produção</span>
+        <div style={{
+          background: "linear-gradient(135deg, #10B9813A 0%, #10B98114 100%)",
+          borderRadius: 16, padding: "18px 20px",
+          border: "1.5px solid #10B98155",
+          boxShadow: "0 6px 18px #10B98122, 0 1px 4px rgba(0,0,0,0.05)",
+          display: "flex", flexDirection: "column", gap: 6,
+          position: "relative", overflow: "hidden",
+        }}>
+          <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:"#10B98120", pointerEvents:"none" }}/>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:2 }}>
+            <div style={{
+              width:38, height:38, borderRadius:11, background:"#10B981",
+              display:"flex", alignItems:"center", justifyContent:"center",
+              boxShadow:"0 4px 12px #10B98160",
+            }}>
+              <Icon name="dollar" size={18} color="#fff"/>
+            </div>
           </div>
           {loading ? <Skeleton h={32}/> : (
-            <div style={{ fontSize:20, fontWeight:900, color:"#10B981", lineHeight:1, marginBottom:8, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+            <div style={{ fontSize:fitFontSize(brl(fin.faturamento),26,14), fontWeight:900, color:"#111827", lineHeight:1.15, letterSpacing:"-0.5px", overflowWrap:"anywhere" }}>
               {brl(fin.faturamento)}
             </div>
           )}
+          <span style={{ fontSize:10, color:"#10B981", fontWeight:800, textTransform:"uppercase", letterSpacing:"0.08em" }}>Produção</span>
           {/* Cálculo */}
           {!loading && fin.valor_bruto > 0 && (
-            <div style={{ fontSize:10, color:"#6B7280", borderTop:"1px solid #F1F5F9", paddingTop:6 }}>
+            <div style={{ fontSize:10, color:"#374151", borderTop:"1px solid #10B98135", paddingTop:6 }}>
               <div style={{ display:"flex", justifyContent:"space-between", marginBottom:2 }}>
                 <span>Bruto</span>
                 <span style={{ fontWeight:600, color:"#374151" }}>{brl(fin.valor_bruto)}</span>
@@ -3129,7 +3390,7 @@ Destaque desempenho, alertas de queda e sugestões para aumentar a produção as
                   {fin.total_ajuste > 0 ? "+" : ""}{brl(fin.total_ajuste)}
                 </span>
               </div>}
-              <div style={{ display:"flex", justifyContent:"space-between", borderTop:"1px dashed #E5E7EB",
+              <div style={{ display:"flex", justifyContent:"space-between", borderTop:"1px dashed #10B98150",
                 paddingTop:4, marginTop:2, fontWeight:700 }}>
                 <span style={{ color:"#10B981" }}>= Líquido</span>
                 <span style={{ color:"#10B981" }}>{brl(fin.faturamento)}</span>
@@ -3299,7 +3560,7 @@ Destaque desempenho, alertas de queda e sugestões para aumentar a produção as
           const maxLabVal = labExames[0]?.qtd_servicos || 1;
 
           return (
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:16 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:16 }}>
               {Object.entries(grupos).map(([cat, g]) => {
                 const cor  = COR_CAT[cat] || "#6B7280";
                 const icon = ICON_CAT[cat] || "🔬";
@@ -3387,12 +3648,6 @@ Destaque desempenho, alertas de queda e sugestões para aumentar a produção as
       <Card title="Por Convênio" subtitle="Top convênios — produção">
         {loading ? <Skeleton/> : <ConvenioBar data={data?.por_convenio}/>}
       </Card>
-
-
-
-<Card title="Por Convênio" subtitle="Top convênios — produção">
-        {loading ? <Skeleton/> : <ConvenioBar data={data?.por_convenio}/>}
-      </Card>
     </div>
   );
 }
@@ -3402,6 +3657,7 @@ function SecaoModuloOcupacional({ periodo }) {
   const { data, loading, error } = useFetch("/api/modulo/ocupacional/resumo", { periodo });
   const fin = data?.financeiro || {};
   const op  = data?.operacional || {};
+  const v   = data?.variacoes || {};
   const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
 
@@ -3426,12 +3682,14 @@ function SecaoModuloOcupacional({ periodo }) {
         cor="#D97706"
         loading={loading}
         stats={[
-          { label:"Total OSs",        value: num(op.total_os),          sub: `${num(op.pacientes_unicos)} pac.` },
+          { label:"Total OSs",        value: num(op.total_os),          sub: `${num(op.pacientes_unicos)} pac.`, trend: v.total_os },
           { label:"Empresas",         value: num(op.empresas),          sub: "atendidas no período" },
-          { label:"Produção",         value: brlK(fin.faturamento),     sub: `Ticket: ${brl(fin.ticket_medio)}` },
+          { label:"Produção",         value: brlK(fin.faturamento),     sub: `Ticket: ${brl(fin.ticket_medio)}`, trend: v.faturamento },
           { label:"Admissional",      value: num(op.admissional),       sub: `Demissional: ${num(op.demissional)}` },
         ]}
       />
+
+      <MetaModulo modulo="ocupacional" cor="#D97706" atual={fin.faturamento} periodo={periodo}/>
 
       <BriefingCard
         cor="#D97706"
@@ -3450,7 +3708,7 @@ Destaque tipos em crescimento, oportunidades de captação de empresas e alertas
       />
 
       {/* Tipos de atendimento — cards gradiente */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:12, marginBottom:20 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(148px,1fr))", gap:12, marginBottom:20 }}>
         {tiposOcup.map(t => {
           const val = op[t.key];
           const total = op.total_os || 1;
@@ -3480,7 +3738,7 @@ Destaque tipos em crescimento, oportunidades de captação de empresas e alertas
       </div>
 
       {/* KPIs financeiros */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
         <ModuloCard label="Total OSs"        value={num(op.total_os)}        color="#8B1A1A" loading={loading} icon="bar"/>
         <ModuloCard label="Empresas Atend."  value={num(op.empresas)}        color="#8B5CF6" loading={loading} icon="factory"/>
         <ModuloCard label="Produção"      value={brl(fin.faturamento)}    color="#10B981" loading={loading} icon="dollar"
@@ -3535,6 +3793,7 @@ Destaque tipos em crescimento, oportunidades de captação de empresas e alertas
 function SecaoModuloServicos({ periodo }) {
   const { data, loading, error } = useFetch("/api/modulo/servicos/resumo", { periodo });
   const fin = data?.financeiro || {};
+  const v   = data?.variacoes || {};
   const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
 
@@ -3552,12 +3811,14 @@ function SecaoModuloServicos({ periodo }) {
         cor="#8B5CF6"
         loading={loading}
         stats={[
-          { label:"Total OSs",       value: num(fin.total_os),          sub: `${num(fin.pacientes_unicos)} pac.` },
-          { label:"Produção",        value: brlK(fin.faturamento),      sub: "faturamento líquido" },
-          { label:"Ticket Médio",    value: brl(fin.ticket_medio),      sub: "por OS" },
+          { label:"Total OSs",       value: num(fin.total_os),          sub: `${num(fin.pacientes_unicos)} pac.`, trend: v.total_os },
+          { label:"Produção",        value: brlK(fin.faturamento),      sub: "faturamento líquido", trend: v.faturamento },
+          { label:"Ticket Médio",    value: brl(fin.ticket_medio),      sub: "por OS", trend: v.ticket_medio },
           { label:"Serviços Ativos", value: num((data?.por_servico||[]).length), sub: "especialidades" },
         ]}
       />
+
+      <MetaModulo modulo="servicos" cor="#8B5CF6" atual={fin.faturamento} periodo={periodo}/>
 
       <BriefingCard
         cor="#8B5CF6"
@@ -3576,7 +3837,7 @@ Destaque serviços com maior demanda, oportunidades de crescimento e alertas de 
         }}
       />
 
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
         <ModuloCard label="Total OSs"        value={num(fin.total_os)}        color="#8B5CF6" loading={loading} icon="bar"/>
         <ModuloCard label="Pacientes Únicos" value={num(fin.pacientes_unicos)} color="#8B1A1A" loading={loading} icon="users"/>
         <ModuloCard label="Produção"         value={brlK(fin.faturamento)}    color="#10B981" loading={loading} icon="dollar"/>
@@ -3584,7 +3845,7 @@ Destaque serviços com maior demanda, oportunidades de crescimento e alertas de 
       </div>
 
       {/* Cards por serviço — gradiente */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(165px,1fr))", gap:12, marginBottom:20 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(165px,1fr))", gap:12, marginBottom:20 }}>
         {(data?.por_servico||[]).map((s,i)=>{
           const cor = CORES_SVC[s.codigo] || CORES_ESP[i%CORES_ESP.length];
           const maxFat = (data?.por_servico||[])[0]?.faturamento || 1;
@@ -3648,7 +3909,7 @@ function DashboardRecoleta({ periodo, setor }) {
         <span style={{ fontSize:12, color:C.faint }}>— cancelamentos por nova amostra</span>
       </div>
 
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))", gap:12, marginBottom:16 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12, marginBottom:16 }}>
         {/* Taxa principal */}
         <div style={{ background:"#fff", borderRadius:14, padding:"20px 16px",
           borderTop:`4px solid ${taxaCor}`, boxShadow:"0 1px 3px rgba(0,0,0,0.06)",
@@ -3874,10 +4135,37 @@ function TabelaMedicosLab({ medicos }) {
   );
 }
 
+const RECEPCOES_LAB = [
+  { id: "",    nome: "Todas"                 },
+  { id: "RDI", nome: "Recepção Diagnóstico"  },
+  { id: "RCI", nome: "Recepção Censo Imagem" },
+  { id: "ROC", nome: "Recepção Ocupacional"  },
+  { id: "RCN", nome: "Recepção Consultórios" },
+  { id: "REX", nome: "Recepção Externa"      },
+];
+
+const RECEPCAO_LAB_CORES = {
+  RDI: "#8B5CF6", RCI: "#10B981", ROC: "#F59E0B", RCN: "#3B82F6", REX: "#EF4444",
+};
+
+// Colunas fixas do card "Produção por Recepção" no módulo Laboratório
+const RECEPCOES_LAB_PRODUCAO = [
+  { cod: "RDI", nome: "Diagnóstico"   },
+  { cod: "RCN", nome: "Consultórios"  },
+  { cod: "ROC", nome: "Ocupacional"   },
+  { cod: "RCI", nome: "Censo Imagem"  },
+];
+
 function SecaoModuloLaboratorio({ periodo }) {
   const [setor, setSetor] = useState("");
-  const { data, loading, error } = useFetch("/api/modulo/laboratorio/resumo", { periodo, setor });
+  const [recepcao, setRecepcao] = useState("");
+  const [mesFiltro, setMesFiltro] = useState(""); // "" = usa o período global do topbar
+  const [anoFiltro, setAnoFiltro] = useState(new Date().getFullYear());
+  const periodoEfetivo = mesFiltro ? `mes:${anoFiltro}-${String(mesFiltro).padStart(2,"0")}` : periodo;
+
+  const { data, loading, error } = useFetch("/api/modulo/laboratorio/resumo", { periodo: periodoEfetivo, setor, recepcao });
   const fin = data?.financeiro || {};
+  const v   = data?.variacoes || {};
   const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
 
@@ -3886,33 +4174,44 @@ function SecaoModuloLaboratorio({ periodo }) {
 
   const brlK = v => v != null ? `R$${(Number(v)/1000).toFixed(0)}k` : "—";
 
+  const { data: bancadasData, loading: lBanc } = useFetch("/api/modulo/laboratorio/bancadas", { periodo: periodoEfetivo, setor, recepcao });
+  const bancadas = bancadasData?.bancadas || [];
+  const resumoBanc = bancadasData?.resumo || {};
+  const naoClassificados = bancadasData?.nao_classificados || [];
+  const [verNaoClassificados, setVerNaoClassificados] = useState(false);
+
+  const { data: porRecepcaoData, loading: lRecep } = useFetch("/api/modulo/laboratorio/por-recepcao", { periodo: periodoEfetivo, setor });
+  const porRecepcao = porRecepcaoData || [];
+
   return (
     <div style={{ animation:"fadeIn 0.35s ease" }}>
       {error && <Err msg={error.message}/>}
 
       <ModuleHero
         title="Laboratório"
-        subtitle={`Período: ${periodoParaLabel(periodo)} · Diagnóstico · Ocupacional`}
+        subtitle={`Período: ${periodoParaLabel(periodoEfetivo)} · Diagnóstico · Ocupacional`}
         cor="#10B981"
         loading={loading}
         stats={[
-          { label:"Total Exames",   value: num(fin.total_exames||fin.total_os), sub:`${num(fin.total_os)} OSs` },
-          { label:"Pacientes",      value: num(fin.pacientes_unicos),           sub:"atendidos" },
-          { label:"Produção",       value: brlK(fin.faturamento),               sub:`Ticket: ${brl(fin.ticket_medio)}` },
+          { label:"Total Exames",   value: num(fin.total_exames||fin.total_os), sub:`${num(fin.total_os)} OSs`, trend: v.total_os },
+          { label:"Pacientes",      value: num(fin.pacientes_unicos),           sub:"atendidos", trend: v.pacientes_unicos },
+          { label:"Produção",       value: brlK(fin.faturamento),               sub:`Ticket: ${brl(fin.ticket_medio)}`, trend: v.faturamento },
           { label:"Top Exame",      value: topExames[0]?.exame_cod || "—",      sub: topExames[0] ? `${num(topExames[0].qtd)} realizações` : "" },
         ]}
       />
 
+      <MetaModulo modulo="laboratorio" cor="#10B981" atual={fin.faturamento} periodo={periodoEfetivo}/>
+
       <BriefingCard
         cor="#10B981"
-        cacheKey={`briefing_laboratorio_${periodoParaLabel(periodo)}_${setor}`}
+        cacheKey={`briefing_laboratorio_${periodoParaLabel(periodoEfetivo)}_${setor}_${recepcao}`}
         disabled={loading}
         promptFn={() => {
           const top3ex = topExames.slice(0,3).map(e=>`${e.nome||e.codigo}: ${num(e.qtd)}`).join("; ");
           const setorLabel = setor === "diagnostico" ? "Diagnóstico" : setor === "ocupacional" ? "Ocupacional" : "Todos";
           return `Você é um analista de gestão clínica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
 
-DADOS — Laboratório / Exames (período: ${periodoParaLabel(periodo)}, setor: ${setorLabel}):
+DADOS — Laboratório / Exames (período: ${periodoParaLabel(periodoEfetivo)}, setor: ${setorLabel}):
 - Total exames: ${(fin.total_exames || fin.total_os) ?? "n/d"} | OSs: ${fin.total_os ?? "n/d"}
 - Pacientes únicos: ${fin.pacientes_unicos ?? "n/d"}
 - Produção financeira: ${brl(fin.faturamento)} | Ticket médio por OS: ${brl(fin.ticket_medio)}
@@ -3922,26 +4221,69 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
         }}
       />
 
-      {/* Filtro setor */}
-      <div style={{ display:"flex", gap:8, marginBottom:20, alignItems:"center" }}>
-        <span style={{ fontSize:12, color:C.faint, fontWeight:600 }}>Filtrar por:</span>
-        {[
-          { id:"",            label:"Todos"       },
-          { id:"diagnostico", label:"Diagnóstico" },
-          { id:"ocupacional", label:"Ocupacional" },
-        ].map(s => (
-          <button key={s.id} onClick={() => setSetor(s.id)} style={{
-            padding:"6px 16px", borderRadius:8,
-            border:`1.5px solid ${setor===s.id?"#10B981":"#E2E8F0"}`,
-            background: setor===s.id?"#D1FAE5":"#fff",
-            color: setor===s.id?"#059669":"#6B7280",
-            fontSize:13, fontWeight:600, cursor:"pointer", transition:"all 0.12s",
-          }}>{s.label}</button>
-        ))}
+      {/* Filtro setor + recepção + mês */}
+      <div style={{ display:"flex", gap:16, marginBottom:20, alignItems:"center", flexWrap:"wrap" }}>
+        <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+          <span style={{ fontSize:12, color:C.faint, fontWeight:600 }}>Filtrar por:</span>
+          {[
+            { id:"",            label:"Todos"       },
+            { id:"diagnostico", label:"Diagnóstico" },
+            { id:"ocupacional", label:"Ocupacional" },
+          ].map(s => (
+            <button key={s.id} onClick={() => setSetor(s.id)} style={{
+              padding:"6px 16px", borderRadius:8,
+              border:`1.5px solid ${setor===s.id?"#10B981":"#E2E8F0"}`,
+              background: setor===s.id?"#D1FAE5":"#fff",
+              color: setor===s.id?"#059669":"#6B7280",
+              fontSize:13, fontWeight:600, cursor:"pointer", transition:"all 0.12s",
+            }}>{s.label}</button>
+          ))}
+        </div>
+
+        <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+          <span style={{ fontSize:12, color:C.faint, fontWeight:600 }}>Recepção:</span>
+          <select value={recepcao} onChange={e=>setRecepcao(e.target.value)} style={{
+            padding:"6px 12px", borderRadius:8, border:"1.5px solid #E2E8F0",
+            background:"#fff", color:"#374151", fontSize:13, fontWeight:600,
+            cursor:"pointer", outline:"none",
+          }}>
+            {RECEPCOES_LAB.map(r => <option key={r.id} value={r.id}>{r.nome}</option>)}
+          </select>
+        </div>
+
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <span style={{ fontSize:12, color:C.faint, fontWeight:600 }}>Mês:</span>
+          <select value={mesFiltro} onChange={e=>setMesFiltro(e.target.value)} style={{
+            padding:"6px 12px", borderRadius:8, border:"1.5px solid #E2E8F0",
+            background:"#fff", color:"#374151", fontSize:13, fontWeight:600,
+            cursor:"pointer", outline:"none",
+          }}>
+            <option value="">Período do topo</option>
+            {MESES_PT.map((nome,i) => <option key={i} value={i+1}>{nome}</option>)}
+          </select>
+          {mesFiltro && (
+            <select value={anoFiltro} onChange={e=>setAnoFiltro(Number(e.target.value))} style={{
+              padding:"6px 12px", borderRadius:8, border:"1.5px solid #E2E8F0",
+              background:"#fff", color:"#374151", fontSize:13, fontWeight:600,
+              cursor:"pointer", outline:"none",
+            }}>
+              {[0,1,2].map(off => {
+                const ano = new Date().getFullYear() - off;
+                return <option key={ano} value={ano}>{ano}</option>;
+              })}
+            </select>
+          )}
+          {mesFiltro && (
+            <button onClick={()=>setMesFiltro("")} style={{
+              padding:"6px 10px", borderRadius:8, border:"none", cursor:"pointer",
+              background:"#FEE2E2", color:"#DC2626", fontSize:12, fontWeight:700,
+            }}>✕ limpar</button>
+          )}
+        </div>
       </div>
 
       {/* KPIs */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
         <ModuloCard label="Total Exames" value={num(fin.total_exames||fin.total_os)} color="#8B1A1A" loading={loading} icon="bar"
           sub={`${num(fin.total_os)} OSs`}/>
         <ModuloCard label="Pacientes"    value={num(fin.pacientes_unicos)} color="#8B5CF6" loading={loading} icon="users"/>
@@ -3949,6 +4291,159 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
         <ModuloCard label="Ticket / OS"  value={brl(fin.ticket_medio)}    color="#F59E0B" loading={loading} icon="trending"
           sub="faturamento ÷ nº de OSs"/>
       </div>
+
+      {/* Produção por Recepção — Diagnóstico, Consultórios, Ocupacional, Censo Imagem */}
+      <Card title="Produção por Recepção" subtitle="Faturamento, OS e pacientes de exames laboratoriais, por ponto de recepção" style={{ marginBottom:16 }}>
+        {lRecep ? <Skeleton h={160}/> : (
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:14 }}>
+            {RECEPCOES_LAB_PRODUCAO.map(rc => {
+              const r = porRecepcao.find(x => x.recepcao_cod === rc.cod) || {};
+              const cor = RECEPCAO_LAB_CORES[rc.cod] || "#64748B";
+              return (
+                <div key={rc.cod} style={{
+                  background:`linear-gradient(135deg, ${cor}22 0%, ${cor}0A 100%)`,
+                  borderRadius:12, padding:"16px 18px", border:`1.5px solid ${cor}35`,
+                }}>
+                  <div style={{ fontSize:13, fontWeight:800, color:"#111827", marginBottom:12 }}>{rc.nome}</div>
+                  <div style={{ marginBottom:14 }}>
+                    <div style={{ fontSize:10, color:cor, fontWeight:800, textTransform:"uppercase", letterSpacing:"0.05em" }}>Produção</div>
+                    <div style={{ fontSize:fitFontSize(brl(r.faturamento),28,18), fontWeight:900, color:cor, lineHeight:1.15 }}>{brl(r.faturamento)}</div>
+                  </div>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                    <div>
+                      <div style={{ fontSize:10, color:"#6B7280", fontWeight:800, textTransform:"uppercase" }}>OS</div>
+                      <div style={{ fontSize:22, fontWeight:900, color:"#111827" }}>{num(r.total_os)}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize:10, color:"#6B7280", fontWeight:800, textTransform:"uppercase" }}>Pacientes</div>
+                      <div style={{ fontSize:22, fontWeight:900, color:"#111827" }}>{num(r.pacientes)}</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize:11, color:"#6B7280", marginTop:10, fontWeight:600 }}>{num(r.total_exames)} exames · ticket {brl(r.ticket_medio)}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      {/* Por Bancada — interno vs. laboratório de apoio (externo) */}
+      <Card title="Por Bancada" subtitle="Processamento interno vs. Laboratório de Apoio (externo)" style={{ marginBottom:16 }}>
+        {lBanc ? <Skeleton h={220}/> : bancadas.length === 0 ? (
+          <div style={{ padding:"32px", textAlign:"center", color:C.faint, fontSize:12 }}>Sem exames vinculados a bancada no período</div>
+        ) : (
+          <>
+            <div style={{ marginBottom:18 }}>
+              <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:12 }}>
+                <div>
+                  <div style={{ fontSize:11, fontWeight:800, color:"#111827", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:8 }}>
+                    💰 Por valor faturado
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6, fontSize:12 }}>
+                    <span style={{ color:"#059669", fontWeight:800 }}>🏠 Interno {(100 - (resumoBanc.pct_externo_valor||0)).toFixed(1)}%</span>
+                    <span style={{ color:"#7C3AED", fontWeight:800 }}>🚚 Externo {resumoBanc.pct_externo_valor||0}%</span>
+                  </div>
+                  <div style={{ height:12, borderRadius:6, overflow:"hidden", display:"flex", background:"#F1F5F9" }}>
+                    <div style={{ width:`${100-(resumoBanc.pct_externo_valor||0)}%`, background:"linear-gradient(90deg,#059669,#10B981)" }}/>
+                    <div style={{ width:`${resumoBanc.pct_externo_valor||0}%`, background:"linear-gradient(90deg,#7C3AED,#8B5CF6)" }}/>
+                  </div>
+                  <div style={{ fontSize:12, color:"#374151", fontWeight:600, marginTop:6 }}>
+                    <span style={{ color:"#059669", fontWeight:800 }}>{brl(resumoBanc.interno_valor)}</span> interno vs{" "}
+                    <span style={{ color:"#7C3AED", fontWeight:800 }}>{brl(resumoBanc.externo_valor)}</span> externo
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize:11, fontWeight:800, color:"#111827", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:8 }}>
+                    🧪 Por quantidade de exames
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6, fontSize:12 }}>
+                    <span style={{ color:"#059669", fontWeight:800 }}>🏠 {num(resumoBanc.interno_qtd)} exames</span>
+                    <span style={{ color:"#7C3AED", fontWeight:800 }}>🚚 {num(resumoBanc.externo_qtd)} exames</span>
+                  </div>
+                  <div style={{ height:12, borderRadius:6, overflow:"hidden", display:"flex", background:"#F1F5F9" }}>
+                    <div style={{ width:`${100-(resumoBanc.pct_externo_qtd||0)}%`, background:"linear-gradient(90deg,#059669,#10B981)" }}/>
+                    <div style={{ width:`${resumoBanc.pct_externo_qtd||0}%`, background:"linear-gradient(90deg,#7C3AED,#8B5CF6)" }}/>
+                  </div>
+                  <div style={{ fontSize:12, color:"#374151", fontWeight:600, marginTop:6 }}>
+                    <span style={{ color:"#7C3AED", fontWeight:800 }}>{resumoBanc.pct_externo_qtd||0}%</span> dos exames foram externos
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))", gap:10 }}>
+              {bancadas.map(b => {
+                const cor = b.tipo === "externo" ? "#7C3AED" : "#059669";
+                return (
+                  <div key={b.codigo} style={{
+                    background:`linear-gradient(135deg, ${cor}22 0%, ${cor}0A 100%)`,
+                    borderRadius:12, padding:"12px 14px", border:`1.5px solid ${cor}35`,
+                  }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
+                      <span style={{ fontSize:12, fontWeight:800, color:"#111827" }}>{b.nome}</span>
+                      <span style={{ fontSize:9, fontWeight:800, color:"#fff", background:cor, borderRadius:5, padding:"2px 6px", whiteSpace:"nowrap" }}>
+                        {b.tipo === "externo" ? "EXTERNO" : "INTERNO"}
+                      </span>
+                    </div>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", gap:8 }}>
+                      <div>
+                        <div style={{ fontSize:9, color:cor, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em" }}>Valor</div>
+                        <div style={{ fontSize:fitFontSize(brl(b.valor),18,12), fontWeight:900, color:cor, lineHeight:1.15 }}>{brl(b.valor)}</div>
+                      </div>
+                      <div style={{ textAlign:"right" }}>
+                        <div style={{ fontSize:9, color:cor, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.05em" }}>Exames</div>
+                        <div style={{ fontSize:18, fontWeight:900, color:"#111827", lineHeight:1.15 }}>{num(b.qtd_exames)}</div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize:10, color:"#6B7280", marginTop:6 }}>{num(b.pacientes)} pacientes</div>
+                  </div>
+                );
+              })}
+            </div>
+            {resumoBanc.nao_classificado_qtd > 0 && (
+              <div style={{ fontSize:11, color:"#B45309", marginTop:10, fontWeight:600 }}>
+                ℹ {num(resumoBanc.nao_classificado_qtd)} exames sem bancada vinculada no Pixeon foram somados no card{" "}
+                <b>DIAGNOSTICOS DO BRASIL</b> acima.{" "}
+                <span onClick={()=>setVerNaoClassificados(v=>!v)} style={{ color:"#D97706", fontWeight:700, cursor:"pointer", textDecoration:"underline" }}>
+                  {verNaoClassificados ? "▲ ocultar lista" : "▼ ver quais exames"}
+                </span>
+              </div>
+            )}
+
+            {verNaoClassificados && (
+              <div style={{ marginTop:16, background:"#FFFBEB", border:"1.5px solid #FDE68A", borderRadius:12, padding:"14px 16px" }}>
+                <div style={{ fontSize:12, fontWeight:800, color:"#92400E", marginBottom:2 }}>⚠ Exames sem bancada vinculada</div>
+                <div style={{ fontSize:11, color:"#B45309", marginBottom:10 }}>
+                  Esses códigos de exame precisam ser cadastrados na tela "Bancadas" do Pixeon (vínculo exame → bancada) pra entrarem na classificação interno/externo.
+                </div>
+                <div style={{ overflowX:"auto" }}>
+                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                    <thead>
+                      <tr style={{ borderBottom:"1.5px solid #FDE68A" }}>
+                        <th style={{ textAlign:"left", padding:"6px 8px", color:"#92400E", fontWeight:800 }}>Código</th>
+                        <th style={{ textAlign:"left", padding:"6px 8px", color:"#92400E", fontWeight:800 }}>Exame</th>
+                        <th style={{ textAlign:"right", padding:"6px 8px", color:"#92400E", fontWeight:800 }}>Qtd</th>
+                        <th style={{ textAlign:"right", padding:"6px 8px", color:"#92400E", fontWeight:800 }}>Pacientes</th>
+                        <th style={{ textAlign:"right", padding:"6px 8px", color:"#92400E", fontWeight:800 }}>Valor</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {naoClassificados.map((n,i) => (
+                        <tr key={i} style={{ borderBottom:"1px solid #FEF3C7" }}>
+                          <td style={{ padding:"6px 8px", fontFamily:"monospace", fontWeight:700, color:"#78350F" }}>{n.codigo}</td>
+                          <td style={{ padding:"6px 8px", color:"#78350F", maxWidth:260, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={n.nome}>{n.nome || "—"}</td>
+                          <td style={{ padding:"6px 8px", textAlign:"right", fontWeight:700, color:"#78350F" }}>{num(n.qtd_exames)}</td>
+                          <td style={{ padding:"6px 8px", textAlign:"right", color:"#92400E" }}>{num(n.pacientes)}</td>
+                          <td style={{ padding:"6px 8px", textAlign:"right", fontWeight:700, color:"#78350F" }}>{brl(n.valor)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </Card>
 
       {/* Top exames + Gráficos */}
       {/* Gráfico combinado largura total */}
@@ -3990,7 +4485,7 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
       {/* Top exames — ranking visual */}
       {topExames.length > 0 && (
         <Card title="Top Exames Realizados" subtitle="Exames mais solicitados no período" accent="#10B981" style={{ marginBottom:16 }}>
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(165px,1fr))", gap:10 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(165px,1fr))", gap:10 }}>
             {topExames.slice(0,10).map((ex,i) => {
               const max = topExames[0]?.qtd || 1;
               const pctW = Math.max(6, (ex.qtd/max)*100);
@@ -4023,7 +4518,7 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
       )}
 
       {/* Recoleta */}
-      <DashboardRecoleta periodo={periodo} setor={setor}/>
+      <DashboardRecoleta periodo={periodoEfetivo} setor={setor}/>
 
       {/* Top Médicos */}
       <div style={{ marginTop:16 }}>
@@ -4245,6 +4740,7 @@ function SecaoModuloAgendamentos({ periodo }) {
   const API = `${window.location.protocol}//${window.location.host}`;
   const s  = data?.stats || {};
   const sh = hoje?.stats || {};
+  const v  = data?.variacoes || {};
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
   const pct = v => v != null ? `${Number(v).toFixed(1)}%` : "—";
   const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
@@ -4265,8 +4761,34 @@ function SecaoModuloAgendamentos({ periodo }) {
   };
 
   return (
-    <div>
+    <div style={{ animation:"fadeIn 0.35s ease" }}>
       {error && <Err msg={error.message}/>}
+
+      <ModuleHero
+        title="Agendamentos"
+        subtitle={`Período: ${periodoParaLabel(periodo)} · Agenda médica · Comparecimento · Absenteísmo`}
+        cor="#7C3AED"
+        loading={loading}
+        stats={[
+          { label:"Marcações",     value: num(s.marcacoes||s.total),  sub: `de ${num(s.total)} slots`, trend: v.marcacoes },
+          { label:"Compareceram",  value: num(s.executados),          sub: `${pct(s.taxa_exec)} de exec.`, trend: v.executados },
+          { label:"Via Agenda",    value: num(s.com_os_vinculada),    sub: "recepcionados" },
+          { label:"Cancelados",    value: num(s.cancelados),          sub: null, trend: v.cancelados },
+        ]}
+      />
+
+      <BriefingCard
+        cor="#7C3AED"
+        cacheKey={`briefing_agendamentos_${periodoParaLabel(periodo)}`}
+        disabled={loading}
+        promptFn={() => `Você é um analista de gestão de agenda médica. Gere um briefing executivo em no máximo 4 frases, direto e profissional, sem markdown.
+
+DADOS — Agendamentos (período: ${periodoParaLabel(periodo)}):
+- Marcações: ${s?.marcacoes ?? s?.total ?? "n/d"} | Compareceram: ${s?.executados ?? "n/d"} (${pct(s?.taxa_exec)})
+- Recepcionados via agenda: ${s?.com_os_vinculada ?? "n/d"} | Cancelados: ${s?.cancelados ?? "n/d"}
+
+Destaque tendências de absenteísmo, eficiência da agenda e pontos de atenção operacional.`}
+      />
 
       {/* ── RESUMO DO DIA ── */}
       <div style={{ background:"linear-gradient(135deg,#0F172A,#1E293B)", borderRadius:16,
@@ -4291,7 +4813,7 @@ function SecaoModuloAgendamentos({ periodo }) {
         </div>
 
         {/* KPIs do dia */}
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12, marginBottom:16 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:12, marginBottom:16 }}>
           {[
             { label:"Total Horários",    val:num(sh.total_horarios), cor:"#64748B", icon:"📋",
               sub: sh.vagas_disp > 0 ? `${num(sh.vagas_disp)} disponíveis` : null },
@@ -4474,7 +4996,7 @@ function SecaoModuloAgendamentos({ periodo }) {
             </div>
 
             {/* KPIs */}
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12, marginBottom:20 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:12, marginBottom:20 }}>
               {[
                 { label:"Total Horários",  val:num(sh.total_horarios), sub:`${num(sh.vagas_disp)} disponíveis`, cor:"#64748B" },
                 { label:"Marcações",       val:num(sh.marcacoes),      cor:"#7C3AED" },
@@ -4535,7 +5057,7 @@ function SecaoModuloAgendamentos({ periodo }) {
             {/* Médicos */}
             <div style={{ background:"#1E293B", borderRadius:12, padding:"16px" }}>
               <div style={{ fontSize:12, color:"#94A3B8", fontWeight:700, marginBottom:12 }}>Médicos com Agenda Hoje</div>
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:8 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:8 }}>
                 {(hoje?.medicos_hoje||[]).map((m,i)=>{
                   const abs = m.marcacoes>0?(m.faltantes/m.marcacoes*100):0;
                   const cor = abs<=10?"#10B981":abs<=25?"#F59E0B":"#EF4444";
@@ -4618,39 +5140,45 @@ function SecaoModuloAgendamentos({ periodo }) {
         </div>
       </div>
 
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:14, marginBottom:20 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:14, marginBottom:20 }}>
         <ModuloCard label="Marcações"         value={num(s.marcacoes||s.total)} color="#7C3AED" loading={loading} icon="calendar"
           sub={`de ${num(s.total)} slots com paciente`}/>
         <ModuloCard label="Compareceram"      value={num(s.executados)}      color="#10B981" loading={loading} icon="check"
           sub={`${pct(s.taxa_exec)} de comparecimento`}/>
         <ModuloCard label="Via Agenda"  value={num(s.com_os_vinculada)} color="#8B1A1A" loading={loading} icon="bar"
           sub="Recepcionados pela agenda"/>
-        <div style={{ background:"#fff", borderRadius:14, padding:"16px 18px",
-          border:"1px solid #E5E7EB", boxShadow:"0 1px 3px rgba(0,0,0,0.06)",
-          borderTop:"3px solid #F59E0B" }}>
-          <div style={{ fontSize:11, color:"#F59E0B", fontWeight:700, textTransform:"uppercase",
-            letterSpacing:"0.07em", marginBottom:8 }}>⚠ Absenteísmo</div>
-          {loading ? <Skeleton h={60}/> : (() => {
-            const base = (s.marcacoes||s.total||0) - (s.cancelados||0) - (s.bloqueados||0);
-            const taxa = base > 0 ? ((s.abertos||0) / base * 100) : 0;
-            const cor = taxa <= 10 ? "#059669" : taxa <= 25 ? "#D97706" : "#DC2626";
-            const bg  = taxa <= 10 ? "#D1FAE5" : taxa <= 25 ? "#FEF3C7" : "#FEE2E2";
-            return (
-              <>
-                <div style={{ fontSize:32, fontWeight:900, color:cor, lineHeight:1 }}>
-                  {taxa.toFixed(1)}%
-                </div>
-                <div style={{ fontSize:11, color:"#9CA3AF", marginTop:3 }}>
-                  {num(s.abertos)} pacientes · de {num(base)} marcações
-                </div>
-                <div style={{ marginTop:8, height:5, background:"#EEEEEE", borderRadius:3, overflow:"hidden" }}>
-                  <div style={{ height:"100%", background:cor, borderRadius:3,
-                    width:`${Math.min(100,taxa)}%`, transition:"width 0.5s" }}/>
-                </div>
-              </>
-            );
-          })()}
-        </div>
+        {(() => {
+          const base = (s.marcacoes||s.total||0) - (s.cancelados||0) - (s.bloqueados||0);
+          const taxa = base > 0 ? ((s.abertos||0) / base * 100) : 0;
+          const cor = taxa <= 10 ? "#059669" : taxa <= 25 ? "#D97706" : "#DC2626";
+          return (
+            <div style={{
+              background: `linear-gradient(135deg, ${cor}3A 0%, ${cor}14 100%)`,
+              borderRadius: 16, padding: "18px 20px",
+              border: `1.5px solid ${cor}55`,
+              boxShadow: `0 6px 18px ${cor}22, 0 1px 4px rgba(0,0,0,0.05)`,
+              position:"relative", overflow:"hidden",
+            }}>
+              <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${cor}20`, pointerEvents:"none" }}/>
+              <div style={{ fontSize:10, color:cor, fontWeight:800, textTransform:"uppercase",
+                letterSpacing:"0.08em", marginBottom:8 }}>⚠ Absenteísmo</div>
+              {loading ? <Skeleton h={60}/> : (
+                <>
+                  <div style={{ fontSize:fitFontSize(`${taxa.toFixed(1)}%`,26,14), fontWeight:900, color:"#111827", lineHeight:1.15 }}>
+                    {taxa.toFixed(1)}%
+                  </div>
+                  <div style={{ fontSize:11, color:"#6B7280", marginTop:3 }}>
+                    {num(s.abertos)} pacientes · de {num(base)} marcações
+                  </div>
+                  <div style={{ marginTop:8, height:6, background:"#fff", borderRadius:3, overflow:"hidden" }}>
+                    <div style={{ height:"100%", background:cor, borderRadius:3,
+                      width:`${Math.min(100,taxa)}%`, transition:"width 0.5s" }}/>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })()}
         <ModuloCard label="Cancelados"        value={num(s.cancelados)}      color="#EF4444" loading={loading} icon="activity"/>
       </div>
 
@@ -4748,13 +5276,13 @@ function SecaoClinica({ periodo }) {
 // ══════════════════════════════════════════════════════════════════════════════
 const NAV = [
   { id: "home",       label: "Home",            icon: "home",         color: "#8B1A1A" },
-  { id: "contratos",  label: "Contratos",       icon: "layers",       color: "#0D9488", desc: "Gestão de contratos" },
+  { id: "contratos",  label: "Contratos",       icon: "document",     color: "#0D9488", desc: "Gestão de contratos" },
   { id: "clinica",    label: "Clínica",         icon: "stethoscope",  color: "#8B1A1A", desc: "Assistencial · Ocupacional · Serviços · Agenda" },
   { id: "laboratorio",label: "Laboratório",     icon: "flask",        color: "#10B981", desc: "Exames · Diagnóstico · Ocupacional" },
   { id: "recepcao",   label: "Recepção",        icon: "users",        color: "#D97706", desc: "Métricas por recepcionista" },
   { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento mensal" },
   { id: "pacientesdb",label: "Pacientes DB",    icon: "users",        color: "#0891B2", desc: "Base · logradouros · ranking · aniversários" },
-  { id: "estoque",    label: "Estoque",         icon: "box",          color: "#0D9488", desc: "Posição, giro e validade" },
+  { id: "estoque",    label: "Estoque",         icon: "package",      color: "#0D9488", desc: "Posição, giro e validade" },
   { id: "painel_tv",  label: "Painel TV",       icon: "monitor",      color: "#7C3AED", desc: "Tempo real · para telão" },
   { id: "admin",      label: "Permissões",      icon: "settings",     color: "#374151", desc: "Gerenciar acessos" },
 ];
@@ -5292,7 +5820,7 @@ function SecaoEstoque({ periodo }) {
       {aba==="dashboard" && (
         <div key="dashboard" style={{ animation:"fadeIn 0.25s ease" }}>
           {/* KPIs posição */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:16 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:16 }}>
             <ModuloCard label="Valor Total em Estoque" value={brl(resumo?.valor_total)}   color="#0D9488" loading={lR} icon="dollar"/>
             <ModuloCard label="Itens com Estoque"      value={num(resumo?.com_estoque)}   color="#10B981" loading={lR} icon="bar"
               sub={`de ${num(resumo?.total_itens)} cadastrados`}/>
@@ -5303,7 +5831,7 @@ function SecaoEstoque({ periodo }) {
           </div>
 
           {/* KPIs movimentação */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:20 }}>
             <ModuloCard label="Entradas no Período"    value={brl(resumo?.valor_entradas)} color="#10B981" loading={lR} icon="dollar"
               sub={`${num(resumo?.qtd_entradas)} unidades`}/>
             <ModuloCard label="Saídas no Período"      value={brl(resumo?.valor_saidas)}   color="#EF4444" loading={lR} icon="dollar"
@@ -5419,7 +5947,7 @@ function SecaoEstoque({ periodo }) {
             {/* ── GIRO DE ESTOQUE ── */}
       {aba==="giro" && (
         <div>
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:14, marginBottom:20 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:14, marginBottom:20 }}>
             <ModuloCard label="Materiais com Saída"     value={num((giro||[]).filter(g=>g.saidas_periodo>0).length)} color="#8B1A1A" loading={lG} icon="bar"/>
             <ModuloCard label="Valor Total de Saídas"   value={brl((giro||[]).reduce((s,g)=>s+(g.valor_saidas||0),0))} color="#EF4444" loading={lG} icon="dollar"/>
             <ModuloCard label="Valor Total de Entradas" value={brl((giro||[]).reduce((s,g)=>s+(g.valor_entradas||0),0))} color="#10B981" loading={lG} icon="dollar"/>
@@ -5503,7 +6031,7 @@ function SecaoEstoque({ periodo }) {
             ))}
           </div>
 
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:14, marginBottom:16 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:16 }}>
             <ModuloCard label="Vencendo em 30d" value={num(resumo?.vence_30d)} color="#DC2626" loading={lR} icon="calendar"/>
             <ModuloCard label="Vencendo em 60d" value={num(resumo?.vence_60d)} color="#F59E0B" loading={lR} icon="calendar"/>
             <ModuloCard label="Vencendo em 90d" value={num(resumo?.vence_90d)} color="#D97706" loading={lR} icon="calendar"/>
@@ -5563,7 +6091,7 @@ function SecaoEstoque({ periodo }) {
       {aba==="grupos" && (
         <div>
           {/* Cards por grupo */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:14, marginBottom:20 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:14, marginBottom:20 }}>
             {lGR ? [0,1,2,3,4,5].map(i=><Skeleton key={i} h={140}/>) :
               (grupos?.por_grupo||[]).map((g,i) => {
                 const CORES_G = ["#8B1A1A","#10B981","#F59E0B","#8B5CF6","#EF4444","#0891B2","#D97706","#EC4899"];
@@ -5757,7 +6285,7 @@ function SecaoEstoque({ periodo }) {
       {aba==="setores" && (
         <div>
           {/* Cards top setores */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:14, marginBottom:20 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:14, marginBottom:20 }}>
             {lST ? [0,1,2,3,4,5].map(i=><Skeleton key={i} h={100}/>) :
               (setores?.por_setor||[]).slice(0,6).map((s,i) => {
                 const CORES_S = ["#8B1A1A","#10B981","#F59E0B","#8B5CF6","#EF4444","#0891B2"];
@@ -6182,13 +6710,13 @@ function AppInner() {
   const [page,           setPage]           = useState("home");
   const [period,         setPeriod]         = useState("30d");
   const [online,         setOnline]         = useState(null);
-  const [collapsed,      setCollapsed]      = useState(false);
+  const [collapsed,      setCollapsed]      = useState(true);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [dateIni,        setDateIni]        = useState("");
   const [dateFim,        setDateFim]        = useState("");
   const [customLabel,    setCustomLabel]    = useState("");
   const isMobile = useIsMobile();
-  const SW = isMobile ? 0 : (collapsed ? 60 : 248);
+  const SW = isMobile ? 0 : 60; // rail sempre compacto — o menu aberto flutua por cima, sem alterar o layout
 
   // Find current group + item for breadcrumb
   const currentItem = NAV.find(n => n.id === page);
@@ -6200,17 +6728,19 @@ function AppInner() {
 
   return (
     <MobileCtx.Provider value={isMobile}>
-    <div style={{ height:"100vh", display:"flex", flexDirection:"column", background:"#DADADA", fontFamily:"'DM Sans','Helvetica Neue',sans-serif", color:"#111827", overflow:"hidden" }}>
+    <div style={{ height:"100vh", display:"flex", flexDirection:"column", background:"#E5CACA", fontFamily:"'DM Sans','Helvetica Neue',sans-serif", color:"#111827", overflow:"hidden" }}>
 
       {/* ── TOPBAR ── */}
-      <div style={{ background:"#FFFFFF", borderBottom:"1px solid #E5E7EB", minHeight:56, display:"flex", alignItems:"center", padding:isMobile?"0 12px":"0 20px", gap:isMobile?8:16, flexShrink:0, boxShadow:"0 1px 0 #EAEDF2", flexWrap:"wrap" }}>
+      <div style={{ background:"linear-gradient(135deg, #8B1A1A 0%, #6B1414 100%)", minHeight:68, display:"flex", alignItems:"center", padding:isMobile?"0 12px":"0 20px", gap:isMobile?8:16, flexShrink:0, boxShadow:"0 2px 12px rgba(0,0,0,0.25)", flexWrap:"wrap" }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
-          <img src="data:image/png;base64,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" alt="Clínica Censo" style={{ height:38, width:"auto", objectFit:"contain" }}/>
+          <div style={{ background:"#fff", borderRadius:10, padding:"6px 12px", display:"flex", alignItems:"center" }}>
+          <img src="data:image/png;base64,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" alt="Clínica Censo" style={{ height:46, width:"auto", objectFit:"contain" }}/>
+          </div>
           {!isMobile && <>
-            <div style={{ width:1, height:28, background:"#E8E0E0", margin:"0 4px" }}/>
+            <div style={{ width:1, height:28, background:"rgba(255,255,255,0.25)", margin:"0 4px" }}/>
             <div>
-              <div style={{ fontSize:12, fontWeight:700, color:"#2D1B1B" }}>Dashboard</div>
-              <div style={{ fontSize:10, color:"#9C8F8F" }}>Smart Pixeon · Parauapebas</div>
+              <div style={{ fontSize:12, fontWeight:700, color:"#fff" }}>Dashboard</div>
+              <div style={{ fontSize:10, color:"rgba(255,255,255,0.65)" }}>Smart Pixeon · Parauapebas</div>
             </div>
           </>}
         </div>
@@ -6218,46 +6748,46 @@ function AppInner() {
         {/* Breadcrumb */}
         <div style={{ flex:1, display:"flex", alignItems:"center", gap:6, fontSize:13, minWidth:0, overflow:"hidden" }}>
           {currentItem && (
-            <span style={{ color:"#111827", fontWeight:600 }}>{currentItem.label}</span>
+            <span style={{ color:"#fff", fontWeight:600 }}>{currentItem.label}</span>
           )}
         </div>
 
         {/* Status */}
         <div style={{ display:"flex", alignItems:"center", gap:5, flexShrink:0 }}>
-          <span style={{ width:7, height:7, borderRadius:"50%", background:online===null?"#9CA3AF":online?"#10B981":"#EF4444", display:"inline-block" }}/>
-          {!isMobile && <span style={{ fontSize:12, fontWeight:600, color:online===null?"#9CA3AF":online?"#10B981":"#EF4444" }}>{online===null?"…":online?"Online":"Offline"}</span>}
+          <span style={{ width:7, height:7, borderRadius:"50%", background:online===null?"#D1D5DB":online?"#6EE7B7":"#FCA5A5", display:"inline-block" }}/>
+          {!isMobile && <span style={{ fontSize:12, fontWeight:600, color:online===null?"rgba(255,255,255,0.6)":online?"#6EE7B7":"#FCA5A5" }}>{online===null?"…":online?"Online":"Offline"}</span>}
         </div>
-        {!isMobile && <div style={{ width:1, height:22, background:"#E5E7EB", flexShrink:0 }}/>}
+        {!isMobile && <div style={{ width:1, height:22, background:"rgba(255,255,255,0.25)", flexShrink:0 }}/>}
 
         {/* Usuário logado */}
         <div style={{ display:"flex", alignItems:"center", gap:8, flexShrink:0 }}>
           {!isMobile && <div style={{ textAlign:"right" }}>
-            <div style={{ fontSize:12, fontWeight:700, color:"#111827", lineHeight:1.2 }}>
+            <div style={{ fontSize:12, fontWeight:700, color:"#fff", lineHeight:1.2 }}>
               {user?.nome?.split(" ").slice(0,2).join(" ") || user?.login}
             </div>
             {user?.admin && (
-              <div style={{ fontSize:10, color:"#8B1A1A", fontWeight:700 }}>Admin</div>
+              <div style={{ fontSize:10, color:"#FCD34D", fontWeight:700 }}>Admin</div>
             )}
           </div>}
           <button onClick={logout} style={{
             padding:isMobile?"6px 10px":"5px 12px", borderRadius:8,
-            border:"1px solid #E5E7EB", background:"#F9F9F9",
-            color:"#6B7280", fontSize:isMobile?15:11, fontWeight:700,
+            border:"1px solid rgba(255,255,255,0.3)", background:"rgba(255,255,255,0.1)",
+            color:"#fff", fontSize:isMobile?15:11, fontWeight:700,
             cursor:"pointer", transition:"all 0.12s", lineHeight:1,
           }}
-            onMouseEnter={e => { e.target.style.background="#FEF2F2"; e.target.style.color="#8B1A1A"; e.target.style.borderColor="#8B1A1A"; }}
-            onMouseLeave={e => { e.target.style.background="#F9F9F9"; e.target.style.color="#6B7280"; e.target.style.borderColor="#E5E7EB"; }}>
+            onMouseEnter={e => { e.target.style.background="rgba(255,255,255,0.25)"; e.target.style.borderColor="#fff"; }}
+            onMouseLeave={e => { e.target.style.background="rgba(255,255,255,0.1)"; e.target.style.borderColor="rgba(255,255,255,0.3)"; }}>
             {isMobile ? "↩" : "Sair"}
           </button>
         </div>
 
         {!isMobile && <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, position:"relative" }}>
-          <div style={{ display:"flex", background:"#ECECEC", borderRadius:8, padding:3, gap:1, border:"1px solid #E5E7EB" }}>
+          <div style={{ display:"flex", background:"rgba(255,255,255,0.12)", borderRadius:8, padding:3, gap:1, border:"1px solid rgba(255,255,255,0.25)" }}>
             {PERIODS.map(p => (
               <button key={p.id} onClick={()=>{ setPeriod(p.id); setShowDatePicker(false); }} style={{
                 padding:"5px 13px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600,
                 background: period===p.id && !showDatePicker?"#fff":"transparent",
-                color: period===p.id && !showDatePicker?"#8B1A1A":"#9CA3AF",
+                color: period===p.id && !showDatePicker?"#8B1A1A":"rgba(255,255,255,0.8)",
                 boxShadow: period===p.id && !showDatePicker?"0 1px 3px rgba(0,0,0,0.08)":"none",
                 whiteSpace:"nowrap", transition:"all 0.12s",
               }}>{p.label}</button>
@@ -6265,7 +6795,7 @@ function AppInner() {
             <button onClick={()=>setShowDatePicker(v=>!v)} style={{
               padding:"5px 13px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600,
               background: showDatePicker?"#fff":"transparent",
-              color: showDatePicker?"#8B1A1A":"#9CA3AF",
+              color: showDatePicker?"#8B1A1A":"rgba(255,255,255,0.8)",
               boxShadow: showDatePicker?"0 1px 3px rgba(0,0,0,0.08)":"none",
               whiteSpace:"nowrap", transition:"all 0.12s",
             }}>
@@ -6322,21 +6852,21 @@ function AppInner() {
 
         {/* Período mobile — strip abaixo do topbar */}
         {isMobile && (
-          <div style={{ width:"100%", borderTop:"1px solid #F3F4F6", padding:"4px 10px 6px", background:"#FFFFFF" }}>
+          <div style={{ width:"100%", borderTop:"1px solid rgba(255,255,255,0.15)", padding:"4px 10px 6px", background:"linear-gradient(135deg, #8B1A1A 0%, #6B1414 100%)" }}>
             <div style={{ display:"flex", overflowX:"auto", gap:4, WebkitOverflowScrolling:"touch", scrollbarWidth:"none" }}
               className="hide-scrollbar">
               {PERIODS.map(p => (
                 <button key={p.id} onClick={()=>{ setPeriod(p.id); setShowDatePicker(false); }} style={{
                   padding:"5px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600,
-                  background: period===p.id && !showDatePicker?"#8B1A1A":"#ECECEC",
-                  color: period===p.id && !showDatePicker?"#fff":"#6B7280",
+                  background: period===p.id && !showDatePicker?"#fff":"rgba(255,255,255,0.12)",
+                  color: period===p.id && !showDatePicker?"#8B1A1A":"rgba(255,255,255,0.85)",
                   whiteSpace:"nowrap", flexShrink:0, transition:"all 0.12s",
                 }}>{p.label}</button>
               ))}
               <button onClick={()=>setShowDatePicker(v=>!v)} style={{
                 padding:"5px 14px", borderRadius:6, border:"none", cursor:"pointer", fontSize:12, fontWeight:600,
-                background: showDatePicker?"#8B1A1A":"#ECECEC",
-                color: showDatePicker?"#fff":"#6B7280",
+                background: showDatePicker?"#fff":"rgba(255,255,255,0.12)",
+                color: showDatePicker?"#8B1A1A":"rgba(255,255,255,0.85)",
                 whiteSpace:"nowrap", flexShrink:0, transition:"all 0.12s",
               }}>📅 {customLabel || "Período"}</button>
             </div>
@@ -6389,60 +6919,83 @@ function AppInner() {
       </div>
 
       {/* ── BODY ── */}
-      <div style={{ flex:1, display:"flex", overflow:"hidden" }}>
+      <div style={{ flex:1, display:"flex", overflow:"hidden", position:"relative" }}>
 
-        {/* SIDEBAR */}
-        <aside style={{ width:SW, flexShrink:0, background:"#FFFFFF", borderRight:"1px solid #E5E7EB",
-          overflow:isMobile?"hidden":"visible", display:"flex", flexDirection:"column", transition:"width 0.2s ease", overflow:"hidden" }}>
+        {/* Backdrop — fecha o menu flutuante ao clicar fora */}
+        {!isMobile && !collapsed && (
+          <div onClick={()=>setCollapsed(true)} style={{ position:"absolute", inset:0, zIndex:400 }}/>
+        )}
+
+        {/* SIDEBAR — rail sempre compacto (não altera o layout) */}
+        <aside style={{ width:SW, flexShrink:0, background:"linear-gradient(180deg, #8B1A1A 0%, #6B1414 100%)", borderRight:"1px solid rgba(255,255,255,0.12)",
+          overflow:isMobile?"hidden":"visible", display:"flex", flexDirection:"column", overflow:"hidden", position:"relative", zIndex:401 }}>
           {/* Toggle */}
-          <div style={{ padding:"10px 10px", borderBottom:"1px solid #BBBBBB", display:"flex", justifyContent:collapsed?"center":"flex-end" }}>
-            <button onClick={()=>setCollapsed(v=>!v)} style={{ width:28, height:28, borderRadius:7, border:"1px solid #E5E7EB", background:"#F2F2F2", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6B7280" strokeWidth="2.5" strokeLinecap="round">
+          <div style={{ padding:"10px 10px", borderBottom:"1px solid rgba(255,255,255,0.15)", display:"flex", justifyContent:"center" }}>
+            <button onClick={()=>setCollapsed(v=>!v)} title={collapsed?"Abrir menu":"Fechar menu"} style={{ width:28, height:28, borderRadius:7, border:"1px solid rgba(255,255,255,0.3)", background:collapsed?"rgba(255,255,255,0.12)":"#fff", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={collapsed?"#fff":"#8B1A1A"} strokeWidth="2.5" strokeLinecap="round">
                 {collapsed?<><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></>:<polyline points="15 18 9 12 15 6"/>}
               </svg>
             </button>
           </div>
 
-          <div style={{ flex:1, overflowY:"auto", padding:collapsed?"6px":"10px" }}>
+          <div style={{ flex:1, overflowY:"auto", padding:"6px" }}>
             {NAV.filter(n => n.id === "admin" ? user?.admin : podeVer(n.id)).map(n => {
               const active = page === n.id;
-              return collapsed ? (
-                <button key={n.id} onClick={()=>setPage(n.id)} title={n.label}
+              return (
+                <button key={n.id} onClick={()=>{ setPage(n.id); setCollapsed(true); }} title={n.label}
                   style={{ width:44, height:44, borderRadius:10, border:"none", cursor:"pointer",
-                    background:active?n.color+"18":"transparent",
+                    background:active?"rgba(255,255,255,0.15)":"transparent",
                     display:"flex", alignItems:"center", justifyContent:"center",
-                    margin:"0 auto 2px", position:"relative" }}>
-                  <Icon name={n.icon} size={18} color={active?n.color:"#9CA3AF"}/>
-                  {active && <span style={{ position:"absolute", left:0, top:"50%", transform:"translateY(-50%)", width:3, height:22, borderRadius:"0 2px 2px 0", background:n.color }}/>}
-                </button>
-              ) : (
-                <button key={n.id} onClick={()=>setPage(n.id)}
-                  style={{ width:"100%", display:"flex", alignItems:"center", gap:10,
-                    padding:"10px 12px", borderRadius:10, border:"none", cursor:"pointer",
-                    background:active?n.color+"12":"transparent",
-                    borderLeft:active?`3px solid ${n.color}`:"3px solid transparent",
-                    color:active?"#8B1A1A":"#374151",
-                    fontSize:13, fontWeight:active?600:400,
-                    textAlign:"left", transition:"all 0.12s", marginBottom:2 }}>
-                  <div style={{ width:28, height:28, borderRadius:8, background:active?n.color+"18":"#F3F4F6",
-                    display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-                    <Icon name={n.icon} size={14} color={active?n.color:"#6B7280"}/>
-                  </div>
-                  <div style={{ minWidth:0 }}>
-                    <div style={{ fontSize:13, fontWeight:active?600:500, lineHeight:1.2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{n.label}</div>
-                    {active && <div style={{ fontSize:10, color:n.color, marginTop:1, opacity:.8 }}>{n.desc}</div>}
+                    margin:"0 auto 4px", position:"relative", transition:"all 0.15s" }}>
+                  <div style={{ width:30, height:30, borderRadius:8, background:active?"#fff":"rgba(255,255,255,0.15)",
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    boxShadow:active?"0 3px 8px rgba(0,0,0,0.3)":"none" }}>
+                    <Icon name={n.icon} size={15} color={active?n.color:"#fff"}/>
                   </div>
                 </button>
               );
             })}
           </div>
+        </aside>
 
-          {!collapsed && (
-            <div style={{ padding:"10px 14px", borderTop:"1px solid #EAEDF2", fontSize:11, color:"#9CA3AF" }}>
+        {/* PAINEL FLUTUANTE — abre por cima do conteúdo, sem empurrar o layout */}
+        {!isMobile && !collapsed && (
+          <div style={{
+            position:"absolute", top:0, left:SW, bottom:0, width:230, zIndex:402,
+            background:"linear-gradient(180deg, #8B1A1A 0%, #6B1414 100%)", borderRight:"1px solid rgba(255,255,255,0.12)",
+            boxShadow:"4px 0 24px rgba(0,0,0,0.25)",
+            display:"flex", flexDirection:"column", animation:"fadeIn 0.15s ease",
+          }}>
+            <div style={{ flex:1, overflowY:"auto", padding:"10px" }}>
+              {NAV.filter(n => n.id === "admin" ? user?.admin : podeVer(n.id)).map(n => {
+                const active = page === n.id;
+                return (
+                  <button key={n.id} onClick={()=>{ setPage(n.id); setCollapsed(true); }}
+                    style={{ width:"100%", display:"flex", alignItems:"center", gap:10,
+                      padding:"9px 12px", borderRadius:10, border:"none", cursor:"pointer",
+                      background:active?"rgba(255,255,255,0.15)":"transparent",
+                      borderLeft:active?"3px solid #fff":"3px solid transparent",
+                      color:active?"#fff":"rgba(255,255,255,0.8)",
+                      fontSize:13, fontWeight:active?700:500,
+                      textAlign:"left", transition:"all 0.12s", marginBottom:2 }}>
+                    <div style={{ width:28, height:28, borderRadius:8, background:active?"#fff":"rgba(255,255,255,0.15)",
+                      display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
+                      boxShadow:active?"0 3px 8px rgba(0,0,0,0.3)":"none" }}>
+                      <Icon name={n.icon} size={14} color={active?n.color:"#fff"}/>
+                    </div>
+                    <div style={{ minWidth:0 }}>
+                      <div style={{ fontSize:13, fontWeight:active?700:500, lineHeight:1.2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{n.label}</div>
+                      {active && <div style={{ fontSize:10, color:"rgba(255,255,255,0.75)", marginTop:1, opacity:.9 }}>{n.desc}</div>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ padding:"10px 14px", borderTop:"1px solid rgba(255,255,255,0.15)", fontSize:11, color:"rgba(255,255,255,0.6)" }}>
               Parauapebas · PA · v2.0
             </div>
-          )}
-        </aside>
+          </div>
+        )}
 
         {/* MAIN */}
         <main style={{ flex:1, overflowY:"auto", padding:isMobile?"12px":"32px 40px", minWidth:0, paddingBottom:isMobile?70:undefined }}>
@@ -6462,19 +7015,19 @@ function AppInner() {
       {isMobile && (
         <div style={{
           position:"fixed", bottom:0, left:0, right:0, zIndex:1000,
-          background:"#fff", borderTop:"1px solid #E5E7EB",
+          background:"linear-gradient(135deg, #8B1A1A 0%, #6B1414 100%)", borderTop:"1px solid rgba(255,255,255,0.15)",
           display:"flex", alignItems:"center", height:60,
         }}>
           {[
             { id:"clinica",   icon:"🩺", label:"Clínica" },
             { id:"recepcao",  icon:"🪟", label:"Recepção" },
-            { id:"producao",  icon:"📈", label:"Prod."   },
-            { id:"painel_tv", icon:"📺", label:"Painel"  },
+            { id:"producao",  icon:"📈", label:"Prod." },
+            { id:"painel_tv", icon:"📺", label:"Painel" },
           ].map(item => (
             <button key={item.id} onClick={() => setPage(item.id)} style={{
               flex:1, display:"flex", flexDirection:"column", alignItems:"center",
               justifyContent:"center", background:"none", border:"none", cursor:"pointer",
-              padding:"4px 0", gap:2, color: page===item.id ? "#8B1A1A" : "#9CA3AF",
+              padding:"4px 0", gap:2, color: page===item.id ? "#fff" : "rgba(255,255,255,0.6)",
             }}>
               <span style={{ fontSize:18 }}>{item.icon}</span>
               <span style={{ fontSize:9, fontWeight:page===item.id?700:400 }}>{item.label}</span>
@@ -6483,7 +7036,7 @@ function AppInner() {
           <button onClick={() => setPage(page==="menu_mobile"?"clinica":"menu_mobile")} style={{
             flex:1, display:"flex", flexDirection:"column", alignItems:"center",
             justifyContent:"center", background:"none", border:"none", cursor:"pointer",
-            gap:2, color: page==="menu_mobile"?"#8B1A1A":"#9CA3AF",
+            gap:2, color: page==="menu_mobile"?"#fff":"rgba(255,255,255,0.6)",
           }}>
             <span style={{ fontSize:18 }}>☰</span>
             <span style={{ fontSize:9, fontWeight:page==="menu_mobile"?700:400 }}>Mais</span>
@@ -6493,27 +7046,29 @@ function AppInner() {
 
       {/* ── MOBILE FULL MENU ── */}
       {isMobile && page==="menu_mobile" && (
-        <div style={{ position:"fixed", inset:0, zIndex:999, background:"#fff", overflowY:"auto", paddingBottom:70 }}>
-          <div style={{ padding:"16px 16px 12px", borderBottom:"1px solid #E5E7EB",
+        <div style={{ position:"fixed", inset:0, zIndex:999, background:"linear-gradient(180deg, #8B1A1A 0%, #6B1414 100%)", overflowY:"auto", paddingBottom:70 }}>
+          <div style={{ padding:"16px 16px 12px", borderBottom:"1px solid rgba(255,255,255,0.15)",
             display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <span style={{ fontSize:16, fontWeight:700 }}>Menu</span>
+            <span style={{ fontSize:16, fontWeight:700, color:"#fff" }}>Menu</span>
             <button onClick={() => setPage("clinica")}
-              style={{ background:"none", border:"none", fontSize:22, cursor:"pointer" }}>✕</button>
+              style={{ background:"none", border:"none", fontSize:22, cursor:"pointer", color:"#fff" }}>✕</button>
           </div>
           <div style={{ display:"flex", flexDirection:"column" }}>
             {NAV.map(item => (
               <button key={item.id} onClick={() => setPage(item.id)} style={{
                 display:"flex", alignItems:"center", gap:14, width:"100%",
-                padding:"14px 20px", background:page===item.id?"#FDF2F2":"none",
-                border:"none", borderBottom:"1px solid #F1F5F9", cursor:"pointer",
-                textAlign:"left", color:page===item.id?"#8B1A1A":"#374151",
+                padding:"14px 20px", background:page===item.id?"rgba(255,255,255,0.15)":"none",
+                border:"none", borderBottom:"1px solid rgba(255,255,255,0.12)", cursor:"pointer",
+                textAlign:"left", color:page===item.id?"#fff":"rgba(255,255,255,0.8)",
+                borderLeft:page===item.id?"3px solid #fff":"3px solid transparent",
               }}>
                 <div style={{ width:36, height:36, borderRadius:10, flexShrink:0,
-                  background:page===item.id?item.color+"20":"#F3F4F6",
+                  background:page===item.id?"#fff":"rgba(255,255,255,0.15)",
+                  boxShadow:page===item.id?"0 3px 8px rgba(0,0,0,0.3)":"none",
                   display:"flex", alignItems:"center", justifyContent:"center" }}>
-                  <Icon name={item.icon} size={18} color={page===item.id?item.color:"#6B7280"}/>
+                  <Icon name={item.icon} size={18} color={page===item.id?item.color:"#fff"}/>
                 </div>
-                <span style={{ fontSize:15, fontWeight:page===item.id?700:400 }}>{item.label}</span>
+                <span style={{ fontSize:15, fontWeight:page===item.id?700:500 }}>{item.label}</span>
               </button>
             ))}
           </div>
@@ -6523,7 +7078,7 @@ function AppInner() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
         * { box-sizing:border-box; margin:0; padding:0; }
-        html,body,#root { height:100%; background:#DADADA; overflow:hidden; }
+        html,body,#root { height:100%; background:#E5CACA; overflow:hidden; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
         @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
         @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }

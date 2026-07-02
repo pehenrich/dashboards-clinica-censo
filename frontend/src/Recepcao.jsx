@@ -2,7 +2,7 @@ import { useState, useEffect, Fragment } from "react";
 import BriefingCard from "./BriefingCard";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Legend,
+  ResponsiveContainer, Legend, Cell,
 } from "recharts";
 
 const API = `${window.location.protocol}//${window.location.host}`;
@@ -25,18 +25,30 @@ const RECEPCOES = [
 const COR_MANHA = "#8B1A1A";
 const COR_TARDE = "#D97706";
 
+function fitFontSize(value, base, min) {
+  const len = String(value ?? "").length;
+  if (len <= 7) return base;
+  if (len <= 10) return Math.round(base * 0.85);
+  if (len <= 13) return Math.round(base * 0.7);
+  return min;
+}
+
 function KpiCard({ label, value, sub, color = "#111827" }) {
   return (
     <div style={{
-      background: "#fff", borderRadius: 12, padding: "18px 20px",
-      boxShadow: "0 1px 4px rgba(0,0,0,0.07)", flex: 1, minWidth: 140,
-      borderLeft: `4px solid ${color}`,
+      background: `linear-gradient(135deg, ${color}3A 0%, ${color}14 100%)`,
+      borderRadius: 16, padding: "18px 20px",
+      border: `1.5px solid ${color}55`,
+      boxShadow: `0 6px 18px ${color}22, 0 1px 4px rgba(0,0,0,0.05)`,
+      display: "flex", flexDirection: "column", gap: 8, minWidth: 0,
+      position: "relative", overflow: "hidden",
     }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+      <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${color}20`, pointerEvents:"none" }}/>
+      <div style={{ fontSize: 10, fontWeight: 800, color, textTransform: "uppercase", letterSpacing: "0.09em" }}>
         {label}
       </div>
-      <div style={{ fontSize: 24, fontWeight: 800, color, lineHeight: 1.1 }}>{value}</div>
-      {sub && <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 4 }}>{sub}</div>}
+      <div style={{ fontSize: fitFontSize(value,26,14), fontWeight: 900, color:"#111827", lineHeight: 1.15, letterSpacing:"-0.5px", overflowWrap:"anywhere" }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color:"#fff", fontWeight:700, background:color, borderRadius:6, padding:"2px 8px", display:"inline-block", alignSelf:"flex-start" }}>{sub}</div>}
     </div>
   );
 }
@@ -51,10 +63,10 @@ function Skeleton({ h = 200 }) {
   );
 }
 
-function ThSort({ col, label, sortCol, sortDir, onSort, align = "center" }) {
+function ThSort({ col, label, tip, sortCol, sortDir, onSort, align = "center" }) {
   const active = sortCol === col;
   return (
-    <th onClick={() => onSort(col)} style={{
+    <th onClick={() => onSort(col)} title={tip || label} style={{
       padding: "8px 12px", textAlign: align, fontWeight: 700,
       color: active ? "#8B1A1A" : "#6B7280", fontSize: 11,
       textTransform: "uppercase", letterSpacing: "0.05em",
@@ -81,6 +93,8 @@ export default function Recepcao({ periodo = "30d" }) {
   const [loadingConv, setLoadingConv] = useState(false);
   const [sortCol, setSortCol] = useState("total_pacientes");
   const [sortDir, setSortDir] = useState("desc");
+  const [porConvenio, setPorConvenio] = useState([]);
+  const [loadingConvAgg, setLoadingConvAgg] = useState(true);
 
   useEffect(() => {
     setLoadingRank(true);
@@ -88,6 +102,14 @@ export default function Recepcao({ periodo = "30d" }) {
       .then(r => r.json())
       .then(d => { setRanking(d || []); setLoadingRank(false); })
       .catch(() => setLoadingRank(false));
+  }, [periodo, setor]);
+
+  useEffect(() => {
+    setLoadingConvAgg(true);
+    fetch(`${API}/api/recepcao/por-convenio?periodo=${periodo}&setor=${setor}`)
+      .then(r => r.json())
+      .then(d => { setPorConvenio(d || []); setLoadingConvAgg(false); })
+      .catch(() => setLoadingConvAgg(false));
   }, [periodo, setor]);
 
   useEffect(() => {
@@ -154,6 +176,14 @@ export default function Recepcao({ periodo = "30d" }) {
   const top3 = sortedRanking.slice(0, 3);
   const setorLabel = RECEPCOES.find(r => r.cod === setor)?.nome || "Todas";
 
+  const convPorPacientes = [...porConvenio].sort((a,b)=>(b.total_pacientes||0)-(a.total_pacientes||0)).slice(0,10);
+  const convPorEspera = [...porConvenio]
+    .filter(c => c.espera_media_min != null && c.total_pacientes >= 2)
+    .sort((a,b)=>(b.espera_media_min||0)-(a.espera_media_min||0)).slice(0,10);
+  const recepPorTempo = [...ranking]
+    .filter(r => r.espera_media_min != null)
+    .sort((a,b)=>(a.espera_media_min||0)-(b.espera_media_min||0));
+
   const MESES_PT = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
   const now = new Date();
   const periodoLabel = periodo === "hoje"
@@ -167,6 +197,20 @@ export default function Recepcao({ periodo = "30d" }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <style>{`@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}`}</style>
+
+      {/* Filtro de recepção — afeta todo o módulo (KPIs, gráficos e ranking) */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+        background: "#fff", borderRadius: 12, padding: "12px 16px", boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>📍 Filtrar por recepção:</span>
+        {RECEPCOES.map(r => (
+          <button key={r.cod} onClick={() => handleSetorChange(r.cod)} style={{
+            padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700,
+            cursor: "pointer", border: "none", transition: "all 0.12s",
+            background: setor === r.cod ? "#8B1A1A" : "#F3F4F6",
+            color: setor === r.cod ? "#fff" : "#374151",
+          }}>{r.nome}</button>
+        ))}
+      </div>
 
       <BriefingCard
         cor="#D97706"
@@ -188,7 +232,7 @@ Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.
       />
 
       {/* KPI Cards */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 16 }}>
         <KpiCard label="Total de pacientes" value={num(totalPacientes)} color="#8B1A1A" />
         <KpiCard label="Tempo médio de recepção" value={min(esperaMedia)} sub="Do registro até abertura da OS" color="#D97706" />
         <KpiCard label="Produção financeira" value={brl(producaoTotal)} sub="Valor das OS abertas" color="#10B981" />
@@ -197,20 +241,8 @@ Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.
 
       {/* Ranking */}
       <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
-        {/* Header + filtro de recepção */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>Ranking por Recepcionista</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: "#9CA3AF", marginRight: 2 }}>Recepção:</span>
-            {RECEPCOES.map(r => (
-              <button key={r.cod} onClick={() => handleSetorChange(r.cod)} style={{
-                padding: "4px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600,
-                cursor: "pointer", border: "none", transition: "all 0.12s",
-                background: setor === r.cod ? "#8B1A1A" : "#F3F4F6",
-                color: setor === r.cod ? "#fff" : "#374151",
-              }}>{r.nome}</button>
-            ))}
-          </div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 14 }}>
+          Ranking por Recepcionista {setor && <span style={{ fontSize: 11, color: "#8B1A1A", fontWeight: 600 }}>— {setorLabel}</span>}
         </div>
 
         {loadingRank ? <Skeleton h={180} /> : ranking.length === 0 ? (
@@ -223,11 +255,11 @@ Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.
               <thead>
                 <tr style={{ background: "#F9FAFB" }}>
                   <th style={{ padding: "8px 12px", width: 36, borderBottom: "1px solid #E5E7EB" }}>#</th>
-                  <ThSort col="nome_recep"          label="Recepcionista"   sortCol={sortCol} sortDir={sortDir} onSort={handleSort} align="left" />
-                  <ThSort col="setor_nome"          label="Recepção"        sortCol={sortCol} sortDir={sortDir} onSort={handleSort} align="left" />
-                  <ThSort col="total_pacientes"     label="Pacientes"       sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                  <ThSort col="espera_media_min"    label="Tempo recepção"  sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
-                  <ThSort col="producao_financeira" label="Produção"        sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+                  <ThSort col="nome_recep"          label="Recepcionista"   tip="Funcionário que fez o check-in/recepção do paciente"                                  sortCol={sortCol} sortDir={sortDir} onSort={handleSort} align="left" />
+                  <ThSort col="setor_nome"          label="Recepção"        tip="Guichê/setor onde o paciente foi recepcionado (Consultórios, Diagnóstico, etc.)"      sortCol={sortCol} sortDir={sortDir} onSort={handleSort} align="left" />
+                  <ThSort col="total_pacientes"     label="Pacientes"       tip="Quantidade de pacientes distintos recepcionados no período"                            sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+                  <ThSort col="espera_media_min"    label="Tempo recepção"  tip="Tempo médio entre a chegada do paciente e a abertura da guia (OS)"                     sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
+                  <ThSort col="producao_financeira" label="Produção"        tip="Valor líquido das guias abertas para os pacientes que passaram por essa recepção"      sortCol={sortCol} sortDir={sortDir} onSort={handleSort} />
                   <th style={{ width: 28, borderBottom: "1px solid #E5E7EB" }} />
                 </tr>
               </thead>
@@ -312,6 +344,75 @@ Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.
               </tbody>
             </table>
           </div>
+        )}
+      </div>
+
+      {/* Pacientes por Convênio + Tempo de Recepção por Convênio */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 16 }}>
+        <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 2 }}>Pacientes Atendidos por Convênio</div>
+          <div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 14 }}>Top 10 convênios · {setorLabel}</div>
+          {loadingConvAgg ? <Skeleton h={260} /> : convPorPacientes.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 40, color: "#9CA3AF", fontSize: 13 }}>Sem dados</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={convPorPacientes} layout="vertical" margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10 }} allowDecimals={false} />
+                <YAxis type="category" dataKey="convenio" width={110} tick={{ fontSize: 10 }}
+                  tickFormatter={v => v?.length > 16 ? v.slice(0,16)+"…" : v} />
+                <Tooltip formatter={v => [num(v), "Pacientes"]} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                <Bar dataKey="total_pacientes" fill="#8B1A1A" radius={[0,4,4,0]} barSize={16} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 2 }}>Tempo Médio de Recepção por Convênio</div>
+          <div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 14 }}>Chegada até abertura da OS · convênios com 2+ pacientes</div>
+          {loadingConvAgg ? <Skeleton h={260} /> : convPorEspera.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 40, color: "#9CA3AF", fontSize: 13 }}>Sem dados suficientes</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={convPorEspera} layout="vertical" margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10 }} unit="min" />
+                <YAxis type="category" dataKey="convenio" width={110} tick={{ fontSize: 10 }}
+                  tickFormatter={v => v?.length > 16 ? v.slice(0,16)+"…" : v} />
+                <Tooltip formatter={v => [`${Math.round(v)} min`, "Tempo médio"]} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                <Bar dataKey="espera_media_min" radius={[0,4,4,0]} barSize={16}>
+                  {convPorEspera.map((c,i) => (
+                    <Cell key={i} fill={c.espera_media_min > 30 ? "#EF4444" : c.espera_media_min > 15 ? "#D97706" : "#10B981"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </div>
+
+      {/* Tempo Médio de Recepção por Recepcionista */}
+      <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 2 }}>Tempo Médio de Recepção por Recepcionista</div>
+        <div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 14 }}>Do registro de chegada até abertura da OS · {setorLabel}</div>
+        {loadingRank ? <Skeleton h={Math.max(160, recepPorTempo.length*28)} /> : recepPorTempo.length === 0 ? (
+          <div style={{ textAlign: "center", padding: 40, color: "#9CA3AF", fontSize: 13 }}>Sem dados</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={Math.max(160, recepPorTempo.length*28)}>
+            <BarChart data={recepPorTempo} layout="vertical" margin={{ top: 4, right: 30, left: 0, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 10 }} unit="min" />
+              <YAxis type="category" dataKey="nome_recep" width={130} tick={{ fontSize: 10 }}
+                tickFormatter={v => v?.length > 18 ? v.slice(0,18)+"…" : v} />
+              <Tooltip formatter={v => [`${Math.round(v)} min`, "Tempo médio"]} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+              <Bar dataKey="espera_media_min" radius={[0,4,4,0]} barSize={14} label={{ position:"right", fontSize:10, formatter: v => `${Math.round(v)}min` }}>
+                {recepPorTempo.map((r,i) => (
+                  <Cell key={i} fill={r.espera_media_min > 30 ? "#EF4444" : r.espera_media_min > 15 ? "#D97706" : "#10B981"} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
         )}
       </div>
 

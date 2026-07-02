@@ -67,23 +67,37 @@ function Card({children,title,subtitle,action,accent,noPad,style:ex={}}) {
   );
 }
 
+function fitFontSize(value, base, min) {
+  const len = String(value ?? "").length;
+  if (len <= 7) return base;
+  if (len <= 10) return Math.round(base * 0.85);
+  if (len <= 13) return Math.round(base * 0.7);
+  return min;
+}
+
 function KPI({label,value,sub,accent=C.red,loading,icon,trend}) {
   return (
-    <div style={{background:"#fff",borderRadius:16,padding:"16px 18px",
-      borderLeft:`4px solid ${accent}`,display:"flex",flexDirection:"column",gap:4,
-      boxShadow:"0 1px 4px rgba(0,0,0,0.07),0 0 0 1px rgba(0,0,0,0.04)"}}>
+    <div style={{
+      background:`linear-gradient(135deg, ${accent}3A 0%, ${accent}14 100%)`,
+      borderRadius:16,padding:"16px 18px",
+      border:`1.5px solid ${accent}55`,display:"flex",flexDirection:"column",gap:6,
+      boxShadow:`0 6px 18px ${accent}22, 0 1px 4px rgba(0,0,0,0.05)`,
+      position:"relative",overflow:"hidden"}}>
+      <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${accent}20`, pointerEvents:"none" }}/>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <span style={{fontSize:10,color:C.faint,fontWeight:700,textTransform:"uppercase",
+        <span style={{fontSize:10,color:accent,fontWeight:800,textTransform:"uppercase",
           letterSpacing:"0.09em",lineHeight:1.2}}>{label}</span>
         {icon&&<span style={{fontSize:18,opacity:0.6}}>{icon}</span>}
       </div>
       {loading
-        ? <div style={{height:30,width:"50%",background:"#F3F4F6",borderRadius:6,animation:"pac-pulse 1.5s infinite"}}/>
-        : <div style={{fontSize:24,fontWeight:900,color:C.text,lineHeight:1.1,letterSpacing:"-0.5px"}}>{value}</div>
+        ? <div style={{height:30,width:"50%",background:`${accent}20`,borderRadius:6,animation:"pac-pulse 1.5s infinite"}}/>
+        : <div style={{fontSize:fitFontSize(value,24,13),fontWeight:900,color:C.text,lineHeight:1.15,letterSpacing:"-0.5px",overflowWrap:"anywhere"}}>{value}</div>
       }
       {sub&&(
-        <span style={{fontSize:11,fontWeight:600,
-          color:trend==="up"?C.green:trend==="down"?"#EF4444":C.faint}}>
+        <span style={{fontSize:11,fontWeight:700,
+          color:trend==="up"?C.green:trend==="down"?"#EF4444":accent,
+          background:trend==="up"?"#D1FAE5":trend==="down"?"#FEE2E2":`${accent}14`,
+          borderRadius:6,padding:"2px 8px",display:"inline-block",alignSelf:"flex-start"}}>
           {trend==="up"?"↑ ":trend==="down"?"↓ ":""}{sub}
         </span>
       )}
@@ -129,7 +143,7 @@ function MapaCalor({periodo,setor=""}) {
         <div style={{padding:48,textAlign:"center",color:C.faint,fontSize:13}}>Sem dados no periodo</div>
       ) : (
         <>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(96px,1fr))",gap:6,marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(96px,1fr))",gap:6,marginBottom:12}}>
             {lista.map((b,i)=>{
               const ativo=sel===b.bairro;
               const claro=b.total/max<0.3;
@@ -678,7 +692,7 @@ Destaque crescimento da base, fidelização de retornos e oportunidades de capta
       </div>
 
       {/* ROW 1 — KPIs */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:12}}>
         <KPI label="Atendidos"       value={num(resumo?.pacientes_atendidos)} accent={C.red}    loading={lR} icon="👥"/>
         <KPI label="Novos Cadastros" value={num(resumo?.novos_cadastros)}     accent={C.green}  loading={lR} icon="✨" sub="no periodo" trend="up"/>
         <KPI label="Retorno"         value={num(resumo?.retorno)}             accent={C.blue}   loading={lR} icon="🔄" sub="mais de 1 atendimento"/>

@@ -28,6 +28,115 @@ function usePainelFetch(url, intervalMs = 30000) {
   return { data, loading, tick };
 }
 
+function ColunaRecepcaoTV({ cod, nome, cor }) {
+  const { data: resumo, loading } = usePainelFetch(`/api/painel/resumo-hoje?setor=${cod}`);
+  const [meta, setMeta] = useState(undefined); // undefined=carregando, null=sem meta
+  const [editando, setEditando] = useState(false);
+  const [tmp, setTmp] = useState("");
+
+  useEffect(() => {
+    fetch(`${API}/api/metas`)
+      .then(r => r.json())
+      .then(d => setMeta(d?.[`painel_recepcao_${cod}`]?.meta_diaria ?? null))
+      .catch(() => setMeta(null));
+  }, [cod]);
+
+  const salvar = async () => {
+    const valor = Number(tmp);
+    if (!valor || valor <= 0) return;
+    try {
+      await fetch(`${API}/api/metas/painel_recepcao_${cod}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meta_diaria: valor }),
+      });
+    } catch {}
+    setMeta(valor);
+    setEditando(false);
+  };
+
+  const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
+  const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
+
+  const fat = resumo?.faturamento || 0;
+  const pct = meta ? Math.min(100, (fat/meta)*100) : 0;
+  const corBarra = pct >= 100 ? "#10B981" : pct >= 60 ? cor : pct >= 30 ? "#F59E0B" : "#EF4444";
+
+  return (
+    <div style={{ background:"#1E293B", borderRadius:14, overflow:"hidden", border:`1px solid ${cor}40` }}>
+      {/* Barra de meta no topo */}
+      <div style={{ background:`linear-gradient(135deg, ${cor}30, ${cor}10)`, padding:"14px 16px", borderBottom:`2px solid ${cor}` }}>
+        <div style={{ fontSize:13, fontWeight:800, color:"#F1F5F9", marginBottom:8 }}>{nome}</div>
+        {meta === undefined ? (
+          <div style={{ height:8 }}/>
+        ) : !meta ? (
+          editando ? (
+            <div style={{ display:"flex", gap:6 }}>
+              <input type="number" value={tmp} onChange={e=>setTmp(e.target.value)} placeholder="Meta diária R$" autoFocus
+                style={{ flex:1, padding:"5px 8px", borderRadius:6, border:"none", fontSize:12, minWidth:0 }}/>
+              <button onClick={salvar} style={{ background:cor, color:"#fff", border:"none", borderRadius:6, padding:"5px 10px", fontWeight:700, fontSize:11, cursor:"pointer" }}>OK</button>
+            </div>
+          ) : (
+            <button onClick={()=>{setTmp(""); setEditando(true);}} style={{
+              background:"transparent", border:`1px dashed ${cor}`, borderRadius:6,
+              color:cor, fontSize:11, fontWeight:700, padding:"5px 10px", cursor:"pointer",
+            }}>+ Definir meta diária</button>
+          )
+        ) : editando ? (
+          <div style={{ display:"flex", gap:6 }}>
+            <input type="number" value={tmp} onChange={e=>setTmp(e.target.value)} autoFocus
+              style={{ flex:1, padding:"5px 8px", borderRadius:6, border:"none", fontSize:12, minWidth:0 }}/>
+            <button onClick={salvar} style={{ background:cor, color:"#fff", border:"none", borderRadius:6, padding:"5px 10px", fontWeight:700, fontSize:11, cursor:"pointer" }}>OK</button>
+          </div>
+        ) : (
+          <>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5, fontSize:11, color:"#CBD5E1", fontWeight:700 }}>
+              <span>{pct.toFixed(0)}% da meta</span>
+              <span onClick={()=>{setTmp(meta); setEditando(true);}} style={{ cursor:"pointer", color:"#94A3B8" }} title="Editar meta">⚙</span>
+            </div>
+            <div style={{ height:8, background:"#0F172A", borderRadius:4, overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${pct}%`, background:corBarra, borderRadius:4, transition:"width 1s" }}/>
+            </div>
+            <div style={{ fontSize:10, color:"#94A3B8", marginTop:4 }}>{brl(fat)} de {brl(meta)}</div>
+          </>
+        )}
+      </div>
+
+      {/* KPIs */}
+      <div style={{ padding:"14px 16px", display:"flex", flexDirection:"column", gap:10 }}>
+        <div>
+          <div style={{ fontSize:9, color:cor, fontWeight:700, textTransform:"uppercase" }}>Produção</div>
+          <div style={{ fontSize:20, fontWeight:900, color:"#F1F5F9" }}>{loading ? "…" : brl(resumo?.faturamento)}</div>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+          <div>
+            <div style={{ fontSize:9, color:"#64748B", fontWeight:700, textTransform:"uppercase" }}>OS</div>
+            <div style={{ fontSize:18, fontWeight:900, color:"#F1F5F9" }}>{loading ? "…" : num(resumo?.total_os)}</div>
+          </div>
+          <div>
+            <div style={{ fontSize:9, color:"#64748B", fontWeight:700, textTransform:"uppercase" }}>Pacientes</div>
+            <div style={{ fontSize:18, fontWeight:900, color:"#F1F5F9" }}>{loading ? "…" : num(resumo?.pacientes_unicos)}</div>
+          </div>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+          <div>
+            <div style={{ fontSize:9, color:"#64748B", fontWeight:700, textTransform:"uppercase" }}>Tempo Médio</div>
+            <div style={{ fontSize:14, fontWeight:800, color:"#0891B2" }}>
+              {loading ? "…" : resumo?.tempo_medio_min > 0 ? `${Math.round(resumo.tempo_medio_min)}min` : "—"}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize:9, color:"#64748B", fontWeight:700, textTransform:"uppercase" }}>Espera Média</div>
+            <div style={{ fontSize:14, fontWeight:800,
+              color: !resumo?.espera_media_min ? "#475569" : resumo.espera_media_min<=15?"#10B981":resumo.espera_media_min<=30?"#F59E0B":"#EF4444" }}>
+              {loading ? "…" : resumo?.espera_media_min > 0 ? `${Math.round(resumo.espera_media_min)}min` : "—"}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PainelTV() {
   const META_DIARIA = 45000;
   const [setor,    setSetor]    = useState("");
@@ -216,6 +325,19 @@ function PainelTV() {
             cursor:"pointer", flexShrink:0,
           }}>✕ Limpar</button>
         )}
+      </div>
+
+      {/* ── POR RECEPÇÃO — Consultórios, Diagnóstico, Ocupacional, Censo Imagem ── */}
+      <div style={{ marginBottom:16 }}>
+        <div style={{ fontSize:13, color:"#94A3B8", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
+          📍 Por Recepção — Hoje
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:14 }}>
+          <ColunaRecepcaoTV cod="RCN" nome="Consultórios" cor="#3B7EF5"/>
+          <ColunaRecepcaoTV cod="RDI" nome="Diagnóstico"  cor="#8B5CF6"/>
+          <ColunaRecepcaoTV cod="OCUP_TIPO" nome="Ocupacional" cor="#F59E0B"/>
+          <ColunaRecepcaoTV cod="RCI" nome="Censo Imagem" cor="#10B981"/>
+        </div>
       </div>
 
       {/* ── KPIs LINHA 1 ── */}

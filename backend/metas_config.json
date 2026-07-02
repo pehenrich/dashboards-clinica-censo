@@ -1,0 +1,11 @@
+{
+  "assistencial": {
+    "meta_mensal": null,
+    "meta_diaria": null
+  },
+  "producao": {
+    "meta_mensal": 1200000.0,
+    "meta_diaria": 48000.0,
+    "meta_sabado": 30000.0
+  }
+}

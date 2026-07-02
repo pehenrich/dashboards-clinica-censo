@@ -8,6 +8,13 @@ const API = `${window.location.protocol}//${window.location.host}`;
 
 const brl = v => v != null ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v) : "--";
 const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "--";
+function fitFontSize(value, base, min) {
+  const len = String(value ?? "").length;
+  if (len <= 7) return base;
+  if (len <= 10) return Math.round(base * 0.85);
+  if (len <= 13) return Math.round(base * 0.7);
+  return min;
+}
 
 const SETORES = [
   { id: "todos",        label: "Visão Geral",       cor: "#8B1A1A", emoji: "🏥" },
@@ -252,44 +259,53 @@ export default function Home({ periodoGlobal }) {
 
           {/* Mini cards por setor */}
           {setor === "todos" && dados?.setores_kpi?.length > 0 && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
-              {dados.setores_kpi.filter(s => s.setor !== "Outros").map(s => (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+              {dados.setores_kpi.filter(s => s.setor !== "Outros").map(s => {
+                const cor = COR_SETOR[s.setor] || "#9CA3AF";
+                return (
                 <div key={s.setor} style={{
-                  background: "#fff", borderRadius: 12, padding: "14px 16px",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.07)",
-                  borderLeft: `4px solid ${COR_SETOR[s.setor] || "#9CA3AF"}`,
-                  cursor: "pointer",
+                  background: `linear-gradient(135deg, ${cor}3A 0%, ${cor}14 100%)`,
+                  borderRadius: 14, padding: "14px 16px",
+                  border: `1.5px solid ${cor}55`,
+                  boxShadow: `0 6px 16px ${cor}22, 0 1px 3px rgba(0,0,0,0.05)`,
+                  cursor: "pointer", position:"relative", overflow:"hidden",
                 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: COR_SETOR[s.setor], textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 4 }}>{s.setor}</div>
-                  <div style={{ fontSize: 20, fontWeight: 800, color: "#111827" }}>{num(s.os)}</div>
+                  <div style={{ position:"absolute", right:-12, top:-12, width:64, height:64, borderRadius:"50%", background:`${cor}20`, pointerEvents:"none" }}/>
+                  <div style={{ fontSize: 10, fontWeight: 800, color: cor, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>{s.setor}</div>
+                  <div style={{ fontSize: fitFontSize(num(s.os),20,13), fontWeight: 900, color: "#111827", overflowWrap:"anywhere" }}>{num(s.os)}</div>
                   <div style={{ fontSize: 10, color: "#9CA3AF" }}>atendimentos</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginTop: 3 }}>{brl(s.producao)}</div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#fff", marginTop: 4, background:cor, borderRadius:6, padding:"2px 8px", display:"inline-block" }}>{brl(s.producao)}</div>
                 </div>
-              ))}
+              );})}
             </div>
           )}
 
           {/* KPIs principais */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-            {KPIS.map((item, i) => (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>
+            {KPIS.map((item, i) => {
+              const cor = item.corValor || corAtual;
+              return (
               <div key={i} style={{
-                background: "#fff", borderRadius: 14, padding: "18px 20px",
-                boxShadow: "0 1px 4px rgba(0,0,0,0.07)",
-                borderTop: `3px solid ${corAtual}`,
+                background: `linear-gradient(135deg, ${cor}3A 0%, ${cor}14 100%)`,
+                borderRadius: 16, padding: "18px 20px",
+                border: `1.5px solid ${cor}55`,
+                boxShadow: `0 6px 18px ${cor}22, 0 1px 4px rgba(0,0,0,0.05)`,
+                position:"relative", overflow:"hidden",
               }}>
+                <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${cor}20`, pointerEvents:"none" }}/>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.07em" }}>{item.label}</span>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: cor, textTransform: "uppercase", letterSpacing: "0.09em" }}>{item.label}</span>
                   <span style={{ fontSize: 20 }}>{item.icon}</span>
                 </div>
-                <div style={{ fontSize: 24, fontWeight: 800, color: item.corValor || "#111827", letterSpacing: "-0.5px", marginBottom: 4 }}>
+                <div style={{ fontSize: fitFontSize(item.valor,26,14), fontWeight: 900, color: "#111827", letterSpacing: "-0.5px", marginBottom: 6, overflowWrap:"anywhere" }}>
                   {item.valor}
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap:"wrap" }}>
                   <span style={{ fontSize: 11, color: "#9CA3AF" }}>{item.sub}</span>
                   <Variacao val={item.var} />
                 </div>
               </div>
-            ))}
+            );})}
           </div>
 
           {/* Projeção do mês */}

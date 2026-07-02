@@ -467,6 +467,49 @@ def home_resumo(periodo: str = "30d", setor: str = "todos"):
     }
 
 
+# Recepções exibidas lado a lado no Dashboard Clínica (osm_str)
+RECEPCOES_HOME = [
+    {"cod": "RCN", "nome": "Consultórios"},
+    {"cod": "RDI", "nome": "Diagnóstico"},
+    {"cod": "RCI", "nome": "Censo Imagem"},
+]
+
+@app.get("/api/home/por-recepcao")
+def home_por_recepcao(periodo: str = "30d"):
+    """KPIs (produção, pacientes, OSs, ticket médio) quebrados por recepção — Consultórios, Diagnóstico, Censo Imagem."""
+    inicio, fim = periodo_datas(periodo)
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    rows = query(f"""
+        SELECT
+            RTRIM(osm.osm_str)                                     AS cod,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)     AS total_os,
+            COUNT(DISTINCT osm.osm_pac)                            AS pacientes,
+            SUM({vliq})                                            AS producao,
+            SUM({vliq}) / NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND RTRIM(osm.osm_str) IN ({",".join(f"'{r['cod']}'" for r in RECEPCOES_HOME)})
+        GROUP BY RTRIM(osm.osm_str)
+    """)
+    por_cod = {r["cod"]: r for r in rows}
+
+    resultado = []
+    for r in RECEPCOES_HOME:
+        d = por_cod.get(r["cod"], {})
+        resultado.append({
+            "cod": r["cod"],
+            "nome": r["nome"],
+            "producao": float(d.get("producao") or 0),
+            "pacientes": d.get("pacientes") or 0,
+            "total_os": d.get("total_os") or 0,
+            "ticket_medio": float(d.get("ticket_medio") or 0),
+        })
+    return resultado
+
+
 # ── ENDPOINT: Listar usuários com permissões ──────────────────────────────────
 @app.get("/api/auth/usuarios")
 def auth_usuarios(busca: str = ""):
@@ -760,6 +803,26 @@ def periodo_datas(periodo: str):
         inicio = (now - timedelta(days=dias)).strftime("%Y-%m-%d")
         fim    = now.strftime("%Y-%m-%d")
     return inicio, fim
+
+def periodo_anterior(inicio: str, fim: str):
+    """Período imediatamente anterior, com a mesma duração — usado para comparação mês/período anterior."""
+    d_ini = datetime.strptime(inicio, "%Y-%m-%d")
+    d_fim = datetime.strptime(fim, "%Y-%m-%d")
+    delta = (d_fim - d_ini).days + 1
+    ant_fim = d_ini - timedelta(days=1)
+    ant_ini = ant_fim - timedelta(days=delta - 1)
+    return ant_ini.strftime("%Y-%m-%d"), ant_fim.strftime("%Y-%m-%d")
+
+def var_pct(atual, anterior):
+    """% de variação entre dois valores; None se não houver base de comparação."""
+    try:
+        atual = float(atual or 0)
+        anterior = float(anterior or 0)
+    except (TypeError, ValueError):
+        return None
+    if anterior == 0:
+        return None
+    return round(((atual - anterior) / anterior) * 100, 1)
 
 def filtro_setores_sql(setores: str, alias_smm: str = "smm") -> str:
     """Gera cláusula WHERE para filtrar por setores (SMM_STR)."""
@@ -2173,6 +2236,14 @@ def assistencial_medicos_por_especialidade(periodo: str = "30d", especialidade: 
 def assistencial_resumo(periodo: str = "30d"):
     inicio, fim = periodo_datas(periodo)
     fin = modulo_resumo_financeiro(inicio, fim, ASSISTENCIAL_CODES)
+    ant_ini, ant_fim = periodo_anterior(inicio, fim)
+    fin_ant = modulo_resumo_financeiro(ant_ini, ant_fim, ASSISTENCIAL_CODES)
+    variacoes = {
+        "faturamento":  var_pct(fin.get("faturamento"), fin_ant.get("faturamento")),
+        "total_os":     var_pct(fin.get("total_os"), fin_ant.get("total_os")),
+        "pacientes_unicos": var_pct(fin.get("pacientes_unicos"), fin_ant.get("pacientes_unicos")),
+        "ticket_medio": var_pct(fin.get("ticket_medio"), fin_ant.get("ticket_medio")),
+    }
     vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
     CONS  = ('CLI','PED','ORT','CAR','DER','GIN','RUM','GAS','URO','PNE','END','OFT','CIR','VAR','PRO','ANE','HAM','INF','MAM','MAS')
     EMULT = ('PSC','NUT','ENF','FIS','TER','FAR','ASS','SOC')
@@ -2325,6 +2396,7 @@ def assistencial_resumo(periodo: str = "30d"):
 
     return {
         "financeiro":       fin,
+        "variacoes":        variacoes,
         "operacional":      ops[0] if ops else {},
         "consultas":        consultas,
         "equipe_mult":      equipe,
@@ -2343,6 +2415,14 @@ OCUP_CODES = ["ADM","PER","DEM","RTB","MDF","MOC"]
 def ocupacional_modulo_resumo(periodo: str = "30d"):
     inicio, fim = periodo_datas(periodo)
     fin = modulo_resumo_financeiro(inicio, fim, OCUP_CODES)
+    ant_ini, ant_fim = periodo_anterior(inicio, fim)
+    fin_ant = modulo_resumo_financeiro(ant_ini, ant_fim, OCUP_CODES)
+    variacoes = {
+        "faturamento":      var_pct(fin.get("faturamento"), fin_ant.get("faturamento")),
+        "total_os":         var_pct(fin.get("total_os"), fin_ant.get("total_os")),
+        "pacientes_unicos": var_pct(fin.get("pacientes_unicos"), fin_ant.get("pacientes_unicos")),
+        "ticket_medio":     var_pct(fin.get("ticket_medio"), fin_ant.get("ticket_medio")),
+    }
     ops = query(f"""
         SELECT
             COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS total_os,
@@ -2375,6 +2455,7 @@ def ocupacional_modulo_resumo(periodo: str = "30d"):
     """)
     return {
         "financeiro": fin,
+        "variacoes": variacoes,
         "operacional": ops[0] if ops else {},
         "empresas": empresas,
         "especialidades": modulo_especialidades_smm(inicio, fim, OCUP_CODES),
@@ -2400,6 +2481,22 @@ SERVICOS_CODES = {
 # Especialidades de Serviços — via SMM_ESP (PSC=Psicologia, NUT=Nutrição, FON=Fono etc)
 SERVICOS_ESP_CODES = ["PSC","NUT","FON","NEU","PED","GIN","ORT","DER","PSQ","ENF","ANC","RAD","USG","CAR"]
 
+def servicos_financeiro(inicio: str, fim: str, codes_sql: str):
+    rows = query(f"""
+        SELECT
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)               AS total_os,
+            COUNT(DISTINCT osm.osm_pac)                                      AS pacientes_unicos,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)))                                                 AS faturamento,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)))/NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio,
+            SUM(CASE WHEN smm.SMM_SFAT='A' THEN (smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) ELSE 0 END)     AS val_aberto
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_ESP IN ({codes_sql})
+          AND smm.SMM_SFAT IN ('A','F','P')
+    """)
+    return rows[0] if rows else {}
+
 @app.get("/api/modulo/servicos/resumo")
 def servicos_resumo(periodo: str = "30d"):
     """
@@ -2408,6 +2505,8 @@ def servicos_resumo(periodo: str = "30d"):
     """
     inicio, fim = periodo_datas(periodo)
     codes_sql = ",".join(f"'{c}'" for c in SERVICOS_ESP_CODES)
+    ant_ini, ant_fim = periodo_anterior(inicio, fim)
+    fin_ant = servicos_financeiro(ant_ini, ant_fim, codes_sql)
 
     # Por especialidade de item (SMM_ESP)
     por_tipo = query(f"""
@@ -2457,8 +2556,16 @@ def servicos_resumo(periodo: str = "30d"):
     for r in por_dia:
         if hasattr(r.get("data"),"strftime"): r["data"] = r["data"].strftime("%Y-%m-%d")
 
+    fin_atual = fin[0] if fin else {}
+    variacoes = {
+        "faturamento":      var_pct(fin_atual.get("faturamento"), fin_ant.get("faturamento")),
+        "total_os":         var_pct(fin_atual.get("total_os"), fin_ant.get("total_os")),
+        "pacientes_unicos": var_pct(fin_atual.get("pacientes_unicos"), fin_ant.get("pacientes_unicos")),
+        "ticket_medio":     var_pct(fin_atual.get("ticket_medio"), fin_ant.get("ticket_medio")),
+    }
     return {
-        "financeiro": fin[0] if fin else {},
+        "financeiro": fin_atual,
+        "variacoes": variacoes,
         "por_servico": por_tipo,
         "por_dia": por_dia,
     }
@@ -2478,12 +2585,30 @@ LAB_ESP_GRUPOS = {
 }
 ALL_LAB_ESP = ["LAB"]  # Apenas análises clínicas / exames de sangue
 
+def laboratorio_financeiro(inicio: str, fim: str, esp_sql: str, filtro_setor: str):
+    rows = query(f"""
+        SELECT
+            COUNT(*)                                                                        AS total_exames,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)                              AS total_os,
+            COUNT(DISTINCT osm.osm_pac)                                                     AS pacientes_unicos,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)))                                                                AS faturamento,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)))/NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0)   AS ticket_medio
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_ESP IN ({esp_sql})
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_setor}
+    """)
+    return rows[0] if rows else {}
+
 @app.get("/api/modulo/laboratorio/resumo")
-def laboratorio_resumo(periodo: str = "30d", setor: str = ""):
+def laboratorio_resumo(periodo: str = "30d", setor: str = "", recepcao: str = ""):
     """
     setor: 'diagnostico' → exclui OSs ocupacionais (ASS only)
            'ocupacional' → apenas OSs ocupacionais (ADM,PER,DEM etc)
            ''            → todos
+    recepcao: código do ponto de recepção (osm_str) — ex: RDI, RCI, ROC, RCN
     """
     """
     Laboratório e diagnóstico identificados pelo campo SMM_ESP dos itens da OS.
@@ -2499,6 +2624,10 @@ def laboratorio_resumo(periodo: str = "30d", setor: str = ""):
         filtro_setor = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
     else:
         filtro_setor = ""
+
+    recepcao_cod = "".join(ch for ch in recepcao if ch.isalnum())[:6]
+    if recepcao_cod:
+        filtro_setor += f" AND RTRIM(osm.osm_str) = '{recepcao_cod}'"
 
     # Por especialidade de item
     por_tipo = query(f"""
@@ -2622,14 +2751,189 @@ def laboratorio_resumo(periodo: str = "30d", setor: str = ""):
         ORDER BY faturamento DESC
     """)
 
+    fin_atual = fin[0] if fin else {}
+    ant_ini, ant_fim = periodo_anterior(inicio, fim)
+    fin_ant = laboratorio_financeiro(ant_ini, ant_fim, esp_sql, filtro_setor)
+    variacoes = {
+        "faturamento":      var_pct(fin_atual.get("faturamento"), fin_ant.get("faturamento")),
+        "total_os":         var_pct(fin_atual.get("total_os"), fin_ant.get("total_os")),
+        "pacientes_unicos": var_pct(fin_atual.get("pacientes_unicos"), fin_ant.get("pacientes_unicos")),
+        "ticket_medio":     var_pct(fin_atual.get("ticket_medio"), fin_ant.get("ticket_medio")),
+    }
+
     return {
-        "financeiro": fin[0] if fin else {},
+        "financeiro": fin_atual,
+        "variacoes": variacoes,
         "por_tipo": por_tipo,
         "grupos": grupos,
         "por_convenio": conv,
         "por_dia": por_dia,
         "top_medicos": top_medicos,
     }
+
+
+# Bancadas que representam laboratório de apoio (externo) — as demais são internas.
+BANCADAS_EXTERNAS = ["HP", "DB", "PSY"]
+# Não trabalhamos mais com Hermes Pardini para exames laboratoriais — tudo que
+# estiver marcado como HP no Pixeon é reclassificado para DB (Diagnósticos do Brasil).
+BANCADA_REMAP = {"HP": "DB"}
+
+@app.get("/api/modulo/laboratorio/bancadas")
+def laboratorio_bancadas(periodo: str = "30d", setor: str = "", recepcao: str = ""):
+    """
+    Volume e faturamento por bancada de laboratório (BNC), identificando quais
+    bancadas são de apoio externo (Hermes Pardini, DB Diagnósticos, Psychemedics)
+    vs. processadas internamente. Vínculo exame→bancada via tabela SBN.
+    recepcao: código do ponto de recepção (osm_str) — ex: RDI, RCI, ROC, RCN
+    """
+    inicio, fim = periodo_datas(periodo)
+    esp_sql = ",".join(f"'{c}'" for c in ALL_LAB_ESP)
+
+    if setor == "diagnostico":
+        filtro_setor = "AND osm.osm_atend IN ('ASS','EME','CRG','TAM')"
+    elif setor == "ocupacional":
+        filtro_setor = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
+    else:
+        filtro_setor = ""
+
+    recepcao_cod = "".join(ch for ch in recepcao if ch.isalnum())[:6]
+    if recepcao_cod:
+        filtro_setor += f" AND RTRIM(osm.osm_str) = '{recepcao_cod}'"
+
+    ext_sql = ",".join(f"'{b}'" for b in BANCADAS_EXTERNAS)
+
+    rows = query(f"""
+        SELECT
+            RTRIM(sbn.SBN_BNC_COD)                                                          AS bancada_cod,
+            RTRIM(bnc.BNC_NOME)                                                              AS bancada_nome,
+            COUNT(*)                                                                         AS qtd_exames,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)                               AS qtd_os,
+            COUNT(DISTINCT osm.osm_pac)                                                      AS pacientes,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS valor
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        LEFT JOIN SBN sbn ON RTRIM(sbn.SBN_SMK_COD) = RTRIM(smm.SMM_COD)
+        LEFT JOIN BNC bnc ON RTRIM(bnc.BNC_COD) = RTRIM(sbn.SBN_BNC_COD) AND RTRIM(bnc.BNC_STR_COD) = RTRIM(sbn.SBN_STR_COD)
+        WHERE smm.SMM_ESP IN ({esp_sql})
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          {filtro_setor}
+        GROUP BY RTRIM(sbn.SBN_BNC_COD), RTRIM(bnc.BNC_NOME)
+        ORDER BY valor DESC
+    """)
+
+    por_codigo = {}  # cod (já remapeado) -> agregado
+    resumo = {"interno_qtd": 0, "interno_valor": 0.0, "externo_qtd": 0, "externo_valor": 0.0,
+              "nao_classificado_qtd": 0, "nao_classificado_valor": 0.0}
+
+    for r in rows:
+        cod_original = r["bancada_cod"]
+        valor = float(r["valor"] or 0)
+        if cod_original is None:
+            # Exame sem bancada cadastrada no Pixeon: soma no card DB (Diagnósticos do Brasil),
+            # o único laboratório de apoio externo em uso hoje. `nao_classificado_*` continua
+            # registrado à parte só para alimentar a lista de detalhe (quais exames faltam
+            # cadastrar em SBN) — não entra mais como um total isolado.
+            resumo["nao_classificado_qtd"] += r["qtd_exames"]
+            resumo["nao_classificado_valor"] += valor
+            cod = "DB"
+        else:
+            cod = BANCADA_REMAP.get(cod_original, cod_original)
+        tipo = "externo" if cod in BANCADAS_EXTERNAS else "interno"
+        if tipo == "externo":
+            resumo["externo_qtd"] += r["qtd_exames"]
+            resumo["externo_valor"] += valor
+        else:
+            resumo["interno_qtd"] += r["qtd_exames"]
+            resumo["interno_valor"] += valor
+
+        if cod not in por_codigo:
+            por_codigo[cod] = {
+                "codigo": cod,
+                "nome": "DIAGNOSTICOS DO BRASIL" if cod == "DB" else (r["bancada_nome"] or cod),
+                "tipo": tipo,
+                "qtd_exames": 0, "qtd_os": 0, "pacientes": 0, "valor": 0.0,
+            }
+        agg = por_codigo[cod]
+        agg["qtd_exames"] += r["qtd_exames"]
+        agg["qtd_os"]     += r["qtd_os"]
+        agg["pacientes"]  += r["pacientes"]  # aproximado: pode haver paciente em ambas as bancadas remapeadas
+        agg["valor"]      += valor
+
+    bancadas = sorted(por_codigo.values(), key=lambda b: -b["valor"])
+
+    # nao_classificado_* já está incluído em externo_qtd/externo_valor (foi somado no DB acima).
+    total_qtd = resumo["interno_qtd"] + resumo["externo_qtd"]
+    total_valor = resumo["interno_valor"] + resumo["externo_valor"]
+    resumo["pct_externo_qtd"] = round(resumo["externo_qtd"] / total_qtd * 100, 1) if total_qtd else 0
+    resumo["pct_externo_valor"] = round(resumo["externo_valor"] / total_valor * 100, 1) if total_valor else 0
+
+    # Detalhe dos exames realizados sem bancada vinculada — para saber o que falta cadastrar em SBN no Pixeon.
+    nao_classificados = query(f"""
+        SELECT
+            RTRIM(smm.SMM_COD)                                                              AS codigo,
+            RTRIM(MAX(smk.SMK_NOME))                                                         AS nome,
+            COUNT(*)                                                                         AS qtd_exames,
+            COUNT(DISTINCT osm.osm_pac)                                                      AS pacientes,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS valor
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        LEFT JOIN SBN sbn ON RTRIM(sbn.SBN_SMK_COD) = RTRIM(smm.SMM_COD)
+        LEFT JOIN SMK smk ON RTRIM(smk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE smm.SMM_ESP IN ({esp_sql})
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND sbn.SBN_BNC_COD IS NULL
+          {filtro_setor}
+        GROUP BY RTRIM(smm.SMM_COD)
+        ORDER BY qtd_exames DESC
+    """)
+    for r in nao_classificados:
+        r["valor"] = float(r["valor"] or 0)
+
+    return {
+        "bancadas": bancadas,
+        "resumo": resumo,
+        "nao_classificados": nao_classificados,
+    }
+
+
+@app.get("/api/modulo/laboratorio/por-recepcao")
+def laboratorio_por_recepcao(periodo: str = "30d", setor: str = ""):
+    """
+    Produção de exames laboratoriais quebrada por ponto de recepção (osm_str),
+    no mesmo formato usado no Painel em tempo real (coluna por recepção).
+    """
+    inicio, fim = periodo_datas(periodo)
+    esp_sql = ",".join(f"'{c}'" for c in ALL_LAB_ESP)
+
+    if setor == "diagnostico":
+        filtro_setor = "AND osm.osm_atend IN ('ASS','EME','CRG','TAM')"
+    elif setor == "ocupacional":
+        filtro_setor = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
+    else:
+        filtro_setor = ""
+
+    rows = query(f"""
+        SELECT
+            RTRIM(osm.osm_str)                                                              AS recepcao_cod,
+            COUNT(*)                                                                        AS total_exames,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)                               AS total_os,
+            COUNT(DISTINCT osm.osm_pac)                                                      AS pacientes,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS faturamento
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_ESP IN ({esp_sql})
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_setor}
+        GROUP BY RTRIM(osm.osm_str)
+        ORDER BY faturamento DESC
+    """)
+    for r in rows:
+        r["faturamento"] = float(r["faturamento"] or 0)
+        r["ticket_medio"] = (r["faturamento"] / r["total_os"]) if r["total_os"] else 0
+    return rows
 
 
 # ── AGENDAMENTOS (já existe, mas adicionando financeiro) ─────────────────────
@@ -2838,11 +3142,8 @@ def agendamentos_resumo_hoje():
         "medicos_tarde": medicos_tarde,
     }
 
-@app.get("/api/modulo/agendamentos/resumo")
-def agendamentos_modulo_resumo(periodo: str = "30d"):
-    inicio, fim = periodo_datas(periodo)
-    # Stats agendamento
-    stats = query(f"""
+def agendamentos_stats(inicio: str, fim: str):
+    rows = query(f"""
         SELECT
             -- Total = slots com paciente marcado (não considera slots vazios)
             SUM(CASE WHEN agm.agm_pac IS NOT NULL AND agm.agm_pac > 0
@@ -2895,6 +3196,19 @@ def agendamentos_modulo_resumo(periodo: str = "30d"):
                    AND osm_match.osm_data = CAST(agm.agm_hini AS DATE)
         WHERE agm.agm_hini BETWEEN '{inicio}' AND '{fim} 23:59:59'
     """)
+    return rows[0] if rows else {}
+
+@app.get("/api/modulo/agendamentos/resumo")
+def agendamentos_modulo_resumo(periodo: str = "30d"):
+    inicio, fim = periodo_datas(periodo)
+    stats = [agendamentos_stats(inicio, fim)]
+    ant_ini, ant_fim = periodo_anterior(inicio, fim)
+    stats_ant = agendamentos_stats(ant_ini, ant_fim)
+    variacoes = {
+        "marcacoes":  var_pct(stats[0].get("marcacoes"), stats_ant.get("marcacoes")),
+        "executados": var_pct(stats[0].get("executados"), stats_ant.get("executados")),
+        "cancelados": var_pct(stats[0].get("cancelados"), stats_ant.get("cancelados")),
+    }
     # Por médico top 10
     top_med = query(f"""
         SELECT TOP 15
@@ -2998,6 +3312,7 @@ def agendamentos_modulo_resumo(periodo: str = "30d"):
         if hasattr(r.get("data"),"strftime"): r["data"] = r["data"].strftime("%Y-%m-%d")
     return {
         "stats": stats[0] if stats else {},
+        "variacoes": variacoes,
         "top_medicos": top_med,
         "por_dia": por_dia,
     }
@@ -3160,6 +3475,40 @@ def _load_wpp_config():
 
 def _save_wpp_config(cfg):
     with open(_WPP_CONFIG_FILE, "w") as f: _json.dump(cfg, f, indent=2)
+
+
+# ── METAS POR MÓDULO ──────────────────────────────────────────────────────────
+# Guardadas em arquivo local (não no banco SMART, que é do sistema Pixeon) —
+# mesmo padrão do whatsapp_config.json.
+_METAS_CONFIG_FILE = "metas_config.json"
+
+def _load_metas():
+    try:
+        with open(_METAS_CONFIG_FILE, encoding="utf-8") as f: return _json.load(f)
+    except: return {}
+
+def _save_metas(cfg):
+    with open(_METAS_CONFIG_FILE, "w", encoding="utf-8") as f: _json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+@app.get("/api/metas")
+def metas_listar():
+    """Retorna as metas configuradas por módulo: { modulo: { meta_mensal, meta_diaria } }"""
+    return _load_metas()
+
+@app.put("/api/metas/{modulo}")
+def metas_salvar(modulo: str, payload: dict):
+    metas = _load_metas()
+    atual = metas.get(modulo, {})
+    meta_mensal = payload.get("meta_mensal", atual.get("meta_mensal"))
+    meta_diaria = payload.get("meta_diaria", atual.get("meta_diaria"))
+    meta_sabado = payload.get("meta_sabado", atual.get("meta_sabado"))
+    metas[modulo] = {
+        "meta_mensal": float(meta_mensal) if meta_mensal not in (None, "") else None,
+        "meta_diaria": float(meta_diaria) if meta_diaria not in (None, "") else None,
+        "meta_sabado": float(meta_sabado) if meta_sabado not in (None, "") else None,
+    }
+    _save_metas(metas)
+    return metas[modulo]
 
 @app.get("/api/whatsapp/config")
 def wpp_get_config():
@@ -4094,9 +4443,16 @@ def estoque_por_grupo(periodo: str = "30d"):
 
 @app.get("/api/painel/resumo-hoje")
 def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
-    """KPIs do dia atual em tempo real."""
+    """
+    KPIs do dia atual em tempo real.
+    setor='OCUP_TIPO' → filtra por TIPO de atendimento ocupacional (osm_atend), não pela
+    recepção física — usado pra bater com o KPI "Ocupacional" do painel geral.
+    """
     hoje = datetime.now().strftime("%Y-%m-%d")
-    filtro_str = f"AND RTRIM(osm.osm_str) = '{setor}'" if setor else ""
+    if setor == "OCUP_TIPO":
+        filtro_str = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
+    else:
+        filtro_str = f"AND RTRIM(osm.osm_str) = '{setor}'" if setor else ""
 
     # Atendimentos e faturamento do dia
     fat = query(f"""
@@ -4182,7 +4538,10 @@ def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
     # Tempo de espera — lógica unificada para todos os setores:
     # FLE_DTHR_CHEGADA (chegada do paciente) → osm_dthr (abertura da OS = início do atendimento)
     # Deduplica com TOP 1 para pegar a chegada mais recente antes da OS de cada paciente
-    filtro_str_espera = f"AND RTRIM(osm.osm_str) = '{setor}'" if setor else ""
+    if setor == "OCUP_TIPO":
+        filtro_str_espera = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
+    else:
+        filtro_str_espera = f"AND RTRIM(osm.osm_str) = '{setor}'" if setor else ""
     espera = query(f"""
         SELECT
             AVG(espera_min)  AS espera_media_min,
@@ -4404,6 +4763,40 @@ def painel_evolucao_hora():
         GROUP BY DATEPART(hour, osm.osm_dthr)
         ORDER BY hora
     """)
+    return rows
+
+
+@app.get("/api/financeiro/ocupacional-vs-assistencial")
+def ocupacional_vs_assistencial(meses: int = 24):
+    """
+    Produção mensal (valor líquido) de Ocupacional vs Assistencial, lado a lado,
+    para visualizar em que mês uma passou a superar a outra.
+    """
+    now = datetime.now()
+    ano_ini, mes_ini = now.year, now.month - meses + 1
+    while mes_ini <= 0:
+        mes_ini += 12
+        ano_ini -= 1
+    inicio = f"{ano_ini}-{mes_ini:02d}-01"
+    fim = now.strftime("%Y-%m-%d")
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    rows = query(f"""
+        SELECT
+            YEAR(osm.osm_dthr)  AS ano,
+            MONTH(osm.osm_dthr) AS mes,
+            SUM(CASE WHEN osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC') THEN {vliq} ELSE 0 END) AS ocupacional,
+            SUM(CASE WHEN osm.osm_atend = 'ASS' THEN {vliq} ELSE 0 END)                                    AS assistencial
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+        ORDER BY ano, mes
+    """)
+    for r in rows:
+        r["ocupacional"]  = float(r["ocupacional"] or 0)
+        r["assistencial"] = float(r["assistencial"] or 0)
     return rows
 
 
@@ -7969,18 +8362,27 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                   {filtro_setor}
             ) x WHERE rn = 1
         ),
-        esperas AS (
+        esperas_agg AS (
+            -- Pré-agregado por (recepcionista, setor): evita reunir de volta com `chegadas`
+            -- sem a data (bug que multiplicava linhas p/ pacientes com +1 visita no período
+            -- e também deixava a query ~40s mais lenta por causa do plano gerado).
             SELECT
                 c.login_recep,
                 c.setor_cod,
-                c.FLE_PAC_REG,
-                DATEDIFF(minute, c.FLE_DTHR_CHEGADA,
+                COUNT(DISTINCT c.FLE_PAC_REG) AS total_pacientes,
+                AVG(CAST(
+                    CASE WHEN e.espera_min BETWEEN 0 AND 120 THEN e.espera_min ELSE NULL END
+                AS FLOAT))                    AS espera_media_min
+            FROM chegadas c
+            OUTER APPLY (
+                SELECT DATEDIFF(minute, c.FLE_DTHR_CHEGADA,
                     (SELECT TOP 1 o.osm_dthr FROM osm o
                      WHERE o.osm_pac = c.FLE_PAC_REG
                        AND CAST(o.osm_dthr AS DATE) = c.data_cheg
                        AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
                      ORDER BY o.osm_dthr ASC)) AS espera_min
-            FROM chegadas c
+            ) e
+            GROUP BY c.login_recep, c.setor_cod
         ),
         financeiro AS (
             SELECT
@@ -7994,27 +8396,19 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             GROUP BY c.login_recep, c.setor_cod
         )
         SELECT
-            c.login_recep,
-            RTRIM(ISNULL(u.USR_NOME, c.login_recep))   AS nome_recep,
-            c.setor_cod,
-            ISNULL(RTRIM(str.str_nome), c.setor_cod)   AS setor_nome,
-            COUNT(DISTINCT c.FLE_PAC_REG)               AS total_pacientes,
-            AVG(CAST(
-                CASE WHEN e.espera_min BETWEEN 0 AND 120 THEN e.espera_min ELSE NULL END
-            AS FLOAT))                                   AS espera_media_min,
-            ISNULL(f.producao, 0)                        AS producao_financeira
-        FROM chegadas c
-        LEFT JOIN esperas    e ON e.login_recep = c.login_recep
-                              AND e.setor_cod   = c.setor_cod
-                              AND e.FLE_PAC_REG = c.FLE_PAC_REG
-        LEFT JOIN financeiro f ON f.login_recep = c.login_recep
-                              AND f.setor_cod   = c.setor_cod
-        LEFT JOIN str ON RTRIM(str.str_cod) = c.setor_cod
-        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) = c.login_recep
-        GROUP BY c.login_recep, RTRIM(ISNULL(u.USR_NOME, c.login_recep)),
-                 c.setor_cod, ISNULL(RTRIM(str.str_nome), c.setor_cod),
-                 ISNULL(f.producao, 0)
-        ORDER BY total_pacientes DESC
+            ea.login_recep,
+            RTRIM(ISNULL(u.USR_NOME, ea.login_recep)) AS nome_recep,
+            ea.setor_cod,
+            ISNULL(RTRIM(str.str_nome), ea.setor_cod) AS setor_nome,
+            ea.total_pacientes,
+            ea.espera_media_min,
+            ISNULL(f.producao, 0)                      AS producao_financeira
+        FROM esperas_agg ea
+        LEFT JOIN financeiro f ON f.login_recep = ea.login_recep
+                              AND f.setor_cod   = ea.setor_cod
+        LEFT JOIN str ON RTRIM(str.str_cod) = ea.setor_cod
+        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) = ea.login_recep
+        ORDER BY ea.total_pacientes DESC
     """)
     return rows or []
 
@@ -8057,6 +8451,55 @@ def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str 
     for r in rows:
         if hasattr(r.get("data"), "strftime"):
             r["data"] = r["data"].strftime("%Y-%m-%d")
+    return rows or []
+
+
+@app.get("/api/recepcao/por-convenio")
+def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
+    """
+    Pacientes atendidos e tempo médio de recepção (chegada até abertura da 1ª OS
+    do dia), agrupados por convênio — agregado de todas as recepcionistas.
+    """
+    inicio, fim = periodo_datas(periodo)
+    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+
+    rows = query(f"""
+        WITH chegadas AS (
+            SELECT
+                fle.FLE_PAC_REG                    AS pac,
+                fle.FLE_DTHR_CHEGADA                AS dthr_cheg,
+                CAST(fle.FLE_DTHR_CHEGADA AS DATE)  AS data_cheg
+            FROM fle
+            WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND fle.FLE_PAC_REG > 0
+              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
+              {filtro_setor}
+        ),
+        os_do_dia AS (
+            SELECT
+                c.pac, c.dthr_cheg, c.data_cheg, o.osm_dthr, o.osm_cnv,
+                ROW_NUMBER() OVER (PARTITION BY c.pac, c.data_cheg ORDER BY o.osm_dthr ASC) AS rn
+            FROM chegadas c
+            JOIN osm o ON o.osm_pac = c.pac
+                      AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+                      AND o.osm_dthr >= c.dthr_cheg
+        ),
+        primeira AS (
+            SELECT pac, osm_cnv,
+                   DATEDIFF(minute, dthr_cheg, osm_dthr) AS espera_min
+            FROM os_do_dia WHERE rn = 1
+        )
+        SELECT
+            RTRIM(ISNULL(cnv.CNV_NOME, CAST(p.osm_cnv AS VARCHAR(50)))) AS convenio,
+            COUNT(DISTINCT p.pac)                                       AS total_pacientes,
+            AVG(CAST(CASE WHEN p.espera_min BETWEEN 0 AND 120 THEN p.espera_min ELSE NULL END AS FLOAT)) AS espera_media_min
+        FROM primeira p
+        LEFT JOIN cnv ON cnv.CNV_COD = p.osm_cnv
+        GROUP BY RTRIM(ISNULL(cnv.CNV_NOME, CAST(p.osm_cnv AS VARCHAR(50))))
+        ORDER BY total_pacientes DESC
+    """)
     return rows or []
 
 

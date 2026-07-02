@@ -45,10 +45,10 @@ export default function BriefingCard({ cor = "#8B1A1A", promptFn, cacheKey, disa
 
   return (
     <div style={{
-      background: `linear-gradient(135deg, ${cor}12 0%, #fff 60%)`,
-      border: `1px solid ${cor}28`,
+      background: `linear-gradient(135deg, ${cor}2E 0%, ${cor}08 60%)`,
+      border: `1.5px solid ${cor}50`,
       borderRadius: 16, padding: "18px 22px",
-      boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
+      boxShadow: `0 4px 14px ${cor}18, 0 1px 4px rgba(0,0,0,0.06)`,
       marginBottom: 4,
     }}>
       {/* Header */}
