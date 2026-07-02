@@ -4045,7 +4045,7 @@ function DashboardRecoleta({ periodo, setor }) {
 
 
 // ── Tabela de médicos lab com sort (componente separado para evitar hooks condicionais)
-function TabelaMedicosLab({ medicos }) {
+function TabelaMedicosLab({ medicos, labelColuna = "Médico", semDadosTexto = "Sem dados de médico requisitante" }) {
   const [sortCol, setSortCol] = useState("producao");
   const [sortDir, setSortDir] = useState("desc");
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
@@ -4079,7 +4079,7 @@ function TabelaMedicosLab({ medicos }) {
   };
 
   if (!sorted.length) return (
-    <div style={{ padding:"32px", textAlign:"center", color:C.faint, fontSize:13 }}>Sem dados de médico requisitante</div>
+    <div style={{ padding:"32px", textAlign:"center", color:C.faint, fontSize:13 }}>{semDadosTexto}</div>
   );
 
   return (
@@ -4088,7 +4088,7 @@ function TabelaMedicosLab({ medicos }) {
         <thead>
           <tr style={{ background:"#F2F2F2", borderBottom:`1px solid ${C.border}` }}>
             <th style={{ padding:"10px 14px", fontWeight:700, color:C.faint, textAlign:"left", fontSize:11, textTransform:"uppercase" }}>#</th>
-            <th style={{ padding:"10px 14px", fontWeight:700, color:C.faint, textAlign:"left", fontSize:11, textTransform:"uppercase" }}>Médico</th>
+            <th style={{ padding:"10px 14px", fontWeight:700, color:C.faint, textAlign:"left", fontSize:11, textTransform:"uppercase" }}>{labelColuna}</th>
             <TH col="total_os"      label="OSs"/>
             <TH col="total_exames"  label="Exames"/>
             <TH col="pacientes"     label="Pacientes"/>
@@ -4187,6 +4187,9 @@ function SecaoModuloLaboratorio({ periodo }) {
   const { data: tempoColetaData, loading: lColeta } = useFetch("/api/modulo/laboratorio/tempo-coleta", { periodo: periodoEfetivo, setor, recepcao });
   const tempoColeta = tempoColetaData?.por_recepcao || [];
   const min = v => v != null ? `${Math.round(v)} min` : "—";
+
+  const { data: producaoProfissionalData, loading: lProfissional } = useFetch("/api/modulo/laboratorio/producao-por-profissional", { periodo: periodoEfetivo, setor, recepcao });
+  const producaoProfissional = producaoProfissionalData || [];
 
   return (
     <div style={{ animation:"fadeIn 0.35s ease" }}>
@@ -4558,6 +4561,13 @@ Destaque exames em alta, alertas de capacidade e sugestões para aumentar a prod
       <div style={{ marginTop:16 }}>
         <Card title="Top Médicos — Laboratório" subtitle="Clique na coluna para ordenar · padrão: maior faturamento">
           {loading ? <Skeleton h={280}/> : <TabelaMedicosLab medicos={data?.top_medicos}/>}
+        </Card>
+      </div>
+
+      {/* Produção por Profissional */}
+      <div style={{ marginTop:16 }}>
+        <Card title="Produção por Profissional" subtitle="Quem lançou/registrou o exame na OS (recepção) · não há registro de quem fisicamente colhe a amostra nesta base">
+          {lProfissional ? <Skeleton h={280}/> : <TabelaMedicosLab medicos={producaoProfissional} labelColuna="Profissional" semDadosTexto="Sem dados de profissional no período"/>}
         </Card>
       </div>
     </div>

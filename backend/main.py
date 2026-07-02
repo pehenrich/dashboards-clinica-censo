@@ -3008,6 +3008,55 @@ def laboratorio_tempo_coleta(periodo: str = "30d", setor: str = "", recepcao: st
     }
 
 
+@app.get("/api/modulo/laboratorio/producao-por-profissional")
+def laboratorio_producao_por_profissional(periodo: str = "30d", setor: str = "", recepcao: str = ""):
+    """
+    Produção laboratorial por profissional. IMPORTANTE: SMM_USR_LOGIN_COLETA
+    (quem fisicamente colheu a amostra) está 100% vazio nesta base — não é
+    usado. Agrupa por SMM_USR_LOGIN_LANC (quem lançou/registrou o exame na
+    OS), que na prática corresponde à recepção que abriu o pedido.
+    """
+    inicio, fim = periodo_datas(periodo)
+    esp_sql = ",".join(f"'{c}'" for c in ALL_LAB_ESP)
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    if setor == "diagnostico":
+        filtro_setor = "AND osm.osm_atend IN ('ASS','EME','CRG','TAM')"
+    elif setor == "ocupacional":
+        filtro_setor = "AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')"
+    else:
+        filtro_setor = ""
+
+    recepcao_cod = "".join(ch for ch in recepcao if ch.isalnum())[:6]
+    if recepcao_cod:
+        filtro_setor += f" AND RTRIM(osm.osm_str) = '{recepcao_cod}'"
+
+    rows = query(f"""
+        SELECT
+            RTRIM(smm.SMM_USR_LOGIN_LANC)                             AS login,
+            RTRIM(ISNULL(u.USR_NOME, smm.SMM_USR_LOGIN_LANC))         AS medico,
+            COUNT(*)                                                   AS total_exames,
+            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num)         AS total_os,
+            COUNT(DISTINCT osm.osm_pac)                                AS pacientes,
+            SUM({vliq})                                                AS faturamento,
+            SUM({vliq})/NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_por_os
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) = RTRIM(smm.SMM_USR_LOGIN_LANC)
+        WHERE smm.SMM_ESP IN ({esp_sql})
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_USR_LOGIN_LANC IS NOT NULL
+          {filtro_setor}
+        GROUP BY RTRIM(smm.SMM_USR_LOGIN_LANC), RTRIM(ISNULL(u.USR_NOME, smm.SMM_USR_LOGIN_LANC))
+        ORDER BY faturamento DESC
+    """)
+    for r in rows:
+        r["faturamento"] = float(r["faturamento"] or 0)
+        r["ticket_por_os"] = float(r["ticket_por_os"] or 0)
+    return rows
+
+
 # ── AGENDAMENTOS (já existe, mas adicionando financeiro) ─────────────────────
 
 @app.get("/api/modulo/agendamentos/medico-detalhe")
