@@ -22,6 +22,27 @@ EVOLUTION_KEY      = os.getenv("EVOLUTION_KEY",       "")
 EVOLUTION_INST     = os.getenv("EVOLUTION_INST",      "censo")
 DEST_NUMBERS       = os.getenv("WHATSAPP_DEST",       "5594999999999").split(",")
 
+# Recepcoes exibidas na mensagem de fechamento, na ordem desejada
+RECEPCOES_WPP = [
+    ("RCN", "Consultorios"),
+    ("RDI", "Diagnostico"),
+    ("ROC", "Ocupacional"),
+    ("RCI", "Censo Imagem"),
+]
+
+
+def _classificar_servico(nome):
+    """Classifica um servico em Consultas / Imagem / SADT (exames em geral)."""
+    if not nome:
+        return "SADT"
+    n = nome.upper()
+    if "CONSULTA" in n:
+        return "Consultas"
+    if ("RAIO" in n or "ULTRASSOM" in n or "ULTRASSONOGRAFIA" in n or "RADIOGRAFIA" in n
+            or "TOMOGRAFIA" in n or "MAMOGRAFIA" in n or "DENSITOMETRIA" in n or "ECOCARDIOGRAMA" in n):
+        return "Imagem"
+    return "SADT"
+
 
 # ── Helpers de formatação ────────────────────────────────────────────────────
 
@@ -39,21 +60,41 @@ def num(v):
 
 # ── Helper de metas ──────────────────────────────────────────────────────────
 
-def _calcular_metas(producao_mes: float, meta_mensal_fixa: float = 1200000.0) -> dict:
+def _carregar_metas_producao():
+    """Lê metas_config.json (mesmo arquivo usado pelo dashboard/Painel TV) — chave 'producao'."""
+    import json as _json
+    try:
+        with open("metas_config.json", encoding="utf-8") as f:
+            cfg = _json.load(f).get("producao", {}) or {}
+    except Exception:
+        cfg = {}
+    return {
+        "meta_mensal": cfg.get("meta_mensal") or 1200000.0,
+        "meta_diaria": cfg.get("meta_diaria") or 48000.0,
+        "meta_sabado": cfg.get("meta_sabado") or cfg.get("meta_diaria") or 48000.0,
+    }
+
+
+def _calcular_metas(producao_mes: float, meta_mensal_fixa: float = None) -> dict:
     """
     Calcula META_MENSAL, meta_diaria, meta_dia_pct, meta_mes_pct e falta_meta
-    com base na produção acumulada do mês e na meta mensal fixa.
+    com base na produção acumulada do mês e nas metas configuradas no dashboard
+    (metas_config.json → "producao"): meta_diaria fixa nos dias de semana,
+    meta_sabado aos sábados — mesmo critério usado no módulo Produção Mensal.
 
-    meta_dia_pct → média diária real / meta diária  (100 = no alvo)
+    meta_dia_pct → média diária real / meta diária de dia de semana  (100 = no alvo)
     meta_mes_pct → acumulado real / meta acumulada até hoje  (100 = no alvo)
     falta_meta   → quanto ainda falta para bater a meta mensal (>= 0)
     """
     import datetime as _dt
-    from calendar import monthrange as _mr
 
-    hoje       = _dt.date.today()
-    ano, mes   = hoje.year, hoje.month
-    ultimo_dia = _mr(ano, mes)[1]
+    _cfg = _carregar_metas_producao()
+    META_MENSAL = meta_mensal_fixa if meta_mensal_fixa is not None else _cfg["meta_mensal"]
+    meta_diaria = _cfg["meta_diaria"]
+    meta_sabado = _cfg["meta_sabado"]
+
+    hoje     = _dt.date.today()
+    ano, mes = hoje.year, hoje.month
 
     # Feriados Parauapebas-PA (espelho exato do main.py)
     def _feriados(a: int):
@@ -74,17 +115,17 @@ def _calcular_metas(producao_mes: float, meta_mensal_fixa: float = 1200000.0) ->
         return f
 
     feriados = _feriados(ano)
-    is_util  = lambda d: (
-        _dt.date(ano, mes, d).weekday() < 6
-        and _dt.date(ano, mes, d) not in feriados
-    )
 
-    dias_uteis_mes      = sum(1 for d in range(1, ultimo_dia + 1)  if is_util(d))
-    dias_uteis_passados = sum(1 for d in range(1, hoje.day + 1)    if is_util(d))
+    def _meta_do_dia(d):
+        data = _dt.date(ano, mes, d)
+        if data in feriados or data.weekday() == 6:  # feriado ou domingo
+            return 0.0
+        if data.weekday() == 5:  # sabado
+            return meta_sabado
+        return meta_diaria
 
-    META_MENSAL    = meta_mensal_fixa
-    meta_diaria    = round(META_MENSAL / dias_uteis_mes, 2) if dias_uteis_mes > 0 else 0.0
-    meta_acum      = meta_diaria * max(dias_uteis_passados, 1)   # meta acumulada até hoje
+    dias_uteis_passados = sum(1 for d in range(1, hoje.day + 1) if _meta_do_dia(d) > 0)
+    meta_acum      = sum(_meta_do_dia(d) for d in range(1, hoje.day + 1))   # meta acumulada até hoje
     media_dia_real = producao_mes / max(dias_uteis_passados, 1)
 
     # >100 = acima da meta, <100 = abaixo
@@ -252,6 +293,25 @@ def buscar_dados_fechamento(query_func):
         "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje + "' AND smm.SMM_SFAT IN ('A','F','P')"
     )
 
+    # Produção por recepção (Consultórios/Diagnóstico/Ocupacional/Censo Imagem),
+    # dividida em Consultas / Imagem / SADT (exames em geral)
+    prod_recepcao_raw = query_func(
+        "SELECT RTRIM(osm.osm_str) AS recepcao_cod, RTRIM(sk.SMK_NOME) AS servico_nome, "
+        "SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao "
+        "FROM smm JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM "
+        "JOIN smk sk ON sk.SMK_COD = smm.SMM_COD "
+        "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje + "' AND smm.SMM_SFAT IN ('A','F','P') "
+        "AND RTRIM(osm.osm_str) IN ('RCN','RDI','ROC','RCI') "
+        "GROUP BY RTRIM(osm.osm_str), RTRIM(sk.SMK_NOME)"
+    )
+    producao_por_recepcao = {cod: {"Consultas": 0.0, "Imagem": 0.0, "SADT": 0.0} for cod, _ in RECEPCOES_WPP}
+    for r in prod_recepcao_raw:
+        cod = r.get("recepcao_cod")
+        if cod not in producao_por_recepcao:
+            continue
+        tipo = _classificar_servico(r.get("servico_nome"))
+        producao_por_recepcao[cod][tipo] += float(r.get("producao") or 0)
+
     # Convênios assistencial (consultas/exames)
     convenios = query_func(
         "SELECT TOP 5 RTRIM(cnv.cnv_nome) AS nome, "
@@ -367,6 +427,7 @@ def buscar_dados_fechamento(query_func):
     return {
         "hoje": hoje,
         "fat": fat[0] if fat else {},
+        "producao_por_recepcao": producao_por_recepcao,
         "convenios": convenios,
         "empresas": empresas,
         "medicos": medicos,
@@ -453,10 +514,10 @@ def buscar_dados_resumo(query_func):
 # ── Montadores de mensagem ───────────────────────────────────────────────────
 
 def montar_manha(dados):
+    """Mensagem enxuta: só os números que importam pra começar o dia."""
     hoje_fmt   = datetime.now().strftime("%d/%m/%Y")
     agd        = dados["agd"]
     medicos    = dados["medicos"]
-    vagas_med  = dados["vagas_med"]
     ticket     = dados.get("ticket_medio") or 0
     marcacoes  = agd.get("marcacoes") or 0
     cancelados = agd.get("cancelados") or 0
@@ -468,7 +529,6 @@ def montar_manha(dados):
     msg += "\U0001f4c5 " + hoje_fmt + n
     msg += "\u2501" * 28 + n + n
 
-    msg += "\U0001f4cb *RESUMO DA AGENDA*" + n
     msg += "  \U0001f468\u200d\u2695\ufe0f Profissionais:  *" + str(agd.get("medicos") or len(medicos)) + "*" + n
     msg += "  \U0001f9d1\u200d\U0001f91d\u200d\U0001f9d1 Pac. marcados:  *" + num(marcacoes) + "*" + n
     msg += "  \U0001f7e2 Vagas abertas:  *" + num(vagas_disp) + "*" + n
@@ -476,82 +536,7 @@ def montar_manha(dados):
         msg += "  \U0001f534 Cancelamentos:  *" + num(cancelados) + "*" + n
 
     if previsao > 0:
-        msg += n + "\U0001f4b0 *PREVISAO DE PRODUCAO*" + n
-        msg += "  Se todos comparecerem:" + n
-        msg += "  \u27a4 *" + brl(previsao) + "*" + n
-        msg += "  _(ticket medio 30d: " + brl(ticket) + ")_" + n
-
-    medicos_manha = dados.get("medicos_manha", [])
-    medicos_tarde = dados.get("medicos_tarde", [])
-    mult_manha    = dados.get("mult_manha", [])
-    mult_tarde    = dados.get("mult_tarde", [])
-
-    # ── Equipe Médica ────────────────────────────────────────────────────────
-    if medicos_manha or medicos_tarde:
-        msg += n + "\u2501" * 28 + n
-        msg += "\U0001fa7a *EQUIPE MEDICA*" + n
-        if medicos_manha:
-            msg += n + "  \U0001f324\ufe0f _Manha_" + n
-            for m in medicos_manha:
-                ini  = m.get("inicio", "")
-                fim  = m.get("fim", "")
-                marc = m.get("marcacoes") or 0
-                msg += "  \u2022 " + str(m["medico"]) + n
-                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
-        if medicos_tarde:
-            msg += n + "  \U0001f306 _Tarde_" + n
-            for m in medicos_tarde:
-                ini  = m.get("inicio", "")
-                fim  = m.get("fim", "")
-                marc = m.get("marcacoes") or 0
-                msg += "  \u2022 " + str(m["medico"]) + n
-                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
-    elif medicos:
-        medicos_sem_mult = [m for m in medicos if m not in mult_manha and m not in mult_tarde]
-        if medicos_sem_mult:
-            msg += n + "\u2501" * 28 + n
-            msg += "\U0001fa7a *EQUIPE MEDICA*" + n
-            for m in medicos_sem_mult:
-                ini  = m.get("inicio", "")
-                fim  = m.get("fim", "")
-                marc = m.get("marcacoes") or 0
-                msg += "  \u2022 " + str(m["medico"]) + n
-                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
-
-    # ── Equipe Multiprofissional ──────────────────────────────────────────────
-    if mult_manha or mult_tarde:
-        msg += n + "\u2501" * 28 + n
-        msg += "\U0001f3e5 *EQUIPE MULTIPROFISSIONAL*" + n
-        if mult_manha:
-            msg += n + "  \U0001f324\ufe0f _Manha_" + n
-            for m in mult_manha:
-                ini  = m.get("inicio", "")
-                fim  = m.get("fim", "")
-                marc = m.get("marcacoes") or 0
-                esp  = m.get("especialidade", "").strip()
-                msg += "  \u2022 " + str(m["medico"])
-                if esp:
-                    msg += "  _(" + esp + ")_"
-                msg += n
-                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
-        if mult_tarde:
-            msg += n + "  \U0001f306 _Tarde_" + n
-            for m in mult_tarde:
-                ini  = m.get("inicio", "")
-                fim  = m.get("fim", "")
-                marc = m.get("marcacoes") or 0
-                esp  = m.get("especialidade", "").strip()
-                msg += "  \u2022 " + str(m["medico"])
-                if esp:
-                    msg += "  _(" + esp + ")_"
-                msg += n
-                msg += "    " + num(marc) + " pac.  |  " + ini + " \u2013 " + fim + n
-
-    if vagas_med:
-        msg += n + "\u2501" * 28 + n
-        msg += "\U0001f513 *VAGAS DISPONIVEIS POR PROFISSIONAL*" + n
-        for v in vagas_med:
-            msg += "  \u2022 " + str(v["medico"]) + ":  *" + num(v["vagas"]) + " vagas*" + n
+        msg += n + "💰 Previsao (se todos comparecerem):  *" + brl(previsao) + "*" + n
 
     msg += n + "\u2501" * 28 + n
     msg += "_Dashboard Clinica  \u2022  " + datetime.now().strftime("%H:%M") + "_"
@@ -559,20 +544,15 @@ def montar_manha(dados):
 
 
 def montar_fechamento(dados):
+    """Mensagem enxuta: totais e metas, sem listar cada médico/convênio/empresa."""
     hoje_fmt     = datetime.now().strftime("%d/%m/%Y")
     fat          = dados["fat"]
-    cnvs         = dados["convenios"]
-    emps         = dados.get("empresas", [])
-    meds         = dados["medicos"]
     agd          = dados["agd"]
-    abs_m        = dados["abs_med"]
     prod_mes      = dados.get("producao_mes")         or 0
     projecao      = dados.get("projecao_mes")         or 0
     media_dia     = dados.get("media_diaria")         or 0
     guias_mes     = dados.get("guias_mes")            or 0
-    dias_rest     = dados.get("dias_uteis_restantes") or 0
     prod_ano_ant  = dados.get("prod_ano_ant")         or 0
-    guias_ano_ant = dados.get("guias_ano_ant")        or 0
     hoje_ano_ant  = dados.get("hoje_ano_ant", "")
     meta_mensal   = dados.get("meta_mensal")          or 1200000.0
     meta_dia      = dados.get("meta_diaria")          or 0
@@ -582,11 +562,7 @@ def montar_fechamento(dados):
     prod          = fat.get("producao") or 0
     total_os      = fat.get("total_os") or 0
     pacientes     = fat.get("pacientes") or 0
-    assistencial  = fat.get("assistencial") or 0
-    ocupacional   = fat.get("ocupacional") or 0
-    prod_ass      = fat.get("prod_assistencial") or 0
-    prod_ocup     = fat.get("prod_ocupacional") or 0
-    particular    = fat.get("particular") or 0
+    producao_por_recepcao = dados.get("producao_por_recepcao") or {}
     marcacoes     = agd.get("marcacoes") or 0
     compareceram  = agd.get("compareceram") or 0
     faltantes     = agd.get("faltantes") or 0
@@ -616,56 +592,18 @@ def montar_fechamento(dados):
     msg += n
     msg += "  \U0001f4c4 Guias: *" + num(total_os) + "*   |   \U0001f465 Pacientes: *" + num(pacientes) + "*" + n
 
-    # ── Por módulo ────────────────────────────────────────────────────────────
-    msg += n + "\u2501" * 28 + n
-    msg += "\U0001f539 *POR MODULO*" + n
-    msg += "  \U0001fa7a Assistencial:  *" + brl(prod_ass) + "*  (" + num(assistencial) + " guias)" + n
-    msg += "  \U0001f3ed Ocupacional:   *" + brl(prod_ocup) + "*  (" + num(ocupacional) + " guias)" + n
-    if particular > 0:
-        msg += "  \U0001f4b3 Particular:    *" + brl(particular) + "*" + n
-
-    # ── Convênios ─────────────────────────────────────────────────────────────
-    if cnvs:
-        msg += n + "\u2501" * 28 + n
-        msg += "\U0001f91d *CONVENIOS \u2014 ASSISTENCIAL*" + n
-        for c in cnvs:
-            nome = str(c["nome"])[:25].strip()
-            msg += "  \u2022 " + nome + n
-            msg += "    *" + brl(c["producao"]) + "*  |  " + num(c["guias"]) + " guias  |  " + num(c["pacientes"]) + " pac." + n
-
-    # ── Empresas ──────────────────────────────────────────────────────────────
-    if emps:
-        msg += n + "\u2501" * 28 + n
-        msg += "\U0001f3e2 *EMPRESAS \u2014 OCUPACIONAL*" + n
-        for e in emps:
-            nome = str(e["nome"])[:25].strip()
-            msg += "  \u2022 " + nome + n
-            msg += "    *" + brl(e["producao"]) + "*  |  " + num(e["guias"]) + " guias  |  " + num(e["pacientes"]) + " pac." + n
-
-    # ── Equipe ────────────────────────────────────────────────────────────────
-    if meds:
-        _MULT_CODES_F = {'PSC','NUT','FON','FIS','ENF','TER','FAR','ASS','SOC','PSQ','NEU','FIO'}
-        def _is_mult_f(m):
-            return m.get('esp_cod', '').strip().upper() in _MULT_CODES_F
-        meds_med  = [m for m in meds if not _is_mult_f(m)]
-        meds_mult = [m for m in meds if _is_mult_f(m)]
-
-        if meds_med:
-            msg += n + "\u2501" * 28 + n
-            msg += "\U0001fa7a *EQUIPE MEDICA*" + n
-            for m in meds_med:
-                msg += "  \u2022 " + str(m["medico"]) + n
-                msg += "    *" + brl(m["producao"]) + "*  |  " + num(m["guias"]) + " guias  |  " + num(m["pacientes"]) + " pac." + n
-
-        if meds_mult:
-            msg += n + "\U0001f3e5 *EQUIPE MULTIPROFISSIONAL*" + n
-            for m in meds_mult:
-                esp = m.get("especialidade", "").strip()
-                msg += "  \u2022 " + str(m["medico"])
-                if esp:
-                    msg += "  _(" + esp + ")_"
-                msg += n
-                msg += "    *" + brl(m["producao"]) + "*  |  " + num(m["guias"]) + " guias  |  " + num(m["pacientes"]) + " pac." + n
+    # -- Por recepcao ------------------------------------------------------
+    msg += n + "━" * 28 + n
+    msg += "🔹 *PRODUCAO POR RECEPCAO*" + n
+    for cod, nome in RECEPCOES_WPP:
+        tipos = producao_por_recepcao.get(cod, {})
+        total_recep = sum(tipos.values())
+        if total_recep <= 0:
+            continue
+        msg += n + "  " + nome + ":  *" + brl(total_recep) + "*" + n
+        partes = [tipo + " " + brl(tipos.get(tipo, 0)) for tipo in ("Consultas", "Imagem", "SADT") if tipos.get(tipo, 0) > 0]
+        if partes:
+            msg += "    " + "  |  ".join(partes) + n
 
     # ── Agenda ────────────────────────────────────────────────────────────────
     msg += n + "\u2501" * 28 + n
@@ -674,14 +612,6 @@ def montar_fechamento(dados):
     msg += "  \u2705 Compareceram:  *" + num(compareceram) + "*  (" + "{:.1f}".format(taxa_comp) + "%)" + n
     msg += "  " + abs_tag + " Absenteismo:   *" + "{:.1f}".format(taxa_abs) + "%*  (" + num(faltantes) + " faltantes)" + n
     msg += "  \u274c Cancelamentos: *" + num(cancelados) + "*" + n
-
-    if abs_m:
-        msg += n + "  _Maiores absenteismos:_" + n
-        for a in abs_m:
-            marc = a.get("marcacoes") or 1
-            falt = a.get("faltantes") or 0
-            pct  = falt / marc * 100
-            msg += "  \u2022 " + str(a["medico"]) + ":  " + num(falt) + "/" + num(marc) + "  (" + "{:.0f}".format(pct) + "%)" + n
 
     # ── Metas ─────────────────────────────────────────────────────────────────
     sinal_dia = "+" if meta_dia_pct >= 100 else ""
@@ -703,9 +633,9 @@ def montar_fechamento(dados):
 
 
 def montar_previa_amanha(dados):
+    """Mensagem enxuta: só o essencial pra planejar amanhã."""
     agd        = dados["agd"]
     medicos    = dados["medicos"]
-    vagas_med  = dados["vagas_med"]
     ticket     = dados.get("ticket_medio") or 0
     marcacoes  = agd.get("marcacoes") or 0
     vagas_disp = agd.get("vagas_disp") or 0
@@ -727,20 +657,6 @@ def montar_previa_amanha(dados):
         msg += n + "*Previsao de Producao*" + n
         msg += "  Potencial: *" + brl(previsao) + "*" + n
         msg += "  _(ticket medio 30d: " + brl(ticket) + ")_" + n
-
-    if medicos:
-        msg += n + "*Medicos Escalados*" + n
-        for m in medicos:
-            ini  = m.get("inicio", "")
-            fim  = m.get("fim", "")
-            marc = m.get("marcacoes") or 0
-            msg += "  - " + str(m["medico"]) + ": " + num(marc) + " pac. (" + ini + "--" + fim + ")" + n
-
-    if vagas_med:
-        total_vagas = sum(v.get("vagas", 0) for v in vagas_med)
-        msg += n + "*Vagas em Aberto: " + num(total_vagas) + "*" + n
-        for v in vagas_med[:5]:
-            msg += "  - " + str(v["medico"]) + ": " + num(v["vagas"]) + " vagas" + n
 
     msg += n + "_Dashboard Clinica - " + datetime.now().strftime("%H:%M") + "_"
     return msg
