@@ -96,6 +96,7 @@ export default function Recepcao({ periodo = "30d" }) {
   const [loadingConvAgg, setLoadingConvAgg] = useState(true);
   const [metas, setMetas] = useState(null);
   const [loadingMetas, setLoadingMetas] = useState(true);
+  const [filtroTempoRecep, setFiltroTempoRecep] = useState("");
 
   useEffect(() => {
     setLoadingMetas(true);
@@ -287,17 +288,29 @@ Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.
               })}
             </div>
 
-            <div style={{ fontSize: 11, fontWeight: 800, color: "#D97706", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
-              ⏱ Meta de Tempo Médio de Atendimento por Recepcionista
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#D97706", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                ⏱ Meta de Tempo Médio de Atendimento por Recepcionista
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {RECEPCOES.map(r => (
+                  <button key={r.cod} onClick={() => setFiltroTempoRecep(r.cod)} style={{
+                    padding: "4px 12px", borderRadius: 20, fontSize: 11, fontWeight: 700,
+                    cursor: "pointer", border: "none", transition: "all 0.12s",
+                    background: filtroTempoRecep === r.cod ? "#D97706" : "#F3F4F6",
+                    color: filtroTempoRecep === r.cod ? "#fff" : "#6B7280",
+                  }}>{r.nome}</button>
+                ))}
+              </div>
             </div>
             <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 10 }}>
               Meta: até <b>{min(metas?.meta_tempo_atendimento_min)}</b> (média histórica geral) · chegada até abertura da OS
             </div>
-            {recepPorTempo.length === 0 ? (
+            {recepPorTempo.filter(r => !filtroTempoRecep || r.setor_cod === filtroTempoRecep).length === 0 ? (
               <div style={{ textAlign: "center", padding: 24, color: "#9CA3AF", fontSize: 12 }}>Sem dados de tempo no período</div>
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 8 }}>
-                {recepPorTempo.map(r => {
+                {recepPorTempo.filter(r => !filtroTempoRecep || r.setor_cod === filtroTempoRecep).map(r => {
                   const metaMin = metas?.meta_tempo_atendimento_min;
                   const dentro = metaMin != null && r.espera_media_min <= metaMin;
                   const cor = metaMin == null ? "#9CA3AF" : dentro ? "#059669" : "#DC2626";
