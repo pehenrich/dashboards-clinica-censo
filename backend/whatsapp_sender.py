@@ -525,8 +525,14 @@ def buscar_dados_fechamento(query_func):
 
 
 def buscar_dados_amanha(query_func):
-    amanha = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-    dia_semana = (datetime.now() + timedelta(days=1)).strftime("%A")
+    # A clinica nao funciona aos domingos: se "amanha" cair num domingo
+    # (ou seja, hoje e sabado), a previa pula direto pra segunda-feira.
+    _amanha_dt = datetime.now() + timedelta(days=1)
+    _pulou_domingo = _amanha_dt.weekday() == 6
+    if _pulou_domingo:
+        _amanha_dt += timedelta(days=1)
+    amanha = _amanha_dt.strftime("%Y-%m-%d")
+    dia_semana = _amanha_dt.strftime("%A")
     dias_pt = {
         "Monday": "Segunda-feira", "Tuesday": "Terca-feira",
         "Wednesday": "Quarta-feira", "Thursday": "Quinta-feira",
@@ -563,9 +569,9 @@ def buscar_dados_amanha(query_func):
     )
 
     # Se amanhã é sábado, usa ticket médio só de sábados anteriores.
-    if (datetime.now() + timedelta(days=1)).weekday() == 5:
+    if _amanha_dt.weekday() == 5:
         _sabados_am = []
-        _d_am = (datetime.now() + timedelta(days=1)).date() - timedelta(days=7)
+        _d_am = _amanha_dt.date() - timedelta(days=7)
         while len(_sabados_am) < 8:
             if _d_am.weekday() == 5:
                 _sabados_am.append(_d_am.strftime("%Y-%m-%d"))
@@ -591,8 +597,9 @@ def buscar_dados_amanha(query_func):
 
     return {
         "amanha": amanha,
-        "amanha_fmt": (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y"),
+        "amanha_fmt": _amanha_dt.strftime("%d/%m/%Y"),
         "dia_semana": dias_pt.get(dia_semana, dia_semana),
+        "pulou_domingo": _pulou_domingo,
         "agd": agd[0] if agd else {},
         "medicos": medicos,
         "vagas_med": vagas_med,
@@ -796,9 +803,13 @@ def montar_previa_amanha(dados):
     previsao   = marcacoes * ticket
     dia_sem    = dados["dia_semana"]
     amanha_fmt = dados["amanha_fmt"]
+    pulou_domingo = dados.get("pulou_domingo", False)
     n          = "\n"
 
-    msg  = "*Previa de Amanha - " + dia_sem + " " + amanha_fmt + "*" + n + n
+    titulo = ("Previa - " if pulou_domingo else "Previa de Amanha - ") + dia_sem + " " + amanha_fmt
+    msg  = "*" + titulo + "*" + n + n
+    if pulou_domingo:
+        msg += "_(domingo sem atendimento — proxima previa e de segunda)_" + n + n
     msg += "*Agenda*" + n
     msg += "  Medicos com agenda: *" + str(agd.get("medicos") or len(medicos)) + "*" + n
     msg += "  Pacientes marcados: *" + num(marcacoes) + "*" + n
