@@ -31,6 +31,15 @@ RECEPCOES_WPP = [
 ]
 
 
+def _is_mult(m):
+    """Multiprofissional = qualquer conselho que nao seja CRM (medicina).
+    psv_esp_cod fica sempre vazio nesta base, entao nao da pra usar ele —
+    PSV_CONSELHO (CRM/CRP/CRN/CRF/CRBM etc.) e o campo que realmente
+    distingue medico de outros profissionais (nutricionista, psicologo...)."""
+    conselho = m.get('conselho', '').strip().upper()
+    return bool(conselho) and conselho != 'CRM'
+
+
 def _classificar_servico(nome):
     """Classifica um servico em Consultas / Imagem / SADT (exames em geral)."""
     if not nome:
@@ -156,18 +165,23 @@ def buscar_dados_manha(query_func):
         "FROM agm WHERE CAST(agm.agm_hini AS DATE) = '" + hoje + "'"
     )
 
-    # Médicos divididos por turno (manhã = antes das 12h, tarde = 12h+)
+    # Médicos divididos por turno (manhã = antes das 12h, tarde = 12h+).
+    # Pacientes e horário de cada turno contam só os agendamentos daquele
+    # turno — quem atende manhã e tarde aparece nas duas listas, cada uma
+    # com a contagem/horário específicos daquele período.
     medicos_raw = query_func(
         "SELECT TOP 20 RTRIM(psv.psv_apel) AS medico, "
-        "RTRIM(ISNULL(esp.esp_nome, '')) AS especialidade, "
-        "RTRIM(ISNULL(psv.psv_esp_cod, '')) AS esp_cod, "
-        "SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B') THEN 1 ELSE 0 END) AS marcacoes, "
-        "MIN(agm.agm_hini) AS inicio, MAX(agm.agm_hini) AS fim "
+        "RTRIM(ISNULL(psv.PSV_CONSELHO, '')) AS conselho, "
+        "SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B') AND CAST(agm.agm_hini AS TIME) < '12:00' THEN 1 ELSE 0 END) AS marcacoes_manha, "
+        "SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B') AND CAST(agm.agm_hini AS TIME) >= '12:00' THEN 1 ELSE 0 END) AS marcacoes_tarde, "
+        "MIN(CASE WHEN CAST(agm.agm_hini AS TIME) < '12:00' THEN agm.agm_hini END) AS inicio_manha, "
+        "MAX(CASE WHEN CAST(agm.agm_hini AS TIME) < '12:00' THEN agm.agm_hini END) AS fim_manha, "
+        "MAX(CASE WHEN CAST(agm.agm_hini AS TIME) >= '12:00' THEN agm.agm_hini END) AS fim_tarde, "
+        "MIN(agm.agm_hini) AS inicio_geral "
         "FROM agm "
         "JOIN psv ON psv.psv_cod = agm.agm_med "
-        "LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod "
         "WHERE CAST(agm.agm_hini AS DATE) = '" + hoje + "' AND agm.agm_pac > 0 "
-        "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(psv.psv_esp_cod,'')) "
+        "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(psv.PSV_CONSELHO,'')) "
         "ORDER BY MIN(agm.agm_hini)"
     )
     for r in medicos_raw:
@@ -175,16 +189,10 @@ def buscar_dados_manha(query_func):
             if hasattr(v, "strftime"):
                 r[k] = v.strftime("%H:%M")
 
-    # Códigos de especialidade multiprofissional (Pixeon)
-    _MULT_CODES = {'PSC','NUT','FON','FIS','ENF','TER','FAR','ASS','SOC','PSQ','NEU','FIO'}
-
-    def _is_mult(m):
-        return m.get('esp_cod', '').strip().upper() in _MULT_CODES
-
-    medicos_manha = [m for m in medicos_raw if m.get('inicio','') < '12:00' and not _is_mult(m)]
-    medicos_tarde = [m for m in medicos_raw if m.get('inicio','') >= '12:00' and not _is_mult(m)]
-    mult_manha    = [m for m in medicos_raw if m.get('inicio','') < '12:00' and _is_mult(m)]
-    mult_tarde    = [m for m in medicos_raw if m.get('inicio','') >= '12:00' and _is_mult(m)]
+    medicos_manha = [m for m in medicos_raw if (m.get('marcacoes_manha') or 0) > 0 and not _is_mult(m)]
+    medicos_tarde = [m for m in medicos_raw if (m.get('marcacoes_tarde') or 0) > 0 and not _is_mult(m)]
+    mult_manha    = [m for m in medicos_raw if (m.get('marcacoes_manha') or 0) > 0 and _is_mult(m)]
+    mult_tarde    = [m for m in medicos_raw if (m.get('marcacoes_tarde') or 0) > 0 and _is_mult(m)]
     medicos = medicos_raw  # compatibilidade
 
     vagas_med = query_func(
@@ -194,14 +202,34 @@ def buscar_dados_manha(query_func):
         "GROUP BY RTRIM(psv.psv_apel) ORDER BY vagas DESC"
     )
 
-    ticket = query_func(
-        "SELECT SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) "
-        "- ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) "
-        "/ NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio "
-        "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
-        "WHERE osm.osm_dthr BETWEEN DATEADD(day,-30,'" + hoje + "') AND DATEADD(day,-1,'" + hoje + "') "
-        "AND smm.SMM_SFAT IN ('A','F','P')"
-    )
+    # Se hoje é sábado, o ticket médio usa só sábados anteriores (produção de
+    # sábado tem perfil bem diferente de dia de semana) — senão, os últimos
+    # 30 dias corridos como sempre.
+    if datetime.now().weekday() == 5:
+        _sabados = []
+        _d = datetime.now().date() - timedelta(days=7)
+        while len(_sabados) < 8:
+            if _d.weekday() == 5:
+                _sabados.append(_d.strftime("%Y-%m-%d"))
+            _d -= timedelta(days=1)
+        _datas_sql = ",".join("'" + s + "'" for s in _sabados)
+        ticket = query_func(
+            "SELECT SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) "
+            "- ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) "
+            "/ NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio "
+            "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+            "WHERE CAST(osm.osm_dthr AS DATE) IN (" + _datas_sql + ") "
+            "AND smm.SMM_SFAT IN ('A','F','P')"
+        )
+    else:
+        ticket = query_func(
+            "SELECT SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) "
+            "- ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) "
+            "/ NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio "
+            "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+            "WHERE osm.osm_dthr BETWEEN DATEADD(day,-30,'" + hoje + "') AND DATEADD(day,-1,'" + hoje + "') "
+            "AND smm.SMM_SFAT IN ('A','F','P')"
+        )
 
     # Produção acumulada no mês
     mes_ini = datetime.now().replace(day=1).strftime("%Y-%m-%d")
@@ -216,31 +244,27 @@ def buscar_dados_manha(query_func):
     producao_mes  = (prod_mes[0].get("producao_mes") or 0) if prod_mes else 0
     guias_mes     = (prod_mes[0].get("guias_mes")    or 0) if prod_mes else 0
 
-    # Projeção: média diária x dias úteis restantes no mês
+    # Projeção ponderada: sábado pesa proporcionalmente menos que um dia de
+    # semana (meta_sabado / meta_diaria) — mesmo critério do fechamento.
     from calendar import monthrange
+    _cfg_proj_m = _carregar_metas_producao()
+    _peso_sab_m = (_cfg_proj_m["meta_sabado"] / _cfg_proj_m["meta_diaria"]) if _cfg_proj_m["meta_diaria"] else 1.0
     hoje_dt   = datetime.now()
     dias_mes  = monthrange(hoje_dt.year, hoje_dt.month)[1]
     dia_atual = hoje_dt.day
-    dias_uteis_passados = sum(
-        1 for d in range(1, dia_atual + 1)
-        if datetime(hoje_dt.year, hoje_dt.month, d).weekday() < 6
-    )
-    dias_uteis_restantes = sum(
-        1 for d in range(dia_atual + 1, dias_mes + 1)
-        if datetime(hoje_dt.year, hoje_dt.month, d).weekday() < 6
-    )
-    media_diaria  = producao_mes / max(dias_uteis_passados, 1)
-    projecao_mes  = producao_mes + (media_diaria * dias_uteis_restantes)
 
-    # Produção mesmo dia ano anterior
-    hoje_ano_ant = (datetime.now().replace(year=datetime.now().year-1)).strftime("%Y-%m-%d")
-    prod_ano_ant = query_func(
-        "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao, "
-        "COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS guias, "
-        "COUNT(DISTINCT osm.osm_pac) AS pacientes "
-        "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
-        "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje_ano_ant + "' AND smm.SMM_SFAT IN ('A','F','P')"
-    )
+    def _peso_dia_manha(d):
+        wd = datetime(hoje_dt.year, hoje_dt.month, d).weekday()
+        if wd == 6:      # domingo
+            return 0.0
+        if wd == 5:      # sabado
+            return _peso_sab_m
+        return 1.0
+
+    dias_uteis_passados  = sum(_peso_dia_manha(d) for d in range(1, dia_atual + 1))
+    dias_uteis_restantes = sum(_peso_dia_manha(d) for d in range(dia_atual + 1, dias_mes + 1))
+    media_diaria  = producao_mes / max(dias_uteis_passados, 1e-6)
+    projecao_mes  = producao_mes + (media_diaria * dias_uteis_restantes)
 
     # ── Calcula metas (corrige Pylance: variáveis declaradas aqui) ───────────
     _metas       = _calcular_metas(float(producao_mes))
@@ -265,9 +289,6 @@ def buscar_dados_manha(query_func):
         "media_diaria":         media_diaria,
         "projecao_mes":         projecao_mes,
         "dias_uteis_restantes": dias_uteis_restantes,
-        "prod_ano_ant":         (prod_ano_ant[0].get("producao") or 0) if prod_ano_ant else 0,
-        "guias_ano_ant":        (prod_ano_ant[0].get("guias")    or 0) if prod_ano_ant else 0,
-        "hoje_ano_ant":         hoje_ano_ant,
         "meta_mensal":          META_MENSAL,
         "meta_diaria":          meta_diaria,
         "meta_dia_pct":         meta_dia_pct,
@@ -338,18 +359,23 @@ def buscar_dados_fechamento(query_func):
         "GROUP BY RTRIM(cnv.cnv_nome) ORDER BY producao DESC"
     )
 
+    # Produção por médico que REALIZOU o atendimento (executor do servico,
+    # nao quem apenas solicitou): COALESCE(SMM_MED, osm_mreq) e o mesmo
+    # criterio "executado" usado em /api/financeiro/producao-mensal/profissionais.
     medicos = query_func(
-        "SELECT TOP 10 RTRIM(psv.psv_apel) AS medico, "
+        "SELECT TOP 20 RTRIM(psv.psv_apel) AS medico, "
         "RTRIM(ISNULL(esp.esp_nome, '')) AS especialidade, "
         "RTRIM(ISNULL(psv.psv_esp_cod, '')) AS esp_cod, "
+        "RTRIM(ISNULL(psv.PSV_CONSELHO, '')) AS conselho, "
         "COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS guias, "
         "COUNT(DISTINCT osm.osm_pac) AS pacientes, "
         "SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao "
         "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
-        "JOIN psv ON psv.psv_cod=osm.osm_mreq "
+        "JOIN psv ON psv.psv_cod=COALESCE(smm.SMM_MED, osm.osm_mreq) "
         "LEFT JOIN esp ON esp.esp_cod=psv.psv_esp_cod "
         "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje + "' AND smm.SMM_SFAT IN ('A','F','P') "
-        "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(psv.psv_esp_cod,'')) "
+        "AND RTRIM(osm.osm_str) = 'RCN' "
+        "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(psv.psv_esp_cod,'')), RTRIM(ISNULL(psv.PSV_CONSELHO,'')) "
         "ORDER BY producao DESC"
     )
 
@@ -369,9 +395,14 @@ def buscar_dados_fechamento(query_func):
         "WHERE CAST(agm.agm_hini AS DATE)='" + hoje + "'"
     )
 
+    # Agenda por profissional: todos que tinham agendamento no dia, com
+    # marcacoes/atendimentos/absenteismo (mesmo criterio de "compareceram"
+    # usado no resumo geral da agenda do dia).
     abs_med = query_func(
-        "SELECT TOP 5 RTRIM(psv.psv_apel) AS medico, "
+        "SELECT RTRIM(psv.psv_apel) AS medico, RTRIM(ISNULL(psv.PSV_CONSELHO,'')) AS conselho, "
         "SUM(CASE WHEN agm.agm_pac>0 AND agm.agm_stat NOT IN ('C','B') THEN 1 ELSE 0 END) AS marcacoes, "
+        "SUM(CASE WHEN agm.agm_pac>0 AND agm.agm_stat NOT IN ('C','B') "
+        "AND (agm.agm_stat='E' OR agm.AGM_OSM_SERIE IS NOT NULL OR om.osm_pac IS NOT NULL) THEN 1 ELSE 0 END) AS compareceram, "
         "SUM(CASE WHEN agm.agm_pac>0 AND agm.agm_stat NOT IN ('C','B','E') "
         "AND agm.AGM_OSM_SERIE IS NULL AND om.osm_pac IS NULL THEN 1 ELSE 0 END) AS faltantes "
         "FROM agm JOIN psv ON psv.psv_cod=agm.agm_med "
@@ -380,10 +411,9 @@ def buscar_dados_fechamento(query_func):
         "ON om.osm_pac=agm.agm_pac AND om.osm_data=CAST(agm.agm_hini AS DATE) "
         "AND DATEDIFF(minute,agm.agm_hini,om.osm_dthr) BETWEEN -30 AND 180 "
         "WHERE CAST(agm.agm_hini AS DATE)='" + hoje + "' AND agm.agm_pac>0 "
-        "GROUP BY RTRIM(psv.psv_apel) "
-        "HAVING SUM(CASE WHEN agm.agm_pac>0 AND agm.agm_stat NOT IN ('C','B','E') "
-        "AND agm.AGM_OSM_SERIE IS NULL AND om.osm_pac IS NULL THEN 1 ELSE 0 END)>0 "
-        "ORDER BY faltantes DESC"
+        "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(psv.PSV_CONSELHO,'')) "
+        "HAVING SUM(CASE WHEN agm.agm_pac>0 AND agm.agm_stat NOT IN ('C','B') THEN 1 ELSE 0 END)>0 "
+        "ORDER BY marcacoes DESC"
     )
 
     # Produção acumulada no mês
@@ -398,23 +428,68 @@ def buscar_dados_fechamento(query_func):
     producao_mes = (prod_mes[0].get("producao_mes") or 0) if prod_mes else 0
     guias_mes    = (prod_mes[0].get("guias_mes")    or 0) if prod_mes else 0
 
+    # Projeção ponderada: sábado pesa proporcionalmente menos que um dia de
+    # semana (meta_sabado / meta_diaria), mesmo critério do módulo Produção
+    # Mensal — evita distorcer a média/projeção em meses com mais sábados.
     from calendar import monthrange
+    _cfg_proj = _carregar_metas_producao()
+    _peso_sab = (_cfg_proj["meta_sabado"] / _cfg_proj["meta_diaria"]) if _cfg_proj["meta_diaria"] else 1.0
     hoje_dt  = datetime.now()
     dias_mes = monthrange(hoje_dt.year, hoje_dt.month)[1]
     dia_atual = hoje_dt.day
-    dias_uteis_passados  = sum(1 for d in range(1, dia_atual+1)  if datetime(hoje_dt.year, hoje_dt.month, d).weekday() < 6)
-    dias_uteis_restantes = sum(1 for d in range(dia_atual+1, dias_mes+1) if datetime(hoje_dt.year, hoje_dt.month, d).weekday() < 6)
-    media_diaria = producao_mes / max(dias_uteis_passados, 1)
+
+    def _peso_dia_mes(d):
+        wd = datetime(hoje_dt.year, hoje_dt.month, d).weekday()
+        if wd == 6:      # domingo
+            return 0.0
+        if wd == 5:      # sabado
+            return _peso_sab
+        return 1.0
+
+    dias_uteis_passados  = sum(_peso_dia_mes(d) for d in range(1, dia_atual+1))
+    dias_uteis_restantes = sum(_peso_dia_mes(d) for d in range(dia_atual+1, dias_mes+1))
+    media_diaria = producao_mes / max(dias_uteis_passados, 1e-6)
     projecao_mes = producao_mes + (media_diaria * dias_uteis_restantes)
 
-    # Produção mesmo dia ano anterior
-    hoje_ano_ant = datetime.now().replace(year=datetime.now().year-1).strftime("%Y-%m-%d")
-    prod_ano_ant = query_func(
-        "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao, "
-        "COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS guias "
-        "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
-        "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje_ano_ant + "' AND smm.SMM_SFAT IN ('A','F','P')"
-    )
+    # Comparativo de producao: se hoje e sabado, usa a media dos ultimos 5
+    # sabados (perfil de producao de sabado e bem diferente de dia de semana,
+    # mesmo criterio ja usado no ticket medio); senao, mesmo dia do mes
+    # anterior (ajustado se o mes anterior tiver menos dias).
+    if datetime.now().weekday() == 5:
+        _sabados_cmp = []
+        _d = datetime.now().date() - timedelta(days=7)
+        while len(_sabados_cmp) < 5:
+            if _d.weekday() == 5:
+                _sabados_cmp.append(_d.strftime("%Y-%m-%d"))
+            _d -= timedelta(days=1)
+        _datas_sql_cmp = ",".join("'" + s + "'" for s in _sabados_cmp)
+        _prod_cmp_raw = query_func(
+            "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao, "
+            "COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS guias "
+            "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+            "WHERE CAST(osm.osm_dthr AS DATE) IN (" + _datas_sql_cmp + ") AND smm.SMM_SFAT IN ('A','F','P')"
+        )
+        _n_sabados    = len(_sabados_cmp)
+        prod_mes_ant  = ((_prod_cmp_raw[0].get("producao") or 0) if _prod_cmp_raw else 0) / _n_sabados
+        guias_mes_ant = ((_prod_cmp_raw[0].get("guias")    or 0) if _prod_cmp_raw else 0) / _n_sabados
+        comp_label    = "Media ultimos 5 sabados"
+    else:
+        import calendar as _cal2
+        _hoje_dt   = datetime.now()
+        _mes_ant   = _hoje_dt.month - 1 or 12
+        _ano_ant   = _hoje_dt.year if _hoje_dt.month > 1 else _hoje_dt.year - 1
+        _ult_dia_mes_ant = _cal2.monthrange(_ano_ant, _mes_ant)[1]
+        _dia_comp  = min(_hoje_dt.day, _ult_dia_mes_ant)
+        _hoje_mes_ant = datetime(_ano_ant, _mes_ant, _dia_comp).strftime("%Y-%m-%d")
+        _prod_cmp_raw = query_func(
+            "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao, "
+            "COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS guias "
+            "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+            "WHERE CAST(osm.osm_dthr AS DATE)='" + _hoje_mes_ant + "' AND smm.SMM_SFAT IN ('A','F','P')"
+        )
+        prod_mes_ant  = (_prod_cmp_raw[0].get("producao") or 0) if _prod_cmp_raw else 0
+        guias_mes_ant = (_prod_cmp_raw[0].get("guias")    or 0) if _prod_cmp_raw else 0
+        comp_label    = "Mesmo dia mes passado (" + datetime.strptime(_hoje_mes_ant, "%Y-%m-%d").strftime("%d/%m") + ")"
 
     # ── Calcula metas (corrige Pylance: variáveis declaradas aqui) ───────────
     _metas       = _calcular_metas(float(producao_mes))
@@ -438,9 +513,9 @@ def buscar_dados_fechamento(query_func):
         "media_diaria":         media_diaria,
         "projecao_mes":         projecao_mes,
         "dias_uteis_restantes": dias_uteis_restantes,
-        "prod_ano_ant":         (prod_ano_ant[0].get("producao") or 0) if prod_ano_ant else 0,
-        "guias_ano_ant":        (prod_ano_ant[0].get("guias")    or 0) if prod_ano_ant else 0,
-        "hoje_ano_ant":         hoje_ano_ant,
+        "prod_mes_ant":         prod_mes_ant,
+        "guias_mes_ant":        guias_mes_ant,
+        "comp_label":           comp_label,
         "meta_mensal":          META_MENSAL,
         "meta_diaria":          meta_diaria,
         "meta_dia_pct":         meta_dia_pct,
@@ -487,14 +562,32 @@ def buscar_dados_amanha(query_func):
         "GROUP BY RTRIM(psv.psv_apel) ORDER BY vagas DESC"
     )
 
-    ticket = query_func(
-        "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)"
-        "-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0))"
-        "/NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio "
-        "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
-        "WHERE osm.osm_dthr BETWEEN DATEADD(day,-30,'" + amanha + "') AND DATEADD(day,-1,'" + amanha + "') "
-        "AND smm.SMM_SFAT IN ('A','F','P')"
-    )
+    # Se amanhã é sábado, usa ticket médio só de sábados anteriores.
+    if (datetime.now() + timedelta(days=1)).weekday() == 5:
+        _sabados_am = []
+        _d_am = (datetime.now() + timedelta(days=1)).date() - timedelta(days=7)
+        while len(_sabados_am) < 8:
+            if _d_am.weekday() == 5:
+                _sabados_am.append(_d_am.strftime("%Y-%m-%d"))
+            _d_am -= timedelta(days=1)
+        _datas_sql_am = ",".join("'" + s + "'" for s in _sabados_am)
+        ticket = query_func(
+            "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)"
+            "-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0))"
+            "/NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio "
+            "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+            "WHERE CAST(osm.osm_dthr AS DATE) IN (" + _datas_sql_am + ") "
+            "AND smm.SMM_SFAT IN ('A','F','P')"
+        )
+    else:
+        ticket = query_func(
+            "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)"
+            "-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0))"
+            "/NULLIF(COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num),0) AS ticket_medio "
+            "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+            "WHERE osm.osm_dthr BETWEEN DATEADD(day,-30,'" + amanha + "') AND DATEADD(day,-1,'" + amanha + "') "
+            "AND smm.SMM_SFAT IN ('A','F','P')"
+        )
 
     return {
         "amanha": amanha,
@@ -538,6 +631,43 @@ def montar_manha(dados):
     if previsao > 0:
         msg += n + "💰 Previsao (se todos comparecerem):  *" + brl(previsao) + "*" + n
 
+    medicos_manha = dados.get("medicos_manha", [])
+    medicos_tarde = dados.get("medicos_tarde", [])
+    mult_manha    = dados.get("mult_manha", [])
+    mult_tarde    = dados.get("mult_tarde", [])
+
+    def _linhas_manha(lista):
+        out = ""
+        for m in lista:
+            ini  = m.get("inicio_manha", "")
+            fim  = m.get("fim_manha", "")
+            marc = m.get("marcacoes_manha") or 0
+            out += "    • " + str(m["medico"]) + " — " + num(marc) + " pac. (" + ini + "–" + fim + ")" + n
+        return out
+
+    def _linhas_tarde(lista):
+        out = ""
+        for m in lista:
+            fim  = m.get("fim_tarde", "")
+            marc = m.get("marcacoes_tarde") or 0
+            out += "    • " + str(m["medico"]) + " — " + num(marc) + " pac. (12:00–" + fim + ")" + n
+        return out
+
+    if medicos_manha or medicos_tarde:
+        msg += n + "━" * 28 + n
+        msg += "👨‍⚕️ *EQUIPE MEDICA*" + n
+        if medicos_manha:
+            msg += "  Manha:" + n + _linhas_manha(medicos_manha)
+        if medicos_tarde:
+            msg += "  Tarde:" + n + _linhas_tarde(medicos_tarde)
+
+    if mult_manha or mult_tarde:
+        msg += n + "🏥 *MULTIPROFISSIONAL*" + n
+        if mult_manha:
+            msg += "  Manha:" + n + _linhas_manha(mult_manha)
+        if mult_tarde:
+            msg += "  Tarde:" + n + _linhas_tarde(mult_tarde)
+
     msg += n + "\u2501" * 28 + n
     msg += "_Dashboard Clinica  \u2022  " + datetime.now().strftime("%H:%M") + "_"
     return msg
@@ -552,8 +682,8 @@ def montar_fechamento(dados):
     projecao      = dados.get("projecao_mes")         or 0
     media_dia     = dados.get("media_diaria")         or 0
     guias_mes     = dados.get("guias_mes")            or 0
-    prod_ano_ant  = dados.get("prod_ano_ant")         or 0
-    hoje_ano_ant  = dados.get("hoje_ano_ant", "")
+    prod_mes_ant  = dados.get("prod_mes_ant")         or 0
+    comp_label    = dados.get("comp_label", "")
     meta_mensal   = dados.get("meta_mensal")          or 1200000.0
     meta_dia      = dados.get("meta_diaria")          or 0
     meta_dia_pct  = dados.get("meta_dia_pct")         or 0
@@ -563,6 +693,7 @@ def montar_fechamento(dados):
     total_os      = fat.get("total_os") or 0
     pacientes     = fat.get("pacientes") or 0
     producao_por_recepcao = dados.get("producao_por_recepcao") or {}
+    agenda_med    = dados.get("abs_med") or []
     marcacoes     = agd.get("marcacoes") or 0
     compareceram  = agd.get("compareceram") or 0
     faltantes     = agd.get("faltantes") or 0
@@ -580,14 +711,10 @@ def montar_fechamento(dados):
     # ── Produção total ────────────────────────────────────────────────────────
     msg += "\U0001f4b5 *PRODUCAO TOTAL*" + n
     msg += "  \u27a4 *" + brl(prod) + "*" + n
-    if prod_ano_ant:
-        from datetime import datetime as _dt2
-        dias_pt = {"Monday":"Seg","Tuesday":"Ter","Wednesday":"Qua","Thursday":"Qui",
-                   "Friday":"Sex","Saturday":"Sab","Sunday":"Dom"}
-        dia_sem = dias_pt.get(_dt2.strptime(hoje_ano_ant, "%Y-%m-%d").strftime("%A"), "") if hoje_ano_ant else ""
-        var_pct = ((prod - prod_ano_ant) / prod_ano_ant * 100) if prod_ano_ant > 0 else 0
+    if prod_mes_ant:
+        var_pct = ((prod - prod_mes_ant) / prod_mes_ant * 100) if prod_mes_ant > 0 else 0
         sinal   = "+" if var_pct >= 0 else ""
-        msg += "  \U0001f4ca Mesmo dia " + hoje_ano_ant[:4] + " (" + dia_sem + "):  " + brl(prod_ano_ant) + n
+        msg += "  \U0001f4ca " + comp_label + ":  " + brl(prod_mes_ant) + n
         msg += "  \U0001f4c8 Variacao:  *" + sinal + "{:.1f}%".format(var_pct) + "*" + n
     msg += n
     msg += "  \U0001f4c4 Guias: *" + num(total_os) + "*   |   \U0001f465 Pacientes: *" + num(pacientes) + "*" + n
@@ -605,6 +732,36 @@ def montar_fechamento(dados):
         if partes:
             msg += "    " + "  |  ".join(partes) + n
 
+    # -- Agenda por profissional: quem tinha agendamento no dia, quantidade
+    # de atendimentos (comparecimentos) e absenteismo em % -------------------
+    _EXCLUIR_PROFISSIONAIS = {"JESSICA OLIVEIRA"}
+    agenda_med_filtrada = [
+        m for m in agenda_med
+        if str(m.get("medico", "")).strip().upper() not in _EXCLUIR_PROFISSIONAIS
+    ]
+
+    def _linha_agenda(m):
+        m_marc = m.get("marcacoes") or 0
+        m_comp = m.get("compareceram") or 0
+        m_falt = m.get("faltantes") or 0
+        m_abs_pct = (m_falt / m_marc * 100) if m_marc > 0 else 0
+        return ("  • " + str(m["medico"]) + ":  " + num(m_marc) + " marc.  |  "
+                + num(m_comp) + " atend.  |  " + "{:.0f}%".format(m_abs_pct) + " abs." + n)
+
+    agenda_crm  = [m for m in agenda_med_filtrada if not _is_mult(m)]
+    agenda_mult = [m for m in agenda_med_filtrada if _is_mult(m)]
+
+    if agenda_crm:
+        msg += n + "━" * 28 + n
+        msg += "\U0001f4c5 *AGENDA POR MEDICO*" + n
+        for m in agenda_crm:
+            msg += _linha_agenda(m)
+
+    if agenda_mult:
+        msg += n + "\U0001f3e5 *AGENDA MULTIPROFISSIONAL*" + n
+        for m in agenda_mult:
+            msg += _linha_agenda(m)
+
     # ── Agenda ────────────────────────────────────────────────────────────────
     msg += n + "\u2501" * 28 + n
     msg += "\U0001f4c5 *AGENDA DO DIA*" + n
@@ -617,11 +774,7 @@ def montar_fechamento(dados):
     sinal_dia = "+" if meta_dia_pct >= 100 else ""
     sinal_mes = "+" if meta_mes_pct >= 100 else ""
     msg += n + "\u2501" * 28 + n
-    msg += "\U0001f3af *METAS DO MES*" + n
-    msg += "  Meta mensal:  *" + brl(meta_mensal) + "*" + n
-    msg += "  Meta diaria:  *" + brl(meta_dia) + "*" + n
-
-    msg += n + "\U0001f4c8 *PRODUCAO ACUMULADA*" + n
+    msg += "📈 *PRODUCAO ACUMULADA*" + n
     msg += "  Acumulado:    *" + brl(prod_mes) + "*  (" + num(int(guias_mes)) + " guias)" + n
     msg += "  Media diaria: *" + brl(media_dia) + "*  vs  *" + brl(meta_dia) + "*  (" + sinal_dia + "{:.1f}%".format(meta_dia_pct - 100) + ")" + n
     msg += "  Projecao mes: *" + brl(projecao) + "*  vs  *" + brl(meta_mensal) + "*  (" + sinal_mes + "{:.1f}%".format(meta_mes_pct - 100) + ")" + n
@@ -654,9 +807,11 @@ def montar_previa_amanha(dados):
         msg += "  Ja cancelados: " + num(cancelados) + n
 
     if previsao > 0:
+        eh_sabado = dia_sem.strip().lower().startswith("sabado") or dia_sem.strip().lower().startswith("sábado")
+        rotulo_ticket = "ticket medio sabados" if eh_sabado else "ticket medio 30d"
         msg += n + "*Previsao de Producao*" + n
         msg += "  Potencial: *" + brl(previsao) + "*" + n
-        msg += "  _(ticket medio 30d: " + brl(ticket) + ")_" + n
+        msg += "  _(" + rotulo_ticket + ": " + brl(ticket) + ")_" + n
 
     msg += n + "_Dashboard Clinica - " + datetime.now().strftime("%H:%M") + "_"
     return msg
