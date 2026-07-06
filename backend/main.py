@@ -422,15 +422,28 @@ def home_resumo(periodo: str = "30d", setor: str = "todos"):
     if diag_kpi:
         setores_kpi.append({"setor": "Diagnóstico", "os": diag_kpi[0]["os"], "producao": diag_kpi[0]["producao"]})
 
-    # Projeção do mês
+    # Projeção do mês — sábado pesa proporcionalmente menos que um dia de
+    # semana (meta_sabado / meta_diaria), mesmo critério usado no módulo
+    # Produção Mensal e nas mensagens de WhatsApp, pra não superestimar a
+    # projeção em meses com mais sábados.
     hoje = date.today()
-    dias_uteis_passados = len([r for r in por_dia if r.get("producao", 0) > 0])
     prod_acumulada = kpis_atual.get("producao", 0) or 0
     total_dias_mes = calendar.monthrange(hoje.year, hoje.month)[1]
-    dias_restantes = sum(
-        1 for d in range(hoje.day + 1, total_dias_mes + 1)
-        if date(hoje.year, hoje.month, d).weekday() != 6
-    )
+    _metas_prod  = _load_metas().get("producao", {}) or {}
+    _meta_diaria_cfg = _metas_prod.get("meta_diaria") or 48000.0
+    _meta_sabado_cfg = _metas_prod.get("meta_sabado") or _meta_diaria_cfg
+    _peso_sab = (_meta_sabado_cfg / _meta_diaria_cfg) if _meta_diaria_cfg else 1.0
+
+    def _peso_dia_mes(d):
+        wd = date(hoje.year, hoje.month, d).weekday()
+        if wd == 6:  # domingo
+            return 0.0
+        if wd == 5:  # sabado
+            return _peso_sab
+        return 1.0
+
+    dias_uteis_passados = sum(_peso_dia_mes(d) for d in range(1, hoje.day + 1))
+    dias_restantes = sum(_peso_dia_mes(d) for d in range(hoje.day + 1, total_dias_mes + 1))
     media_diaria = prod_acumulada / dias_uteis_passados if dias_uteis_passados > 0 else 0
     projecao_mes = prod_acumulada + (media_diaria * dias_restantes)
 
@@ -458,8 +471,8 @@ def home_resumo(periodo: str = "30d", setor: str = "todos"):
         "projecao": {
             "valor":               round(projecao_mes, 2),
             "media_diaria":        round(media_diaria, 2),
-            "dias_uteis_passados": dias_uteis_passados,
-            "dias_restantes":      dias_restantes,
+            "dias_uteis_passados": round(dias_uteis_passados, 1),
+            "dias_restantes":      round(dias_restantes),
             "acumulado":           round(prod_acumulada, 2),
         },
         "setor":   setor,
@@ -1691,7 +1704,7 @@ def pacientes_aniversariantes(mes: int = None):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/financeiro/producao-mensal")
-def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None, meta_mensal_fixa: float = 1200000.0):
+def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None, meta_mensal_fixa: float = 1200000.0, meta_sabado: float = None):
     """
     meta_diaria      → valor diário (padrão 45000)
     meta_mensal_fixa → se informado, usa esse valor fixo para a meta do mês
@@ -1742,15 +1755,7 @@ def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None,
     dias_com_producao = len([r for r in rows if (r["total"] or 0) > 0])
     media_diaria = total_geral / dias_com_producao if dias_com_producao else 0
 
-    # Dias úteis restantes no mês (seg-sáb, a partir de amanhã)
     hoje = now.date()
-    dias_restantes = 0
-    if ano == hoje.year and mes == hoje.month:
-        import datetime as dt
-        for d in range(hoje.day + 1, ultimo_dia + 1):
-            dia = dt.date(ano, mes, d)
-            if dia.weekday() < 6:  # 0=seg ... 5=sáb
-                dias_restantes += 1
 
     # ── Feriados Parauapebas/PA ────────────────────────────────────────────
     # Dias úteis = Seg a Sáb, excluindo feriados nacionais + estaduais + municipais
@@ -1791,19 +1796,28 @@ def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None,
 
     feriados = feriados_ano(ano)
 
-    dias_uteis_mes = sum(
-        1 for d in range(1, ultimo_dia + 1)
-        if dt.date(ano, mes, d).weekday() < 6          # Seg(0) a Sáb(5)
-        and dt.date(ano, mes, d) not in feriados        # não é feriado
-    )
+    # Sábado pesa proporcionalmente menos que um dia de semana normal
+    # (meta_sabado / meta_diaria) — mesmo critério usado no Home e nas
+    # mensagens de WhatsApp, pra não superestimar dias úteis/projeção em
+    # meses com mais sábados.
+    _cfg_metas_prod = _load_metas().get("producao", {}) or {}
+    _meta_diaria_base = meta_diaria if meta_diaria is not None else (_cfg_metas_prod.get("meta_diaria") or 48000.0)
+    _meta_sabado_efetiva = meta_sabado if meta_sabado is not None else (_cfg_metas_prod.get("meta_sabado") or _meta_diaria_base)
+    _peso_sab = (_meta_sabado_efetiva / _meta_diaria_base) if _meta_diaria_base else 1.0
 
-    # Dias úteis restantes (a partir de amanhã)
+    def _peso_dia(d):
+        dia = dt.date(ano, mes, d)
+        if dia.weekday() == 6 or dia in feriados:  # domingo ou feriado
+            return 0.0
+        if dia.weekday() == 5:  # sabado
+            return _peso_sab
+        return 1.0
+
+    dias_uteis_mes = sum(_peso_dia(d) for d in range(1, ultimo_dia + 1))
+
+    dias_restantes = 0
     if ano == hoje.year and mes == hoje.month:
-        dias_restantes = sum(
-            1 for d in range(hoje.day + 1, ultimo_dia + 1)
-            if dt.date(ano, mes, d).weekday() < 6
-            and dt.date(ano, mes, d) not in feriados
-        )
+        dias_restantes = sum(_peso_dia(d) for d in range(hoje.day + 1, ultimo_dia + 1))
 
     if meta_diaria is None:
         meta_diaria = round(meta_mensal_fixa / dias_uteis_mes, 2) if dias_uteis_mes > 0 else 0
@@ -1825,8 +1839,8 @@ def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None,
         "projecao":           projecao,
         "diferenca":          diferenca,
         "dias_com_producao":  dias_com_producao,
-        "dias_restantes":     dias_restantes,
-        "dias_uteis_mes":     dias_uteis_mes,
+        "dias_restantes":     round(dias_restantes, 2),
+        "dias_uteis_mes":     round(dias_uteis_mes, 2),
     }
 # Adicione este endpoint no main.py logo após o /api/financeiro/producao-mensal
 

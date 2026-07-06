@@ -140,12 +140,18 @@ function ColunaRecepcaoTV({ cod, nome, cor }) {
 function PainelTV() {
   // Meta diária real (mesma configurada no módulo Produção Mensal) — evita
   // divergir do valor hardcoded que ficava fixo em 45000 independente do que
-  // era salvo em /api/metas.
+  // era salvo em /api/metas. Aos sábados usa a meta_sabado (menor).
   const [metaDiaria, setMetaDiaria] = useState(45000);
   useEffect(() => {
     fetch(`${API}/api/metas`)
       .then(r => r.json())
-      .then(d => { if (d?.producao?.meta_diaria != null) setMetaDiaria(d.producao.meta_diaria); })
+      .then(d => {
+        const m = d?.producao;
+        if (!m) return;
+        const ehSabado = new Date().getDay() === 6;
+        const valor = ehSabado ? (m.meta_sabado ?? m.meta_diaria) : m.meta_diaria;
+        if (valor != null) setMetaDiaria(valor);
+      })
       .catch(() => {});
   }, []);
   const [setor,    setSetor]    = useState("");

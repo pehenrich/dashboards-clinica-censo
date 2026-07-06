@@ -973,7 +973,7 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
   const [hover,  setHover]  = useState(null); // { data, x, y }
   const { metaDiaria, metaMensal, metaSabado, salvar } = useMetas();
   const { data, loading } = useFetch("/api/financeiro/producao-mensal", {
-    ano, mes, meta_diaria: metaDiaria, meta_mensal_fixa: metaMensal,
+    ano, mes, meta_diaria: metaDiaria, meta_mensal_fixa: metaMensal, meta_sabado: metaSabado,
   });
 
   // Sábados têm meta própria (metaSabado) — todos os outros dias usam metaDiaria.
@@ -1168,7 +1168,7 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
             { label:"Média Diária",  val:data.media_diaria,       color: data.media_diaria>=metaMediaMensal?"#10B981":"#F59E0B",
               sub: data.media_diaria>=metaMediaMensal ? "↑ acima da meta" : `↓ meta ${fmt(metaMediaMensal)}/dia` },
             { label:"Projeção",      val:projecao,                color: projecao>=metaMensal?"#10B981":"#F59E0B",
-              sub:`${data.dias_restantes||0} dias restantes` },
+              sub:`${Math.round(data.dias_restantes||0)} dias restantes` },
             { label: falta<=0?"Meta Atingida ✓":"Necessário/Dia",
               val: falta<=0 ? Math.abs(falta) : necessario,
               color: falta<=0 ? "#10B981" : necessario<=metaMediaMensal*1.3 ? "#F59E0B" : "#EF4444",
@@ -1191,7 +1191,7 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
               Progresso da Meta — <span style={{ color: pctMes>=100?"#10B981":pctMes>=70?"#F59E0B":"#8B1A1A" }}>{pctMes.toFixed(1)}%</span>
             </span>
             <span style={{ fontSize:12, color:C.sub }}>
-              {fmt(data.total_geral)} de {fmt(metaMensal)} · {data.dias_uteis_mes} dias úteis
+              {fmt(data.total_geral)} de {fmt(metaMensal)} · {Math.round(data.dias_uteis_mes)} dias úteis
             </span>
           </div>
           <div style={{ height:10, background:"#EEEEEE", borderRadius:6, overflow:"hidden" }}>
