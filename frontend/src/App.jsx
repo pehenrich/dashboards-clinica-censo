@@ -1011,7 +1011,7 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
   const necessario = data?.dias_restantes > 0 ? falta / data.dias_restantes : 0;
 
   // Meta média do mês, ponderada por quantos dias úteis vs sábados existem (Seg–Sáb, sem domingo)
-  const metaMediaMensal = (() => {
+  const { uteis: diasUteisMeta, sabados: diasSabadoMeta } = (() => {
     const ultimoDia = new Date(ano, mes, 0).getDate();
     let uteis = 0, sabados = 0;
     for (let d = 1; d <= ultimoDia; d++) {
@@ -1019,9 +1019,15 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
       if (dow === 0) continue;
       if (dow === 6) sabados++; else uteis++;
     }
-    const total = uteis + sabados;
-    return total > 0 ? (uteis*metaDiaria + sabados*metaSabado) / total : metaDiaria;
+    return { uteis, sabados };
   })();
+  const metaMediaMensal = (() => {
+    const total = diasUteisMeta + diasSabadoMeta;
+    return total > 0 ? (diasUteisMeta*metaDiaria + diasSabadoMeta*metaSabado) / total : metaDiaria;
+  })();
+  // Texto explicando a conta, pra mostrar em tooltip/legenda perto do valor.
+  const metaMediaMensalCalculo =
+    `(${diasUteisMeta}d × ${fmt(metaDiaria)} + ${diasSabadoMeta}sáb × ${fmt(metaSabado)}) ÷ ${diasUteisMeta + diasSabadoMeta} = ${fmt(metaMediaMensal)}/dia`;
 
   const DIAS_NOME = ["Segunda","Terça","Quarta","Quinta","Sexta","Sábado"];
 
@@ -1159,25 +1165,55 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
       </div>
 
       {/* ── KPIs ── */}
+      <style>{`
+        .kpi-info { position:relative; display:inline-flex; align-items:center; justify-content:center;
+          width:18px; height:18px; border-radius:50%; background:#FDF2F2; color:#8B1A1A;
+          border:1px solid #F3D6D6; font-size:11px; font-weight:800; font-style:normal;
+          cursor:help; flex-shrink:0; transition:background 0.15s, transform 0.15s, box-shadow 0.15s; }
+        .kpi-info:hover { background:#8B1A1A; color:#fff; border-color:#8B1A1A;
+          transform:scale(1.1); box-shadow:0 2px 8px rgba(139,26,26,0.35); }
+        .kpi-info .kpi-info-tip { visibility:hidden; opacity:0; position:absolute; bottom:145%; left:50%;
+          transform:translateX(-50%); background:#111827; color:#F9FAFB; padding:10px 12px; border-radius:10px;
+          font-size:11.5px; font-weight:500; line-height:1.5; width:230px; text-transform:none; letter-spacing:normal;
+          box-shadow:0 8px 20px rgba(0,0,0,0.3); transition:opacity 0.18s; z-index:30; text-align:left; }
+        .kpi-info:hover .kpi-info-tip { visibility:visible; opacity:1; }
+      `}</style>
       {data && !loading && (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:12, marginBottom:20 }}>
           {[
-            { label:"Ocupacional",   val:data.total_ocupacional,  color:"#8B5CF6", sub:null },
-            { label:"Assistencial",  val:data.total_assistencial, color:"#8B1A1A", sub:null },
-            { label:"Total Geral",   val:data.total_geral,        color:"#10B981", sub:`${data.dias_com_producao} dias com produção` },
+            { label:"Ocupacional",   val:data.total_ocupacional,  color:"#8B5CF6", sub:null,
+              info:"Soma da produção classificada como atendimento ocupacional (ADM, PER, DEM, RTB, MDF, MOC) nos dias já lançados do mês." },
+            { label:"Assistencial",  val:data.total_assistencial, color:"#8B1A1A", sub:null,
+              info:"Soma da produção classificada como atendimento assistencial (ASS) nos dias já lançados do mês." },
+            { label:"Total Geral",   val:data.total_geral,        color:"#10B981", sub:`${data.dias_com_producao} dias com produção`,
+              info:"Ocupacional + Assistencial = produção total lançada no mês até agora." },
             { label:"Média Diária",  val:data.media_diaria,       color: data.media_diaria>=metaMediaMensal?"#10B981":"#F59E0B",
-              sub: data.media_diaria>=metaMediaMensal ? "↑ acima da meta" : `↓ meta ${fmt(metaMediaMensal)}/dia` },
+              sub: data.media_diaria>=metaMediaMensal ? "↑ acima da meta média" : `↓ meta média ${fmt(metaMediaMensal)}/dia`,
+              sub2: metaMediaMensalCalculo,
+              info:`Total Geral ÷ ${data.dias_com_producao} dias com produção registrada. A "meta média" usada na comparação é ponderada: ${metaMediaMensalCalculo}` },
             { label:"Projeção",      val:projecao,                color: projecao>=metaMensal?"#10B981":"#F59E0B",
-              sub:`${Math.round(data.dias_restantes||0)} dias restantes` },
+              sub:`${Math.round(data.dias_restantes||0)} dias restantes`,
+              info:`Total Geral + (Média Diária × dias úteis restantes). Sábado conta 0,625 de um dia útil nessa conta (meta de sábado ÷ meta de dia de semana) — estima o total do mês no ritmo atual.` },
             { label: falta<=0?"Meta Atingida ✓":"Necessário/Dia",
               val: falta<=0 ? Math.abs(falta) : necessario,
               color: falta<=0 ? "#10B981" : necessario<=metaMediaMensal*1.3 ? "#F59E0B" : "#EF4444",
-              sub: falta<=0 ? `Superou em ${fmt(Math.abs(falta))}` : `faltam ${fmt(falta)}` },
+              sub: falta<=0 ? `Superou em ${fmt(Math.abs(falta))}` : `faltam ${fmt(falta)}`,
+              info: falta<=0
+                ? `Total Geral já ultrapassou a Meta Mensal (${fmt(metaMensal)}). Valor mostrado é o quanto superou.`
+                : `Falta = Meta Mensal (${fmt(metaMensal)}) − Total Geral. Necessário/dia = Falta ÷ ${Math.round(data.dias_restantes||0)} dias restantes.` },
           ].map((k,i) => (
-            <div key={i} style={{ background:"#fff", borderRadius:12, padding:"16px 18px", borderTop:`3px solid ${k.color}`, boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
-              <div style={{ fontSize:10, color:C.faint, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:6 }}>{k.label}</div>
-              <div style={{ fontSize:17, fontWeight:800, color:k.color, lineHeight:1.1 }}>{fmt(k.val)}</div>
+            <div key={i} style={{ position:"relative", background:"#fff", borderRadius:12, padding:"16px 18px", borderTop:`3px solid ${k.color}`, boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
+              {k.info && (
+                <span className="kpi-info" style={{ position:"absolute", top:10, right:10 }}>
+                  ⓘ<span className="kpi-info-tip" style={{ bottom:"auto", top:"145%", left:"auto", right:0, transform:"none" }}>{k.info}</span>
+                </span>
+              )}
+              <div style={{ fontSize:10, color:C.faint, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:6 }}>
+                {k.label}
+              </div>
+              <div style={{ fontSize:fitFontSize(fmt(k.val),23,14), fontWeight:800, color:k.color, lineHeight:1.15, overflowWrap:"anywhere" }}>{fmt(k.val)}</div>
               {k.sub && <div style={{ fontSize:11, color:C.sub, marginTop:4 }}>{k.sub}</div>}
+              {k.sub2 && <div style={{ fontSize:9.5, color:C.faint, marginTop:3, lineHeight:1.3 }}>{k.sub2}</div>}
             </div>
           ))}
         </div>
@@ -1345,7 +1381,7 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
               </div>
               <div style={{ padding:"12px", textAlign:"right" }}>
                 <div style={{ fontSize:14, fontWeight:800, color: data.media_diaria>=metaMediaMensal?"#10B981":"#EF4444" }}>{fmt(data.media_diaria)}</div>
-                <div style={{ fontSize:10, color:C.faint }}>meta: {fmt(metaMediaMensal)}</div>
+                <div style={{ fontSize:10, color:C.faint }} title={metaMediaMensalCalculo}>meta média: {fmt(metaMediaMensal)}</div>
               </div>
             </div>
           )}

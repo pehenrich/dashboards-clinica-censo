@@ -11,7 +11,7 @@ Tabelas validadas contra dicionário oficial Pixeon:
           cnv_reg_ans, cnv_cgc, cnv_caixa_fatura
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 # WhatsApp / Scheduler (importação opcional — não quebra se arquivos não existem)
@@ -7450,346 +7450,6 @@ def debug_setores_lab():
         ORDER BY qtd_itens DESC
     """)
     return r1
-# ══════════════════════════════════════════════════════════════════════════════
-# ENDPOINTS DOS PAINÉIS TV — Somente leitura da FLE
-# Cole no main.py
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/painel-fila/senhas")
-def painel_fila_senhas(limite: int = 8):
-    """
-    Painel TV — Senhas chamadas pela recepção (guichês).
-    Fonte: FLE onde FLE_BIP está preenchido (senha do totem)
-    e FLE_DTHR_ATENDIMENTO foi atualizado pelo Smart.
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT TOP {limite}
-            RTRIM(ISNULL(fle.FLE_BIP, ''))                          AS senha,
-            CAST(fle.FLE_ORDEM AS INT)                              AS ordem,
-            RTRIM(psv.psv_apel)                                     AS psv_apel,
-            RTRIM(psv.psv_nome)                                     AS psv_nome,
-            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
-            RTRIM(fle.FLE_STR_COD)                                  AS setor,
-            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)        AS chamado_em,
-            RTRIM(ISNULL(fle.fle_pac_nome,
-                   RTRIM(ISNULL(pac.pac_nome,''))))                 AS pac_nome,
-            fle.FLE_PREFERENCIAL                                    AS preferencial,
-            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA,
-                     fle.FLE_DTHR_ATENDIMENTO)                      AS espera_min
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-          AND fle.FLE_BIP IS NOT NULL
-          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
-        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
-    """)
-    return rows
-
-
-@app.get("/api/painel-fila/status-senhas")
-def painel_fila_status_senhas():
-    """
-    Status das filas de senha por prestador — lateral do painel TV.
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT
-            fle.FLE_PSV_COD                                         AS psv_cod,
-            RTRIM(psv.psv_apel)                                     AS psv_apel,
-            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
-                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS na_fila,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-                     THEN 1 ELSE 0 END)                             AS atendidos,
-            SUM(CASE WHEN fle.FLE_PREFERENCIAL = 'S'
-                      AND fle.FLE_STATUS = 'A'
-                      AND fle.FLE_DTHR_ATENDIMENTO IS NULL
-                     THEN 1 ELSE 0 END)                             AS preferenciais,
-            -- Próxima senha aguardando
-            (SELECT TOP 1 RTRIM(ISNULL(f2.FLE_BIP,
-                'EXL'+RIGHT('000'+CAST(CAST(f2.FLE_ORDEM AS INT) AS VARCHAR),3)))
-             FROM fle f2
-             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
-               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
-               AND f2.FLE_STATUS = 'A'
-             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proxima_senha
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-          AND fle.FLE_BIP IS NOT NULL
-          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
-        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
-                 RTRIM(ISNULL(esp.esp_nome,''))
-        ORDER BY na_fila DESC
-    """)
-    return rows
-
-
-@app.get("/api/painel-fila/pacientes")
-def painel_fila_pacientes(limite: int = 8):
-    """
-    Painel TV — Pacientes chamados pelos médicos no Smart.
-    Fonte: FLE onde FLE_LOC_COD foi preenchido pelo Smart
-    ao chamar o paciente (sem FLE_BIP — são filas de consultório).
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT TOP {limite}
-            RTRIM(ISNULL(fle.fle_pac_nome,
-                   RTRIM(ISNULL(pac.pac_nome,''))))                 AS pac_nome,
-            fle.FLE_PAC_REG                                         AS pac_reg,
-            RTRIM(psv.psv_apel)                                     AS psv_apel,
-            RTRIM(psv.psv_nome)                                     AS psv_nome,
-            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
-            RTRIM(ISNULL(loc.LOC_NOME,''))                          AS local_nome,
-            RTRIM(ISNULL(fle.FLE_LOC_COD,''))                       AS local_cod,
-            RTRIM(fle.FLE_STR_COD)                                  AS setor,
-            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)        AS chamado_em,
-            fle.FLE_PREFERENCIAL                                    AS preferencial,
-            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA,
-                     fle.FLE_DTHR_ATENDIMENTO)                      AS espera_min
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
-        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = RTRIM(fle.FLE_LOC_COD)
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-          AND fle.FLE_LOC_COD IS NOT NULL
-          AND LTRIM(RTRIM(fle.FLE_LOC_COD)) <> ''
-        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
-    """)
-    for r in rows:
-        if r.get("pac_nome"):
-            r["pac_nome"] = str(r["pac_nome"]).strip().title()
-    return rows
-
-
-@app.get("/api/painel-fila/status-pacientes")
-def painel_fila_status_pacientes():
-    """
-    Status das filas por médico — lateral do painel de pacientes.
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT
-            fle.FLE_PSV_COD                                         AS psv_cod,
-            RTRIM(psv.psv_apel)                                     AS psv_apel,
-            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
-            RTRIM(ISNULL(loc.LOC_NOME,''))                          AS local_nome,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
-                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS aguardando,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-                     THEN 1 ELSE 0 END)                             AS atendidos,
-            -- Próximo paciente
-            (SELECT TOP 1
-                RTRIM(ISNULL(f2.fle_pac_nome, RTRIM(ISNULL(p2.pac_nome,''))))
-             FROM fle f2
-             LEFT JOIN pac p2 ON p2.pac_reg = f2.FLE_PAC_REG
-             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
-               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
-               AND f2.FLE_STATUS = 'A'
-             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proximo_pac
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = (
-            SELECT TOP 1 RTRIM(f3.FLE_LOC_COD) FROM fle f3
-            WHERE f3.FLE_PSV_COD = fle.FLE_PSV_COD
-              AND CAST(f3.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-              AND f3.FLE_LOC_COD IS NOT NULL
-            ORDER BY f3.FLE_DTHR_ATENDIMENTO DESC
-        )
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
-                 RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(loc.LOC_NOME,''))
-        HAVING SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
-                         AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END) > 0
-        ORDER BY aguardando DESC
-    """)
-    return rows
-# ══════════════════════════════════════════════════════════════════════════════
-# ENDPOINTS DOS PAINÉIS TV — Somente leitura da FLE
-# Cole no main.py
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/painel-fila/senhas")
-def painel_fila_senhas(limite: int = 8):
-    """
-    Painel TV — Senhas chamadas pela recepção (guichês).
-    Fonte: FLE onde FLE_BIP está preenchido (senha do totem)
-    e FLE_DTHR_ATENDIMENTO foi atualizado pelo Smart.
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT TOP {limite}
-            RTRIM(ISNULL(fle.FLE_BIP, ''))                          AS senha,
-            CAST(fle.FLE_ORDEM AS INT)                              AS ordem,
-            RTRIM(psv.psv_apel)                                     AS psv_apel,
-            RTRIM(psv.psv_nome)                                     AS psv_nome,
-            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
-            RTRIM(fle.FLE_STR_COD)                                  AS setor,
-            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)        AS chamado_em,
-            RTRIM(ISNULL(fle.fle_pac_nome,
-                   RTRIM(ISNULL(pac.pac_nome,''))))                 AS pac_nome,
-            fle.FLE_PREFERENCIAL                                    AS preferencial,
-            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA,
-                     fle.FLE_DTHR_ATENDIMENTO)                      AS espera_min
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-          AND fle.FLE_BIP IS NOT NULL
-          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
-        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
-    """)
-    return rows
-
-
-@app.get("/api/painel-fila/status-senhas")
-def painel_fila_status_senhas():
-    """
-    Status das filas de senha por prestador — lateral do painel TV.
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT
-            fle.FLE_PSV_COD                                         AS psv_cod,
-            RTRIM(psv.psv_apel)                                     AS psv_apel,
-            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
-                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS na_fila,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-                     THEN 1 ELSE 0 END)                             AS atendidos,
-            SUM(CASE WHEN fle.FLE_PREFERENCIAL = 'S'
-                      AND fle.FLE_STATUS = 'A'
-                      AND fle.FLE_DTHR_ATENDIMENTO IS NULL
-                     THEN 1 ELSE 0 END)                             AS preferenciais,
-            -- Próxima senha aguardando
-            (SELECT TOP 1 RTRIM(ISNULL(f2.FLE_BIP,
-                'EXL'+RIGHT('000'+CAST(CAST(f2.FLE_ORDEM AS INT) AS VARCHAR),3)))
-             FROM fle f2
-             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
-               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
-               AND f2.FLE_STATUS = 'A'
-             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proxima_senha
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-          AND fle.FLE_BIP IS NOT NULL
-          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
-        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
-                 RTRIM(ISNULL(esp.esp_nome,''))
-        ORDER BY na_fila DESC
-    """)
-    return rows
-
-
-@app.get("/api/painel-fila/pacientes")
-def painel_fila_pacientes(limite: int = 8):
-    """
-    Painel TV — Pacientes chamados pelos médicos no Smart.
-    FLE_STATUS = 'X' quando o médico chama pelo Smart.
-    FLE_LOC_COD é null — usa setor (FLE_STR_COD) + nome do prestador.
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    SETORES = {
-        'RDI': 'Recepção Diagnóstico',
-        'ROC': 'Recepção Ocupacional',
-        'RPS': 'Recepção Pro Saúde',
-        'RCN': 'Recepção Consultórios',
-        'RCI': 'Recepção Censo Imagem',
-    }
-    rows = query(f"""
-        SELECT TOP {limite}
-            RTRIM(pac.pac_nome)                                         AS pac_nome,
-            fle.FLE_PAC_REG                                             AS pac_reg,
-            RTRIM(psv.psv_apel)                                         AS psv_apel,
-            RTRIM(psv.psv_nome)                                         AS psv_nome,
-            RTRIM(ISNULL(esp.esp_nome,''))                              AS especialidade,
-            RTRIM(ISNULL(loc.LOC_NOME,''))                              AS local_nome,
-            RTRIM(fle.FLE_STR_COD)                                      AS setor,
-            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)            AS chamado_em,
-            fle.FLE_PREFERENCIAL                                        AS preferencial,
-            DATEDIFF(minute,fle.FLE_DTHR_CHEGADA,
-                     fle.FLE_DTHR_ATENDIMENTO)                          AS espera_min
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
-        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = RTRIM(fle.FLE_LOC_COD)
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-          AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-          AND fle.FLE_STATUS = 'X'
-          AND (fle.FLE_BIP IS NULL OR LTRIM(RTRIM(fle.FLE_BIP)) = '')
-        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
-    """)
-    for r in rows:
-        if r.get("pac_nome"):
-            r["pac_nome"] = str(r["pac_nome"]).strip().title()
-        # Usa nome do setor como local quando LOC_NOME estiver vazio
-        if not r.get("local_nome") or not str(r["local_nome"]).strip():
-            setor = str(r.get("setor") or "").strip()
-            r["local_nome"] = SETORES.get(setor, setor)
-    return rows
-
-
-@app.get("/api/painel-fila/status-pacientes")
-def painel_fila_status_pacientes():
-    """
-    Status das filas por médico — lateral do painel de pacientes.
-    """
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query(f"""
-        SELECT
-            fle.FLE_PSV_COD                                         AS psv_cod,
-            RTRIM(psv.psv_apel)                                     AS psv_apel,
-            RTRIM(ISNULL(esp.esp_nome,''))                          AS especialidade,
-            RTRIM(ISNULL(loc.LOC_NOME,''))                          AS local_nome,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
-                      AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END)  AS aguardando,
-            SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
-                     THEN 1 ELSE 0 END)                             AS atendidos,
-            -- Próximo paciente
-            (SELECT TOP 1
-                RTRIM(ISNULL(f2.fle_pac_nome, RTRIM(ISNULL(p2.pac_nome,''))))
-             FROM fle f2
-             LEFT JOIN pac p2 ON p2.pac_reg = f2.FLE_PAC_REG
-             WHERE f2.FLE_PSV_COD = fle.FLE_PSV_COD
-               AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-               AND f2.FLE_DTHR_ATENDIMENTO IS NULL
-               AND f2.FLE_STATUS = 'A'
-             ORDER BY f2.FLE_PREFERENCIAL DESC, f2.FLE_DTHR_CHEGADA ASC) AS proximo_pac
-        FROM fle
-        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
-        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
-        LEFT JOIN loc ON RTRIM(loc.LOC_COD) = (
-            SELECT TOP 1 RTRIM(f3.FLE_LOC_COD) FROM fle f3
-            WHERE f3.FLE_PSV_COD = fle.FLE_PSV_COD
-              AND CAST(f3.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-              AND f3.FLE_LOC_COD IS NOT NULL
-            ORDER BY f3.FLE_DTHR_ATENDIMENTO DESC
-        )
-        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-          AND (fle.FLE_BIP IS NULL OR LTRIM(RTRIM(fle.FLE_BIP)) = '')
-        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
-                 RTRIM(ISNULL(esp.esp_nome,'')), RTRIM(ISNULL(loc.LOC_NOME,''))
-        HAVING SUM(CASE WHEN fle.FLE_DTHR_ATENDIMENTO IS NULL
-                         AND fle.FLE_STATUS = 'A' THEN 1 ELSE 0 END) > 0
-        ORDER BY aguardando DESC
-    """)
-    return rows
 @app.get("/api/debug/fle-senha-chamada")
 def debug_fle_senha_chamada():
     hoje = datetime.now().strftime("%Y-%m-%d")
@@ -7822,14 +7482,106 @@ def debug_fle_senha_chamada():
 # Cole no main.py
 # ══════════════════════════════════════════════════════════════════════════════
 
+_SETORES_PAINEL_FILA = {"RCN", "RDI", "ROC", "RPS", "RCI"}
+
+
+def _filtro_psv_cod(psv_cod: str) -> str:
+    """psv_cod → lista de códigos separados por vírgula (as 'filas'/prestadores
+    escolhidos no painel). Ignora silenciosamente valores não numéricos."""
+    if not psv_cod:
+        return ""
+    codigos = [c.strip() for c in psv_cod.split(",") if c.strip().lstrip("-").isdigit()]
+    if not codigos:
+        return ""
+    return f"AND fle.FLE_PSV_COD IN ({','.join(codigos)})"
+
+
+# ── Vídeos informativos do painel de TV ───────────────────────────────────
+# Arquivos ficam em painel_recepcao/videos — servidos estaticamente pelo
+# mount /painel-tv. Esses endpoints deixam listar/enviar/remover pelo
+# servidor, sem precisar mexer direto na pasta em cada TV.
+_PAINEL_VIDEOS_DIR = r"C:\Users\administrator.CENSO\Desktop\painel_recepcao\videos"
+_VIDEO_EXTENSOES = {".mp4", ".webm", ".ogg", ".mov"}
+
+@app.get("/api/painel-fila/videos")
+def painel_fila_videos_listar():
+    """Lista os vídeos disponíveis na pasta, na ordem alfabética de exibição."""
+    if not os.path.isdir(_PAINEL_VIDEOS_DIR):
+        return []
+    arquivos = [
+        f for f in os.listdir(_PAINEL_VIDEOS_DIR)
+        if os.path.splitext(f)[1].lower() in _VIDEO_EXTENSOES
+    ]
+    arquivos.sort(key=str.lower)
+    return [{"nome": f, "url": f"/painel-tv/videos/{f}"} for f in arquivos]
+
+@app.post("/api/painel-fila/videos")
+async def painel_fila_videos_upload(arquivo: UploadFile = File(...)):
+    """Recebe um vídeo enviado e salva na pasta servida pelas TVs."""
+    ext = os.path.splitext(arquivo.filename or "")[1].lower()
+    if ext not in _VIDEO_EXTENSOES:
+        raise HTTPException(400, f"Formato não suportado: {ext or '(sem extensão)'}")
+    os.makedirs(_PAINEL_VIDEOS_DIR, exist_ok=True)
+    nome_seguro = os.path.basename(arquivo.filename).replace("..", "")
+    destino = os.path.join(_PAINEL_VIDEOS_DIR, nome_seguro)
+    with open(destino, "wb") as f:
+        while True:
+            pedaco = await arquivo.read(1024 * 1024)
+            if not pedaco:
+                break
+            f.write(pedaco)
+    return {"ok": True, "nome": nome_seguro}
+
+@app.delete("/api/painel-fila/videos/{nome}")
+def painel_fila_videos_remover(nome: str):
+    """Remove um vídeo da pasta pelo nome do arquivo."""
+    nome_seguro = os.path.basename(nome)
+    caminho = os.path.join(_PAINEL_VIDEOS_DIR, nome_seguro)
+    if not os.path.exists(caminho):
+        raise HTTPException(404, "Vídeo não encontrado")
+    os.remove(caminho)
+    return {"ok": True}
+
+
+@app.get("/api/painel-fila/prestadores")
+def painel_fila_prestadores():
+    """
+    Lista as 'filas' oficiais de senha cadastradas no Smart — usado no
+    seletor de configuração do painel de TV.
+    Fonte: FLE_CFG_SENHA (cadastro de filas de totem/senha), não o histórico
+    de chamadas em `fle` — o setor gravado em `fle.FLE_STR_COD` para esse
+    tipo de fila não reflete de forma confiável a recepção física (a maioria
+    fica marcada como 'RPS' independente do nome da fila), então a escolha
+    de quais filas aparecem em qual TV é sempre manual, feita no painel.
+    """
+    rows = query("""
+        SELECT
+            cfg.FLE_CFG_SENHA_PSV_COD                AS psv_cod,
+            RTRIM(psv.psv_apel)                       AS psv_apel,
+            RTRIM(ISNULL(esp.esp_nome,''))            AS especialidade
+        FROM FLE_CFG_SENHA cfg
+        JOIN psv ON psv.psv_cod = cfg.FLE_CFG_SENHA_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        ORDER BY psv_apel
+    """)
+    return rows
+
+
 @app.get("/api/painel-fila/senhas")
-def painel_fila_senhas(limite: int = 8):
+def painel_fila_senhas(limite: int = 8, setor: str = None, psv_cod: str = None):
     """
     Painel TV — Senhas chamadas pela recepção (guichês).
-    Guichê = USR_NOME do operador que chamou (FLE_USR_ATENDIMENTO ou FLE_USR_LOGIN).
-    FLE_STATUS = 'E' (totem + chamado) ou 'X' (chamado direto).
+    Guichê físico real: tabela MFL (gravada quando FILA_CEGO=N no Smart.ini),
+    campo MFL_LOC_ORIGEM_CHAMADA — join por MFL_FLE_DTHR_CHEG/STR_COD/PSV_COD
+    de volta pra fle, depois LOC pra pegar o nome ("Guichê 01"). Nem toda
+    chamada tem esse registro (ex: chamadas via totem) — nesse caso cai no
+    login de quem atendeu como alternativa.
+    setor    → filtra por recepção (RCN, RDI, ROC, RPS, RCI); vazio/inválido = todas.
+    psv_cod  → filtra pelas filas/prestadores escolhidos (lista separada por vírgula).
     """
     hoje = datetime.now().strftime("%Y-%m-%d")
+    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor in _SETORES_PAINEL_FILA else ""
+    filtro_psv = _filtro_psv_cod(psv_cod)
     rows = query(f"""
         SELECT TOP {limite}
             RTRIM(ISNULL(fle.FLE_BIP, ''))                              AS senha,
@@ -7838,39 +7590,70 @@ def painel_fila_senhas(limite: int = 8):
             RTRIM(psv.psv_nome)                                         AS psv_nome,
             RTRIM(ISNULL(esp.esp_nome,''))                              AS especialidade,
             RTRIM(fle.FLE_STR_COD)                                      AS setor,
-            CONVERT(VARCHAR(5),fle.FLE_DTHR_ATENDIMENTO,108)            AS chamado_em,
+            -- Usa o horário da rechamada (MFL) quando existe uma mais nova
+            -- que a chamada original — senão uma rechamada não atualiza a
+            -- hora exibida nem volta pro topo da lista de "mais recentes".
+            CONVERT(VARCHAR(5),COALESCE(mfl.MFL_DTHR,fle.FLE_DTHR_ATENDIMENTO),108) AS chamado_em,
             RTRIM(ISNULL(fle.fle_pac_nome,
                    RTRIM(ISNULL(pac.pac_nome,''))))                     AS pac_nome,
             fle.FLE_PREFERENCIAL                                        AS preferencial,
             DATEDIFF(minute,fle.FLE_DTHR_CHEGADA,
                      fle.FLE_DTHR_ATENDIMENTO)                          AS espera_min,
-            -- Quem chamou: FLE_USR_ATENDIMENTO (totem) ou FLE_USR_LOGIN (direto)
-            RTRIM(ISNULL(
-                ISNULL(usr_a.USR_NOME, fle.FLE_USR_ATENDIMENTO),
-                ISNULL(usr_l.USR_NOME, fle.FLE_USR_LOGIN)
-            ))                                                          AS operador_login,
+            -- Guichê físico real (MFL+LOC); cai no login de quem atendeu
+            -- quando a chamada não tem registro em MFL (ex: via totem).
+            RTRIM(mfl.MFL_LOC_ORIGEM_CHAMADA)                           AS guiche_cod,
+            RTRIM(loc.LOC_NOME)                                         AS guiche_nome,
             RTRIM(ISNULL(fle.FLE_USR_ATENDIMENTO, fle.FLE_USR_LOGIN))  AS guiche
         FROM fle
         JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
         LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
         LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
-        LEFT JOIN usr usr_a ON RTRIM(usr_a.USR_LOGIN) = RTRIM(fle.FLE_USR_ATENDIMENTO)
-        LEFT JOIN usr usr_l ON RTRIM(usr_l.USR_LOGIN) = RTRIM(fle.FLE_USR_LOGIN)
+        LEFT JOIN (
+            -- Uma mesma senha pode ter mais de uma mensagem MFL (rechamada,
+            -- reenvio pra outro guichê) — pega só a mais recente de cada uma.
+            SELECT MFL_FLE_DTHR_CHEG, MFL_FLE_STR_COD, MFL_FLE_PSV_COD, MFL_LOC_ORIGEM_CHAMADA, MFL_DTHR,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY MFL_FLE_DTHR_CHEG, MFL_FLE_STR_COD, MFL_FLE_PSV_COD
+                       ORDER BY MFL_DTHR DESC
+                   ) AS rn
+            FROM MFL
+            WHERE MFL_LOC_ORIGEM_CHAMADA IS NOT NULL
+              -- Filtra por MFL_DTHR (início da chave primária/índice
+              -- clusterizado) em vez de MFL_FLE_DTHR_CHEG — essa tabela não
+              -- tem índice útil pelas colunas de join, então filtrar pela
+              -- coluna errada forçava varrer a tabela inteira (~39s).
+              AND MFL_DTHR >= '{hoje}'
+        ) mfl
+          ON mfl.MFL_FLE_DTHR_CHEG = fle.FLE_DTHR_CHEGADA
+         AND mfl.MFL_FLE_STR_COD   = fle.FLE_STR_COD
+         AND mfl.MFL_FLE_PSV_COD   = fle.FLE_PSV_COD
+         AND mfl.rn = 1
+        LEFT JOIN LOC loc ON RTRIM(loc.LOC_COD) = RTRIM(mfl.MFL_LOC_ORIGEM_CHAMADA)
         WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
           AND fle.FLE_DTHR_ATENDIMENTO IS NOT NULL
           AND fle.FLE_BIP IS NOT NULL
           AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
-        ORDER BY fle.FLE_DTHR_ATENDIMENTO DESC
+          -- Exclui autoatendimento do totem (sem atendente humano de fato,
+          -- só o próprio totem processou) — senão aparece "chamado" no
+          -- painel assim que a senha é gerada, sem ninguém ter chamado.
+          AND NOT (fle.FLE_USR_ATENDIMENTO IS NULL AND RTRIM(fle.FLE_USR_LOGIN) = 'TOTEM')
+          {filtro_setor}
+          {filtro_psv}
+        ORDER BY COALESCE(mfl.MFL_DTHR, fle.FLE_DTHR_ATENDIMENTO) DESC
     """)
     return rows
 
 
 @app.get("/api/painel-fila/status-senhas")
-def painel_fila_status_senhas():
+def painel_fila_status_senhas(setor: str = None, psv_cod: str = None):
     """
     Status das filas de senha por prestador — lateral do painel TV.
+    setor    → filtra por recepção (RCN, RDI, ROC, RPS, RCI); vazio/inválido = todas.
+    psv_cod  → filtra pelas filas/prestadores escolhidos (lista separada por vírgula).
     """
     hoje = datetime.now().strftime("%Y-%m-%d")
+    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor in _SETORES_PAINEL_FILA else ""
+    filtro_psv = _filtro_psv_cod(psv_cod)
     rows = query(f"""
         SELECT
             fle.FLE_PSV_COD                                         AS psv_cod,
@@ -7899,6 +7682,8 @@ def painel_fila_status_senhas():
         WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
           AND fle.FLE_BIP IS NOT NULL
           AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+          {filtro_setor}
+          {filtro_psv}
         GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel),
                  RTRIM(ISNULL(esp.esp_nome,''))
         ORDER BY na_fila DESC
@@ -8849,6 +8634,14 @@ def health():
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
     
+# ── PAINEL DE SENHAS (TV das recepções) ──────────────────────────────────────
+# Serve direto da pasta onde o painel é editado — as estações só precisam
+# abrir a URL (ex: http://192.168.1.40:31000/painel-tv/painel_recepcao.html),
+# sem instalar nem copiar nada. Precisa vir ANTES do catch-all do SPA abaixo.
+_PAINEL_TV_DIR = r"C:\Users\administrator.CENSO\Desktop\painel_recepcao"
+if os.path.exists(_PAINEL_TV_DIR):
+    app.mount("/painel-tv", StaticFiles(directory=_PAINEL_TV_DIR, html=True), name="painel_tv")
+
 # ── SERVE FRONTEND — FINAL DO ARQUIVO ────────────────────────────────────────
 if os.path.exists(DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
