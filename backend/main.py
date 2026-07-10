@@ -7789,10 +7789,11 @@ def painel_fila_status_pacientes():
 @app.get("/api/debug/scheduler-status")
 def debug_scheduler_status():
     try:
-        from scheduler import _query_func, HORARIOS
+        from scheduler import _query_func, _horarios_configurados, _carregar_config_wpp
+        cfg = _carregar_config_wpp()
         return {
             "query_func_ok": _query_func is not None,
-            "horarios": [f"{h:02d}:{m:02d} ({t})" for h,m,t in HORARIOS],
+            "horarios": [f"{h:02d}:{m:02d} ({t})" for h,m,t in _horarios_configurados(cfg)],
         }
     except Exception as e:
         return {"erro": str(e)}
