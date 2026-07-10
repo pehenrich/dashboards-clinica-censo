@@ -21,6 +21,14 @@ try:
     _WPP_AVAILABLE = True
 except ImportError:
     _WPP_AVAILABLE = False
+
+# DB Diagnósticos — consulta de status/laudo (envio do pedido já é feito
+# pelo próprio Smart Pixeon, este módulo só lê o retorno via SOAP DBSync)
+try:
+    from db_diagnosticos_sender import consultar_status, buscar_laudo_pdf
+    _DB_DIAG_AVAILABLE = True
+except ImportError:
+    _DB_DIAG_AVAILABLE = False
 import pyodbc
 import os
 import re as _re
@@ -7931,6 +7939,22 @@ def publico_resultados(req: PublicoResultadosRequest, request: Request):
         "total": len(resultados),
         "resultados": resultados,
     }
+
+@app.get("/api/laboratorio/db-diagnosticos/status")
+def db_diagnosticos_status(osm_serie: int, osm_num: int):
+    """
+    Consulta o status de um pedido enviado à DB Diagnósticos (bancada externa).
+    Só leitura — o envio do pedido já é feito pelo próprio Smart Pixeon.
+    Endpoint de uso interno (staff), ainda em validação com credenciais de
+    homologação — não usar com OS de paciente real até confirmar produção.
+    """
+    if not _DB_DIAG_AVAILABLE:
+        raise HTTPException(503, "Integração DB Diagnósticos indisponível.")
+    numero = f"{osm_serie}.{osm_num}"
+    try:
+        return consultar_status(numero)
+    except Exception as e:
+        raise HTTPException(502, f"Erro ao consultar DB Diagnósticos: {e}")
 
 @app.get("/api/debug/scheduler-status")
 def debug_scheduler_status():
