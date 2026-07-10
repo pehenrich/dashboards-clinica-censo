@@ -11,7 +11,7 @@ Tabelas validadas contra dicionário oficial Pixeon:
           cnv_reg_ans, cnv_cgc, cnv_caixa_fatura
 """
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # WhatsApp / Scheduler (importação opcional — não quebra se arquivos não existem)
@@ -37,6 +37,25 @@ import os as _os_test
 print("ENV TEST:", _os_test.environ.get("OPENAI_API_KEY", "NAO")[:10])
 
 app = FastAPI(title="Dashboard Clínica", version="1.1.0")
+
+# Rate limiting simples para endpoint público de resultados (CPF + nascimento).
+# Único processo (uvicorn --workers 1) -> dict em memória é suficiente, sem Redis.
+from collections import defaultdict
+import time as _time
+
+_PUBLICO_TENTATIVAS = defaultdict(list)   # ip -> [timestamps de tentativas]
+_PUBLICO_JANELA_S   = 15 * 60             # 15 minutos
+_PUBLICO_MAX_TENT   = 8                   # no máximo 8 tentativas por IP por janela
+
+def _rate_limit_check(ip: str):
+    agora = _time.time()
+    tentativas = _PUBLICO_TENTATIVAS[ip]
+    tentativas[:] = [t for t in tentativas if agora - t < _PUBLICO_JANELA_S]
+    if len(tentativas) >= _PUBLICO_MAX_TENT:
+        raise HTTPException(429, "Muitas tentativas. Aguarde alguns minutos e tente novamente.")
+
+def _rate_limit_register(ip: str, success: bool):
+    _PUBLICO_TENTATIVAS[ip].append(_time.time())
 
 # ← ADICIONE AQUI
 app.add_middleware(
@@ -7785,6 +7804,133 @@ def painel_fila_status_pacientes():
         ORDER BY aguardando DESC
     """)
     return rows
+
+# ─── Registro Clínico (RCL) — labels usadas para exibir resultado de exame ────
+_CAMPOS_COMPARTILHADOS_3319 = {
+    "2": "Outros (antecedentes)", "3": "Queixa Principal", "4": "Exame Físico",
+    "6": "Hipótese Diagnóstica", "7": "Conduta (resumo)",
+    "10": "Antecedente: Asma", "11": "Antecedente: Coronariopatia",
+    "12": "Antecedente: Diabetes", "13": "Antecedente: Distúrbio Psiquiátrico",
+    "14": "Antecedente: Etilismo", "15": "Antecedente: Hipertensão",
+    "16": "Antecedente: Tabagismo", "17": "Antecedente: Tireopatia",
+    "18": "Antecedente: Transfusão", "19": "Antecedente: Outros",
+    "20": "CID / Diagnóstico", "29": "Exames Solicitados",
+    "30": "Medicamento Prescrito", "31": "Conduta / Planejamento",
+    "32": "Encaminhamento", "33": "Data",
+}
+CAMPO_LABELS = {
+    "CONSCLIN": {**_CAMPOS_COMPARTILHADOS_3319, "1": "Acidente de Trabalho"},
+    "CONSPED":  {**_CAMPOS_COMPARTILHADOS_3319, "1": "Peso (kg)", "26": "Estatura (cm)", "28": "PC (cm)"},
+    "CONSNUTR": dict(_CAMPOS_COMPARTILHADOS_3319),
+    "CONSORT":  dict(_CAMPOS_COMPARTILHADOS_3319),
+    "CONPSIQ":  dict(_CAMPOS_COMPARTILHADOS_3319),
+    "RETORNO":  {"1": "Evolução"},
+    "AVOFTAL": {
+        "1": "OD Longe Sem Correção", "2": "OD Longe Com Correção",
+        "3": "OE Longe Sem Correção", "4": "OE Longe Com Correção",
+        "5": "OD Perto Sem Correção", "6": "OD Perto Com Correção",
+        "7": "OE Perto Sem Correção", "8": "OE Perto Com Correção",
+        "9": "Biomicroscopia OD", "13": "Biomicroscopia OE",
+        "17": "Tonometria OD", "18": "Tonometria OE",
+        "19": "Fundoscopia OD", "23": "Fundoscopia OE",
+        "27": "Motilidade", "31": "Senso Cromático", "32": "Visão Estereoscópica",
+        "41": "Visão Noturna", "42": "Teste de Ofuscamento", "43": "Campimetria",
+        "45": "Ishihara Verde", "46": "Ishihara Vermelho", "47": "Ishihara Amarelo",
+        "33": "Conclusão", "40": "Observação",
+    },
+}
+
+def _parse_rcl_txt(txt: str):
+    """Extrai [{campo, tipo, valor}] de um RCL_TXT no formato @#modelo@campoTIPOvalor..."""
+    if not txt:
+        return []
+    padrao = _re.compile(r'^(\d+)@(\d+)([A-Za-z&%])(.*)$', _re.DOTALL)
+    resultado = []
+    for parte in txt.split("@#")[1:]:
+        m = padrao.match(parte)
+        if m:
+            _modelo, campo, tipo, valor = m.groups()
+            valor = valor.strip()
+            if valor:
+                resultado.append({"campo": campo, "tipo": tipo, "valor": valor})
+    return resultado
+
+class PublicoResultadosRequest(BaseModel):
+    cpf: str
+    nascimento: str  # "YYYY-MM-DD"
+
+@app.post("/api/publico/resultados")
+def publico_resultados(req: PublicoResultadosRequest, request: Request):
+    """
+    Portal do paciente (sem login de funcionário): identifica pelo CPF + data
+    de nascimento e retorna os exames INTERNOS (feitos na própria clínica,
+    tabela RCL) já liberados. Exames terceirizados (DB Diagnósticos) ficam de
+    fora até a integração externa (BarramentoDB) estar ativa.
+    """
+    ip = request.client.host if request.client else "unknown"
+    _rate_limit_check(ip)
+
+    cpf_digits = _re.sub(r"\D", "", req.cpf or "")
+    if len(cpf_digits) != 11 or not req.nascimento:
+        _rate_limit_register(ip, success=False)
+        raise HTTPException(400, "Informe CPF e data de nascimento válidos.")
+
+    rows = query("""
+        SELECT TOP 1 pac_reg AS pac_reg, RTRIM(pac_nome) AS nome
+        FROM pac
+        WHERE REPLACE(REPLACE(ISNULL(PAC_NUMCPF,''),'.',''),'-','') = ?
+          AND CONVERT(varchar, PAC_NASC, 23) = ?
+    """, (cpf_digits, req.nascimento))
+
+    if not rows:
+        _rate_limit_register(ip, success=False)
+        # Mensagem genérica — não revela se o CPF existe ou só a data está errada.
+        raise HTTPException(404, "CPF ou data de nascimento não conferem.")
+
+    _rate_limit_register(ip, success=True)
+    paciente = rows[0]
+
+    # Só exames de LABORATÓRIO (código presente na tabela SBN, que vincula
+    # exame -> bancada) — exclui consultas clínicas (CONSCLIN/CONSPED/
+    # AVOFTAL/RETORNO) e documentos ocupacionais (ASO/ECG/EXAMED), que também
+    # ficam na RCL mas não são "resultado de exame".
+    rcl_rows = query("""
+        SELECT TOP 50
+            RTRIM(RCL.RCL_COD)       AS codigo,
+            RTRIM(ISNULL(smk.SMK_NOME, RCL.RCL_COD)) AS servico,
+            RCL.RCL_DTHR             AS data,
+            RTRIM(ISNULL(psv.psv_apel,'')) AS medico,
+            RTRIM(ISNULL(RCL.RCL_VLR_RESULT,'')) AS valor,
+            CAST(RCL.RCL_TXT AS VARCHAR(MAX)) AS txt
+        FROM RCL
+        JOIN (SELECT DISTINCT RTRIM(SBN_SMK_COD) AS cod FROM SBN) lab
+            ON lab.cod = RTRIM(RCL.RCL_COD)
+        LEFT JOIN SMK smk ON RTRIM(smk.SMK_COD) = RTRIM(RCL.RCL_COD)
+        LEFT JOIN psv ON psv.psv_cod = RCL.RCL_MED
+        WHERE RCL.RCL_PAC = ? AND RCL.RCL_STAT = 'L'
+        ORDER BY RCL.RCL_DTHR DESC
+    """, (paciente["pac_reg"],))
+
+    resultados = []
+    for r in rcl_rows:
+        codigo = (r["codigo"] or "").strip()
+        labels = CAMPO_LABELS.get(codigo, {})
+        campos = [
+            {"rotulo": labels.get(c["campo"], f'Campo {c["campo"]}'), "valor": c["valor"]}
+            for c in _parse_rcl_txt(r["txt"])
+        ]
+        valor = (r["valor"] or "").strip()
+        if campos or valor:
+            resultados.append({
+                "servico": r["servico"], "data": r["data"], "medico": r["medico"],
+                "valor": valor, "campos": campos,
+            })
+
+    return {
+        "nome": paciente["nome"].split()[0],
+        "total": len(resultados),
+        "resultados": resultados,
+    }
 
 @app.get("/api/debug/scheduler-status")
 def debug_scheduler_status():

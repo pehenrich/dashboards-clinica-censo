@@ -6,6 +6,7 @@ import PacientesDB from "./PacientesDB";
 import ModuloContratos from "./ModuloContratos";
 import Recepcao from "./Recepcao";
 import Login, { AuthProvider, useAuth, AdminPermissoes } from "./Login";
+import MeusResultados from "./MeusResultados";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   ComposedChart, Area, ReferenceLine,
@@ -6835,6 +6836,9 @@ function AppWithLogin() {
   return <AppInner />;
 }
 export default function App() {
+  if (window.location.pathname.startsWith("/resultados")) {
+    return <MeusResultados />;
+  }
   return <AuthProvider><AppWithLogin /></AuthProvider>;
 }
 
