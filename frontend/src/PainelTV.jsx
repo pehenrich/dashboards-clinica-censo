@@ -54,6 +54,14 @@ function ColunaRecepcaoTV({ cod, nome, cor }) {
     setEditando(false);
   };
 
+  const remover = async () => {
+    try {
+      await fetch(`${API}/api/metas/painel_recepcao_${cod}`, { method: "DELETE" });
+    } catch {}
+    setMeta(null);
+    setEditando(false);
+  };
+
   const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
   const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
 
@@ -86,12 +94,16 @@ function ColunaRecepcaoTV({ cod, nome, cor }) {
             <input type="number" value={tmp} onChange={e=>setTmp(e.target.value)} autoFocus
               style={{ flex:1, padding:"5px 8px", borderRadius:6, border:"none", fontSize:12, minWidth:0 }}/>
             <button onClick={salvar} style={{ background:cor, color:"#fff", border:"none", borderRadius:6, padding:"5px 10px", fontWeight:700, fontSize:11, cursor:"pointer" }}>OK</button>
+            <button onClick={remover} title="Remover meta" style={{ background:"transparent", color:"#EF4444", border:"1px solid #EF4444", borderRadius:6, padding:"5px 8px", fontWeight:700, fontSize:11, cursor:"pointer" }}>✕</button>
           </div>
         ) : (
           <>
             <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5, fontSize:11, color:"#CBD5E1", fontWeight:700 }}>
               <span>{pct.toFixed(0)}% da meta</span>
-              <span onClick={()=>{setTmp(meta); setEditando(true);}} style={{ cursor:"pointer", color:"#94A3B8" }} title="Editar meta">⚙</span>
+              <span style={{ display:"flex", gap:8 }}>
+                <span onClick={()=>{setTmp(meta); setEditando(true);}} style={{ cursor:"pointer", color:"#94A3B8" }} title="Editar meta">⚙</span>
+                <span onClick={remover} style={{ cursor:"pointer", color:"#EF4444" }} title="Remover meta">✕</span>
+              </span>
             </div>
             <div style={{ height:8, background:"#0F172A", borderRadius:4, overflow:"hidden" }}>
               <div style={{ height:"100%", width:`${pct}%`, background:corBarra, borderRadius:4, transition:"width 1s" }}/>
@@ -169,6 +181,10 @@ function PainelTV() {
   );
   const { data: linha,   loading: lL } = usePainelFetch("/api/painel/linha-tempo");
   const { data: evolucao             } = usePainelFetch("/api/painel/evolucao-hora");
+  const { data: statusSenhas, loading: lSS } = usePainelFetch(
+    `/api/painel-fila/status-senhas${setor ? `?setor=${setor}` : ""}`
+  );
+  const senhasAguardando = (statusSenhas || []).reduce((s, r) => s + (r.na_fila || 0), 0);
   const { data: setoresList           } = usePainelFetch("/api/painel/setores");
   const [agora, setAgora] = useState(new Date());
 
@@ -184,51 +200,89 @@ function PainelTV() {
     return () => document.removeEventListener("fullscreenchange", handler);
   }, []);
 
-  // Som e animação quando meta é atingida
+  // Som e animação quando meta é atingida — um riff techno diferente a cada
+  // 10% da meta, ficando mais rápido/denso conforme se aproxima (e além) de 100%.
   const [metaAtingida,    setMetaAtingida]    = useState(false);
   const [celebrando,      setCelebrando]      = useState(false);
+  const [maiorMarcoSom,   setMaiorMarcoSom]   = useState(0);
   const metaAtingidaRef = { current: false };
 
-  const tocarSomMeta = () => {
+  const TECHNO_ESCALA = [220.00, 246.94, 261.63, 293.66, 329.63, 349.23, 392.00, 440.00]; // A3 até A4 (menor)
+
+  const tocarKick = (ctx, t) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(150, t);
+    osc.frequency.exponentialRampToValueAtTime(40, t + 0.08);
+    gain.gain.setValueAtTime(0.5, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    osc.start(t);
+    osc.stop(t + 0.16);
+  };
+
+  const tocarNota = (ctx, t, freq, dur, wave = "sawtooth", vol = 0.22) => {
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = wave;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(vol, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.start(t);
+    osc.stop(t + dur + 0.02);
+  };
+
+  // marco: 10, 20, ..., 90 tocam o riff sintetizado (escalando); 100%+ toca
+  // o áudio real da comemoração ("Eu vou tomar um tacacá" — Joelma).
+  const tocarSomMarco = (marco) => {
+    if (marco >= 100) {
+      try {
+        const audio = new Audio("/som_meta_batida.mp3");
+        audio.volume = 1.0;
+        audio.play().catch(e => console.warn("Não foi possível tocar o áudio:", e));
+      } catch(e) { console.warn("Audio não suportado:", e); }
+      return;
+    }
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      // Fanfarra simples: sequência de notas
-      const notas = [
-        { freq:523, t:0,    dur:0.15 },  // C5
-        { freq:659, t:0.15, dur:0.15 },  // E5
-        { freq:784, t:0.30, dur:0.15 },  // G5
-        { freq:1047,t:0.45, dur:0.35 },  // C6
-        { freq:784, t:0.80, dur:0.15 },  // G5
-        { freq:1047,t:0.95, dur:0.50 },  // C6
-      ];
-      notas.forEach(({ freq, t, dur }) => {
-        const osc  = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.frequency.value = freq;
-        osc.type = "sine";
-        gain.gain.setValueAtTime(0, ctx.currentTime + t);
-        gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + t + 0.01);
-        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + t + dur);
-        osc.start(ctx.currentTime + t);
-        osc.stop(ctx.currentTime + t + dur + 0.05);
-      });
+      const nivel = marco / 10;                               // 1..9
+      const bpm = 90 + nivel * 8;                             // acelera a cada marco
+      const stepDur = 60 / bpm / 2;                            // colcheias
+      const numNotas = Math.min(4 + nivel, 16);
+      const comKick = marco >= 60;
+
+      for (let i = 0; i < numNotas; i++) {
+        const t = ctx.currentTime + i * stepDur;
+        const freq = TECHNO_ESCALA[i % TECHNO_ESCALA.length];
+        tocarNota(ctx, t, freq, stepDur * 0.9, "sawtooth", 0.22);
+        if (comKick && i % 4 === 0) tocarKick(ctx, t);
+      }
     } catch(e) { console.warn("Audio não suportado:", e); }
   };
 
-  // Detecta quando meta é atingida pela primeira vez
+  // Detecta cada novo marco de 10% da meta atingido
   useEffect(() => {
     const pct = resumo?.pct_meta || 0;
-    if (pct >= 100 && !metaAtingida) {
-      setMetaAtingida(true);
-      setCelebrando(true);
-      tocarSomMeta();
-      setTimeout(() => setCelebrando(false), 5000);
+    const marcoAtual = Math.floor(pct / 10) * 10;
+
+    if (marcoAtual > maiorMarcoSom && marcoAtual >= 10) {
+      setMaiorMarcoSom(marcoAtual);
+      tocarSomMarco(marcoAtual);
+      if (marcoAtual >= 100 && !metaAtingida) {
+        setMetaAtingida(true);
+        setCelebrando(true);
+        setTimeout(() => setCelebrando(false), 5000);
+      }
     }
-    // Reset se meta cair abaixo (ex: troca de dia)
-    if (pct < 95 && metaAtingida) {
-      setMetaAtingida(false);
+    // Reset se cair bem abaixo do último marco (ex: troca de dia)
+    if (marcoAtual < maiorMarcoSom - 10) {
+      setMaiorMarcoSom(marcoAtual);
+      if (metaAtingida) setMetaAtingida(false);
     }
   }, [resumo?.pct_meta]);
 
@@ -355,6 +409,48 @@ function PainelTV() {
         </div>
       </div>
 
+      {/* ── META DO DIA ── */}
+      <div style={{ background: celebrando ? "#064E3B" : "#1E293B",
+        borderRadius:14, padding:"18px 22px", marginBottom:16,
+        transition:"background 1s",
+        boxShadow: celebrando ? "0 0 40px rgba(16,185,129,0.6)" : "none",
+        animation: celebrando ? "celebrar 0.5s ease-in-out infinite alternate" : "none",
+      }}>
+      {celebrando && (
+        <div style={{ textAlign:"center", fontSize:28, letterSpacing:4,
+          marginBottom:10, animation:"fadeInDown 0.5s ease" }}>
+          🎉 🏆 META ATINGIDA! 🏆 🎉
+        </div>
+      )}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+          <div>
+            <div style={{ fontSize:14, color:"#94A3B8", fontWeight:600, marginBottom:2 }}>META DO DIA</div>
+            <div style={{ display:"flex", alignItems:"baseline", gap:10 }}>
+              <span style={{ fontSize:32, fontWeight:900, color:corMeta }}>{brl(resumo?.faturamento)}</span>
+              <span style={{ fontSize:16, color:"#64748B" }}>de {brl(metaDiaria)}</span>
+            </div>
+          </div>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ fontSize:44, fontWeight:900, color:corMeta, lineHeight:1 }}>{pctMeta.toFixed(1)}%</div>
+            {pctMeta < 100 && <div style={{ fontSize:13, color:"#94A3B8", marginTop:4 }}>faltam {brl(resumo?.falta_meta)}</div>}
+            {pctMeta >= 100 && <div style={{ fontSize:14, color:"#10B981", fontWeight:700, marginTop:4 }}>✓ META ATINGIDA!</div>}
+          </div>
+        </div>
+        <div style={{ height:16, marginTop:20, background:"#0F172A", borderRadius:8, overflow:"hidden" }}>
+          <div style={{ height:"100%", borderRadius:8, transition:"width 1s ease",
+            width:`${Math.min(100,pctMeta)}%`,
+            background: pctMeta>=100 ? "#10B981" : pctMeta>=75 ? "#3B7EF5" : pctMeta>=50 ? "#F59E0B" : "#EF4444",
+            boxShadow:`0 0 12px ${corMeta}80`,
+          }}/>
+        </div>
+        {/* Marcadores */}
+        <div style={{ display:"flex", justifyContent:"space-between", marginTop:6 }}>
+          {[0,25,50,75,100].map(p => (
+            <span key={p} style={{ fontSize:10, color:"#475569", fontWeight:600 }}>{p}%</span>
+          ))}
+        </div>
+      </div>
+
       {/* ── KPIs LINHA 1 ── */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)", gap:12, marginBottom:12 }}>
         {[
@@ -390,7 +486,7 @@ function PainelTV() {
 
       {/* ── TEMPO DE ESPERA ── destaque */}
       {resumo && (
-        <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr 1fr", gap:12, marginBottom:16 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr", gap:12, marginBottom:16 }}>
           {/* Card principal espera */}
           <div style={{ background:"#1E293B", borderRadius:12, padding:"16px 20px",
             borderLeft:"4px solid #F59E0B", display:"flex", alignItems:"center", gap:16 }}>
@@ -433,12 +529,15 @@ function PainelTV() {
             { label:"> 30min de Espera",val: resumo.espera_acima_30 > 0 ? num(resumo.espera_acima_30) : "0",
               color: resumo.espera_acima_30 > 0 ? "#EF4444" : "#10B981",
               sub: `de ${num(resumo.espera_total)} agendados` },
+            { label:"Senhas Aguardando", val: num(senhasAguardando),
+              color: senhasAguardando > 10 ? "#EF4444" : senhasAguardando > 0 ? "#F59E0B" : "#10B981",
+              sub: "na recepção", loadingOverride: lSS },
           ].map((k,i) => (
             <div key={i} style={{ background:"#1E293B", borderRadius:12, padding:"14px 16px",
               borderTop:`3px solid ${k.color}` }}>
               <div style={{ fontSize:10, color:"#64748B", fontWeight:700, textTransform:"uppercase",
                 letterSpacing:"0.07em", marginBottom:4 }}>{k.label}</div>
-              {lR
+              {(k.loadingOverride ?? lR)
                 ? <div style={{ height:28, width:"60%", background:"#334155", borderRadius:6, animation:"pulse 1.5s infinite" }}/>
                 : <div style={{ fontSize:24, fontWeight:900, color:k.color, lineHeight:1 }}>{k.val}</div>
               }
@@ -448,49 +547,6 @@ function PainelTV() {
         </div>
       )}
 
-
-      {/* ── META DO DIA ── */}
-      <div style={{ background: celebrando ? "#064E3B" : "#1E293B",
-        borderRadius:14, padding:"18px 22px", marginBottom:16,
-        transition:"background 1s",
-        boxShadow: celebrando ? "0 0 40px rgba(16,185,129,0.6)" : "none",
-        animation: celebrando ? "celebrar 0.5s ease-in-out infinite alternate" : "none",
-      }}>
-      {celebrando && (
-        <div style={{ textAlign:"center", fontSize:28, letterSpacing:4,
-          marginBottom:10, animation:"fadeInDown 0.5s ease" }}>
-          🎉 🏆 META ATINGIDA! 🏆 🎉
-        </div>
-      )}
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-          <div>
-            <div style={{ fontSize:14, color:"#94A3B8", fontWeight:600, marginBottom:2 }}>META DO DIA</div>
-            <div style={{ display:"flex", alignItems:"baseline", gap:10 }}>
-              <span style={{ fontSize:32, fontWeight:900, color:corMeta }}>{brl(resumo?.faturamento)}</span>
-              <span style={{ fontSize:16, color:"#64748B" }}>de {brl(metaDiaria)}</span>
-            </div>
-          </div>
-          <div style={{ textAlign:"right" }}>
-            <div style={{ fontSize:44, fontWeight:900, color:corMeta, lineHeight:1 }}>{pctMeta.toFixed(1)}%</div>
-            {pctMeta < 100 && <div style={{ fontSize:13, color:"#94A3B8", marginTop:4 }}>faltam {brl(resumo?.falta_meta)}</div>}
-            {pctMeta >= 100 && <div style={{ fontSize:14, color:"#10B981", fontWeight:700, marginTop:4 }}>✓ META ATINGIDA!</div>}
-          </div>
-        </div>
-        {/* Barra de progresso */}
-        <div style={{ height:16, background:"#0F172A", borderRadius:8, overflow:"hidden" }}>
-          <div style={{ height:"100%", borderRadius:8, transition:"width 1s ease",
-            width:`${Math.min(100,pctMeta)}%`,
-            background: pctMeta>=100 ? "#10B981" : pctMeta>=75 ? "#3B7EF5" : pctMeta>=50 ? "#F59E0B" : "#EF4444",
-            boxShadow:`0 0 12px ${corMeta}80`,
-          }}/>
-        </div>
-        {/* Marcadores */}
-        <div style={{ display:"flex", justifyContent:"space-between", marginTop:6 }}>
-          {[0,25,50,75,100].map(p => (
-            <span key={p} style={{ fontSize:10, color:"#475569", fontWeight:600 }}>{p}%</span>
-          ))}
-        </div>
-      </div>
 
       {/* ── LINHA 3: Evolução por hora + Médicos ── */}
       <div style={{ display:"grid", gridTemplateColumns:"2fr 3fr", gap:14, marginBottom:16 }}>

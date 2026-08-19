@@ -17,9 +17,16 @@ test.py
 backend/whatsapp_config.json
 backend/.env
 backend/ssl/
+backend/email_browser_profile/
 frontend/.env.production
 frontend/cloudflared
 cloudflared.exe
+
+# Bancos locais por módulo (dados de cada instalação, não fazem parte do código)
+backend/*.db
+
+# Screenshots de teste/depuração
+backend/test_*.png
 
 # Node
 node_modules/

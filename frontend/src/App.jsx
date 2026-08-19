@@ -3,17 +3,24 @@ const MobileCtx = createContext(false);
 const useMobile = () => useContext(MobileCtx);
 import PainelTV from "./PainelTV";
 import PacientesDB from "./PacientesDB";
+import Gestao from "./Gestao";
+import ResultadosFinanceiros from "./ResultadosFinanceiros";
 import ModuloContratos from "./ModuloContratos";
 import Recepcao from "./Recepcao";
 import Login, { AuthProvider, useAuth, AdminPermissoes } from "./Login";
 import MeusResultados from "./MeusResultados";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
-  ComposedChart, Area, ReferenceLine,
+  ComposedChart, AreaChart, Area, ReferenceLine,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from "recharts";
 import Home from "./Home";
 import BriefingCard from "./BriefingCard";
+import GraficoProducaoRecepcao from "./GraficoProducaoRecepcao";
+import Atendimento from "./Atendimento";
+import Faturamento from "./Faturamento";
+import AssistenteAgenda from "./AssistenteAgenda";
+import AlertaImportante from "./AlertaImportante";
 
 const BACKEND_TUNNEL = "https://breaking-sarah-gmc-drum.trycloudflare.com";
 const API = `${window.location.protocol}//${window.location.host}`;
@@ -188,7 +195,7 @@ function ModuleHero({ title, subtitle, cor, stats, loading }) {
           <div style={{ display:"grid", gridTemplateColumns:`repeat(auto-fit,minmax(${mobile?100:130}px,1fr))`, gap: mobile?10:16 }}>
             {stats.map((s,i) => (
               <div key={i} style={{ background:"rgba(255,255,255,0.15)", borderRadius:12, padding: mobile?"10px 12px":"12px 16px", backdropFilter:"blur(4px)", minWidth:0 }}>
-                <div style={{ fontSize:10, color:"rgba(255,255,255,0.8)", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.label}</div>
+                <div style={{ fontSize:10, color:"rgba(255,255,255,0.8)", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4, whiteSpace: mobile?"normal":"nowrap", overflow: mobile?"visible":"hidden", textOverflow: mobile?"clip":"ellipsis", lineHeight:1.25 }}>{s.label}</div>
                 <div style={{ fontSize:fitFontSize(s.value,22,13), fontWeight:900, color:"#fff", lineHeight:1.15, overflowWrap:"anywhere" }}>
                   {loading ? <span style={{ opacity:0.4 }}>—</span> : s.value}
                 </div>
@@ -966,16 +973,309 @@ function GraficoProducaoAnual() {
 
 // ── PRODUÇÃO MENSAL ───────────────────────────────────────────────────────────
 
+const CORES_RECEPCAO = { RDI: "#0891B2", ROC: "#D97706", RCN: "#8B1A1A", RCI: "#7C3AED" };
+
+function PainelPrevisaoHora() {
+  const { data, loading } = useFetch("/api/financeiro/previsao-hora", {}, 60000); // atualiza a cada 60s
+
+  const brl0 = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
+  const horaAgora = new Date().getHours();
+
+  const chartData = (data?.horas || []).map(h => ({
+    hora: `${String(h.hora).padStart(2,"0")}h`,
+    ...h.por_recepcao,
+    _futura: h.hora > horaAgora,
+  }));
+
+  return (
+    <Card
+      title="⏱️ Previsão de Faturamento por Hora — Hoje"
+      subtitle={`Já faturado + agendado ainda não executado · atualizado ${data?.atualizado_em?.slice(11) || "—"}`}
+      accent="#0891B2"
+      style={{ marginBottom:16 }}
+    >
+      {loading && !data ? <Skeleton h={260}/> : (
+        <>
+          <div style={{ display:"flex", gap:14, marginBottom:14, flexWrap:"wrap" }}>
+            <div style={{ fontSize:12.5, color:"#64748B" }}>
+              Já faturado hoje: <b style={{ color:"#10B981" }}>{brl0(data?.total_dia_real)}</b>
+            </div>
+            <div style={{ fontSize:12.5, color:"#64748B" }}>
+              Previsão do dia (com agendado): <b style={{ color:"#0891B2" }}>{brl0(data?.total_dia_previsto)}</b>
+            </div>
+          </div>
+
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={chartData} margin={{ top:4, right:8, left:0, bottom:4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
+              <XAxis dataKey="hora" tick={{ fontSize:10, fill:"#94A3B8" }}/>
+              <YAxis tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={v=>brlk(v)}/>
+              <Tooltip formatter={(v,nome)=>[brl(v), (data?.recepcoes||[]).find(r=>r.cod===nome)?.nome?.replace(/^Recepç[aã]o /i,"") || nome]}
+                labelFormatter={l=>`Horário ${l}`} contentStyle={{ fontSize:12, borderRadius:8 }}/>
+              <Legend formatter={(nome)=>(data?.recepcoes||[]).find(r=>r.cod===nome)?.nome?.replace(/^Recepç[aã]o /i,"") || nome} wrapperStyle={{ fontSize:11.5 }}/>
+              {Object.keys(CORES_RECEPCAO).map(cod => (
+                <Bar key={cod} dataKey={cod} stackId="a" fill={CORES_RECEPCAO[cod]}>
+                  {chartData.map((d, i) => (
+                    <Cell key={i} fillOpacity={d._futura ? 0.45 : 1}/>
+                  ))}
+                </Bar>
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+          <div style={{ fontSize:10.5, color:"#94A3B8", marginTop:6 }}>
+            {data?.aviso || "Horas até agora mostram valor real faturado; horas futuras em Consultórios projetam o agendado ainda não executado."}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function PainelProducaoAcumulada({ metaMensal, onVoltar }) {
+  const hoje = new Date();
+  const [anoInicio, setAnoInicio] = useState(hoje.getFullYear());
+  const [mesInicio, setMesInicio] = useState(1);
+  const [anoFim,    setAnoFim]    = useState(hoje.getFullYear());
+  const [mesFim,    setMesFim]    = useState(hoje.getMonth() + 1);
+
+  const { data, loading } = useFetch("/api/financeiro/producao-acumulada", {
+    ano_inicio: anoInicio, mes_inicio: mesInicio, ano_fim: anoFim, mes_fim: mesFim,
+    meta_mensal_fixa: metaMensal,
+  });
+
+  const fmt = (v) => v != null
+    ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2}).format(v) : "—";
+  const fmtCompacto = (v) => v != null
+    ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",notation:"compact",maximumFractionDigits:1}).format(v) : "—";
+
+  const anosDisponiveis = [hoje.getFullYear()-2, hoje.getFullYear()-1, hoje.getFullYear()];
+
+  const desdeJaneiro = () => { setAnoInicio(hoje.getFullYear()); setMesInicio(1); setAnoFim(hoje.getFullYear()); setMesFim(hoje.getMonth()+1); };
+  const ultimos12 = () => {
+    const d = new Date(hoje.getFullYear(), hoje.getMonth() - 11, 1);
+    setAnoInicio(d.getFullYear()); setMesInicio(d.getMonth()+1);
+    setAnoFim(hoje.getFullYear()); setMesFim(hoje.getMonth()+1);
+  };
+
+  const pctMeta = data && data.meta_periodo ? Math.min(100, (data.total_geral / data.meta_periodo) * 100) : 0;
+
+  const seletorEstilo = {
+    padding:"7px 12px", borderRadius:8, border:`1px solid ${C.border}`,
+    background:"#fff", color:C.text, fontSize:13, fontWeight:600, cursor:"pointer", outline:"none",
+  };
+
+  return (
+    <div style={{ position:"relative", animation:"fadeIn 0.35s ease" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:20, flexWrap:"wrap" }}>
+        <button onClick={onVoltar} style={{
+          padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`,
+          background:"#fff", color:C.text, fontSize:12.5, fontWeight:700, cursor:"pointer",
+        }}>◀ Calendário</button>
+
+        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <span style={{ fontSize:12, color:C.sub, fontWeight:600 }}>De</span>
+          <select value={mesInicio} onChange={e=>setMesInicio(Number(e.target.value))} style={seletorEstilo}>
+            {MESES_PT.map((m,i) => <option key={i+1} value={i+1}>{m}</option>)}
+          </select>
+          <select value={anoInicio} onChange={e=>setAnoInicio(Number(e.target.value))} style={seletorEstilo}>
+            {anosDisponiveis.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <span style={{ fontSize:12, color:C.sub, fontWeight:600 }}>até</span>
+          <select value={mesFim} onChange={e=>setMesFim(Number(e.target.value))} style={seletorEstilo}>
+            {MESES_PT.map((m,i) => <option key={i+1} value={i+1}>{m}</option>)}
+          </select>
+          <select value={anoFim} onChange={e=>setAnoFim(Number(e.target.value))} style={seletorEstilo}>
+            {anosDisponiveis.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+
+        <button onClick={desdeJaneiro} style={{
+          padding:"7px 14px", borderRadius:20, border:`1px solid ${C.border}`,
+          background:"#F8FAFC", color:C.text, fontSize:12, fontWeight:700, cursor:"pointer",
+        }}>Desde Janeiro</button>
+        <button onClick={ultimos12} style={{
+          padding:"7px 14px", borderRadius:20, border:`1px solid ${C.border}`,
+          background:"#F8FAFC", color:C.text, fontSize:12, fontWeight:700, cursor:"pointer",
+        }}>Últimos 12 meses</button>
+      </div>
+
+      {loading || !data ? (
+        <div style={{ padding:40, textAlign:"center", color:C.faint, fontSize:13 }}>Carregando...</div>
+      ) : (
+        <>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:12, marginBottom:20 }}>
+            {[
+              { label:"Total Acumulado", val:data.total_geral, color:"#10B981" },
+              { label:"Meta do Período", val:data.meta_periodo, color:"#0891B2" },
+              { label:"% da Meta", val:null, custom:`${pctMeta.toFixed(1)}%`, color: pctMeta>=100?"#10B981":pctMeta>=60?"#0891B2":"#F59E0B" },
+              { label:"Média Mensal", val:data.media_mensal, color:"#8B5CF6" },
+              { label:"Média Diária", val:data.media_diaria, color:"#F59E0B" },
+            ].map((k,i) => (
+              <div key={i} style={{ background:"#fff", borderRadius:14, padding:"14px 18px", boxShadow:"0 1px 4px rgba(0,0,0,.07)", borderLeft:`4px solid ${k.color}` }}>
+                <div style={{ fontSize:11, fontWeight:800, color:"#9CA3AF", textTransform:"uppercase", letterSpacing:".04em" }}>{k.label}</div>
+                <div style={{ fontSize:18, fontWeight:900, color:"#111827", marginTop:4 }}>{k.custom || fmt(k.val)}</div>
+              </div>
+            ))}
+          </div>
+
+          <Card title="Produção Acumulada no Período" subtitle="Crescimento dia a dia">
+            <ResponsiveContainer width="100%" height={280}>
+              <AreaChart data={data.dias_acumulados}>
+                <defs>
+                  <linearGradient id="gradAcumulado" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#10B981" stopOpacity={0.35}/>
+                    <stop offset="95%" stopColor="#10B981" stopOpacity={0.02}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                <XAxis dataKey="data" tick={{ fontSize:10, fill:"#94A3B8" }}
+                  tickFormatter={(d) => d ? `${d.slice(8,10)}/${d.slice(5,7)}` : ""}
+                  interval="preserveStartEnd" minTickGap={40}/>
+                <YAxis tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={fmtCompacto} width={60}/>
+                <Tooltip formatter={(v) => fmt(v)} labelFormatter={(d) => {
+                  const dt = new Date(d + "T12:00:00");
+                  return dt.toLocaleDateString("pt-BR", { day:"2-digit", month:"long", year:"numeric" });
+                }}/>
+                {data.meta_periodo > 0 && (
+                  <ReferenceLine y={data.meta_periodo} stroke="#0891B2" strokeDasharray="5 4"
+                    label={{ value:"Meta do período", position:"insideTopRight", fontSize:10, fill:"#0891B2" }}/>
+                )}
+                <Area type="monotone" dataKey="acumulado" stroke="#10B981" strokeWidth={2.5} fill="url(#gradAcumulado)"/>
+              </AreaChart>
+            </ResponsiveContainer>
+          </Card>
+
+          <div style={{ marginTop:16 }}>
+            <Card title="Produção por Mês" subtitle="Comparativo dentro do período selecionado">
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart data={data.por_mes}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                  <XAxis dataKey="label" tick={{ fontSize:11, fill:"#64748B" }}/>
+                  <YAxis tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={fmtCompacto} width={60}/>
+                  <Tooltip formatter={(v) => fmt(v)}/>
+                  <Bar dataKey="total" radius={[6,6,0,0]}>
+                    {data.por_mes.map((m,i) => (
+                      <Cell key={i} fill={m.total >= metaMensal ? "#10B981" : m.total >= metaMensal*0.8 ? "#F59E0B" : "#F43F5E"}/>
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PainelPrevisaoAnual({ onVoltar }) {
+  const hoje = new Date();
+  const [ano, setAno] = useState(hoje.getFullYear());
+  const { data, loading } = useFetch("/api/financeiro/previsao-anual", { ano });
+
+  const fmt = (v) => v != null
+    ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",minimumFractionDigits:2}).format(v) : "—";
+  const fmtCompacto = (v) => v != null
+    ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",notation:"compact",maximumFractionDigits:1}).format(v) : "—";
+
+  const anosDisponiveis = [hoje.getFullYear()-1, hoje.getFullYear()];
+
+  const CORES_TIPO = { produzido: "#10B981", parcial: "#0891B2", previsto: "#F59E0B" };
+
+  return (
+    <div style={{ position:"relative", animation:"fadeIn 0.35s ease" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:20, flexWrap:"wrap" }}>
+        <button onClick={onVoltar} style={{
+          padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`,
+          background:"#fff", color:C.text, fontSize:12.5, fontWeight:700, cursor:"pointer",
+        }}>◀ Calendário</button>
+        <select value={ano} onChange={e=>setAno(Number(e.target.value))} style={{
+          padding:"7px 12px", borderRadius:8, border:`1px solid ${C.border}`,
+          background:"#fff", color:C.text, fontSize:13, fontWeight:600, cursor:"pointer", outline:"none",
+        }}>
+          {anosDisponiveis.map(a => <option key={a} value={a}>{a}</option>)}
+        </select>
+        <div style={{ fontSize:12, color:C.sub, marginLeft:4 }}>
+          Previsão baseada no padrão sazonal dos últimos {data?.anos_historico_usados || 4} anos — meses com histórico de alta (ex: out/nov) projetam mais, meses de baixa (ex: dez) projetam menos.
+        </div>
+      </div>
+
+      {loading || !data ? (
+        <div style={{ padding:40, textAlign:"center", color:C.faint, fontSize:13 }}>Carregando...</div>
+      ) : (
+        <>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:12, marginBottom:20 }}>
+            {[
+              { label:"Já Produzido no Ano", val:data.total_ja_produzido, color:"#10B981" },
+              { label:"Previsão — Restante do Ano", val:data.total_previsto_restante, color:"#F59E0B" },
+              { label:"Total Projetado do Ano", val:data.total_projetado_ano, color:"#0891B2" },
+            ].map((k,i) => (
+              <div key={i} style={{ background:"#fff", borderRadius:14, padding:"14px 18px", boxShadow:"0 1px 4px rgba(0,0,0,.07)", borderLeft:`4px solid ${k.color}` }}>
+                <div style={{ fontSize:11, fontWeight:800, color:"#9CA3AF", textTransform:"uppercase", letterSpacing:".04em" }}>{k.label}</div>
+                <div style={{ fontSize:18, fontWeight:900, color:"#111827", marginTop:4 }}>{fmt(k.val)}</div>
+              </div>
+            ))}
+          </div>
+
+          <Card title={`Produção ${data.ano} — Já Produzido x Previsão`} subtitle="Barras verdes = já fechado · azul = mês em andamento · laranja = previsão sazonal">
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={data.meses}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                <XAxis dataKey="label" tick={{ fontSize:11, fill:"#64748B" }}/>
+                <YAxis tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={fmtCompacto} width={60}/>
+                <Tooltip formatter={(v, n, p) => [fmt(v), p.payload.tipo === "produzido" ? "Produzido" : p.payload.tipo === "parcial" ? "Em andamento" : "Previsão"]}/>
+                <Bar dataKey="valor" radius={[6,6,0,0]}>
+                  {data.meses.map((m,i) => <Cell key={i} fill={CORES_TIPO[m.tipo]}/>)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+            <div style={{ display:"flex", gap:16, marginTop:10, flexWrap:"wrap" }}>
+              {[{ cor:"#10B981", label:"Já produzido (mês fechado)" }, { cor:"#0891B2", label:"Mês em andamento" }, { cor:"#F59E0B", label:"Previsão sazonal" }].map((l,i) => (
+                <div key={i} style={{ display:"flex", alignItems:"center", gap:5, fontSize:11.5, color:C.sub }}>
+                  <span style={{ width:10, height:10, borderRadius:3, background:l.cor, display:"inline-block" }}/>
+                  {l.label}
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <div style={{ marginTop:16 }}>
+            <Card title="Índice Sazonal por Mês" subtitle="Quanto cada mês historicamente produz acima/abaixo da média (últimos anos)">
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={data.indice_sazonal}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+                  <XAxis dataKey="label" tick={{ fontSize:11, fill:"#64748B" }}/>
+                  <YAxis tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={(v)=>`${(v*100).toFixed(0)}%`} width={50}/>
+                  <ReferenceLine y={1} stroke="#94A3B8" strokeDasharray="4 4"/>
+                  <Tooltip formatter={(v) => [`${(v*100).toFixed(1)}%`, "da média histórica"]}/>
+                  <Bar dataKey="indice" radius={[6,6,0,0]}>
+                    {data.indice_sazonal.map((m,i) => (
+                      <Cell key={i} fill={m.indice > 1.03 ? "#10B981" : m.indice < 0.97 ? "#EF4444" : "#94A3B8"}/>
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
   const hoje     = new Date();
   const hojeStr  = `${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,"0")}-${String(hoje.getDate()).padStart(2,"0")}`;
   const [ano,    setAno]    = useState(hoje.getFullYear());
   const [mes,    setMes]    = useState(hoje.getMonth() + 1);
   const [hover,  setHover]  = useState(null); // { data, x, y }
+  const [modoView, setModoView] = useState("mes"); // "mes" | "acumulado"
   const { metaDiaria, metaMensal, metaSabado, salvar } = useMetas();
   const { data, loading } = useFetch("/api/financeiro/producao-mensal", {
     ano, mes, meta_diaria: metaDiaria, meta_mensal_fixa: metaMensal, meta_sabado: metaSabado,
   });
+  const { data: recordes } = useFetch("/api/financeiro/recordes");
+  const [hoverRecorde, setHoverRecorde] = useState(null);
 
   // Sábados têm meta própria (metaSabado) — todos os outros dias usam metaDiaria.
   const ehSabado = (dataStr) => !!dataStr && new Date(dataStr + "T12:00:00").getDay() === 6;
@@ -1049,8 +1349,71 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
   const ringStroke = ringCirc * (1 - ringPct / 100);
   const ringCor = ringPct >= 100 ? "#10B981" : ringPct >= 60 ? "#0891B2" : ringPct >= 30 ? "#F59E0B" : "#EF4444";
 
+  if (modoView === "acumulado") {
+    return <PainelProducaoAcumulada metaMensal={metaMensal} onVoltar={() => setModoView("mes")} />;
+  }
+
+  if (modoView === "previsao") {
+    return <PainelPrevisaoAnual onVoltar={() => setModoView("mes")} />;
+  }
+
   return (
     <div style={{ position:"relative", animation:"fadeIn 0.35s ease" }}>
+
+      {/* Recordes históricos — melhor dia, mês e ano de todo o período */}
+      {recordes && (
+        <div style={{ display:"flex", gap:12, marginBottom:16, flexWrap:"wrap" }}>
+          {[
+            {
+              label: "🏆 Melhor dia", valor: recordes.melhor_dia?.total,
+              porRecepcao: recordes.melhor_dia?.por_recepcao,
+              sub: recordes.melhor_dia?.data
+                ? new Date(recordes.melhor_dia.data + "T12:00:00").toLocaleDateString("pt-BR", { day:"2-digit", month:"short", year:"numeric" })
+                : null,
+            },
+            {
+              label: "🏆 Melhor mês", valor: recordes.melhor_mes?.total,
+              porRecepcao: recordes.melhor_mes?.por_recepcao,
+              sub: recordes.melhor_mes ? `${MESES_PT[recordes.melhor_mes.mes - 1]} de ${recordes.melhor_mes.ano}` : null,
+            },
+            {
+              label: "🏆 Melhor ano", valor: recordes.melhor_ano?.total,
+              porRecepcao: recordes.melhor_ano?.por_recepcao,
+              sub: recordes.melhor_ano ? `${recordes.melhor_ano.ano}` : null,
+            },
+          ].map((r, i) => (
+            <div key={i}
+              onMouseEnter={() => setHoverRecorde(i)}
+              onMouseLeave={() => setHoverRecorde(h => h === i ? null : h)}
+              style={{
+                position:"relative", flex:"1 1 200px", background:"#fff", borderRadius:14, padding:"14px 18px",
+                boxShadow:"0 1px 4px rgba(0,0,0,.07)", borderLeft:"4px solid #F59E0B", cursor: r.porRecepcao ? "default" : undefined,
+              }}>
+              <div style={{ fontSize:11, fontWeight:800, color:"#9CA3AF", textTransform:"uppercase", letterSpacing:".04em" }}>{r.label}</div>
+              <div style={{ fontSize:18, fontWeight:900, color:"#111827", marginTop:4 }}>{brlFmt(r.valor)}</div>
+              {r.sub && <div style={{ fontSize:12, color:"#6B7280", marginTop:2, textTransform:"capitalize" }}>{r.sub}</div>}
+
+              {hoverRecorde === i && r.porRecepcao && Object.keys(r.porRecepcao).length > 0 && (
+                <div style={{
+                  position:"absolute", top:"100%", left:0, marginTop:6, zIndex:20,
+                  background:"#111827", color:"#fff", borderRadius:10, padding:"10px 14px",
+                  boxShadow:"0 8px 24px rgba(0,0,0,.25)", minWidth:200, fontSize:12,
+                }}>
+                  <div style={{ fontWeight:800, marginBottom:6, color:"rgba(255,255,255,.6)", fontSize:10, textTransform:"uppercase", letterSpacing:".04em" }}>
+                    Por recepção
+                  </div>
+                  {Object.entries(r.porRecepcao).map(([nome, valor]) => (
+                    <div key={nome} style={{ display:"flex", justifyContent:"space-between", gap:16, padding:"2px 0" }}>
+                      <span style={{ color:"rgba(255,255,255,.85)" }}>{nome.replace(/^Recepç[aã]o /i, "")}</span>
+                      <span style={{ fontWeight:700 }}>{brlFmt(valor)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Hero da Produção Mensal com anel de progresso */}
       <div style={{
@@ -1101,6 +1464,8 @@ function SecaoProducaoMensal({ modulo, periodoEfetivo }) {
         </div>
       </div>
 
+      <PainelPrevisaoHora />
+
       <BriefingCard
         cor="#0891B2"
         cacheKey={`briefing_producao_${ano}_${mes}`}
@@ -1146,7 +1511,14 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
             ))}
           </select>
           <PainelMetas metaDiaria={metaDiaria} metaMensal={metaMensal} metaSabado={metaSabado} onSalvar={salvar} />
-          
+          <button onClick={() => setModoView("acumulado")} style={{
+            padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`,
+            background:"#fff", color:C.text, fontSize:12.5, fontWeight:700, cursor:"pointer",
+          }}>📈 Ver Acumulado</button>
+          <button onClick={() => setModoView("previsao")} style={{
+            padding:"7px 14px", borderRadius:8, border:`1px solid ${C.border}`,
+            background:"#fff", color:C.text, fontSize:12.5, fontWeight:700, cursor:"pointer",
+          }}>🔮 Previsão do Ano</button>
         </div>
 
         {/* Legenda */}
@@ -1447,6 +1819,9 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
       {/* ── COMPARATIVO ANUAL ── */}
       <GraficoProducaoAnual/>
 
+      {/* ── PRODUÇÃO DIÁRIA POR RECEPÇÃO ── */}
+      <GraficoProducaoRecepcao/>
+
       {/* ── TABELA SEMANAL ── */}
       {data && !loading && (
         <div style={{ background:"#fff", borderRadius:14, overflow:"hidden", boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
@@ -1528,6 +1903,401 @@ Avalie se o ritmo diário está adequado em relação ao ponto do mês, não ape
         </div>
       )}
       <ProducaoProfissionais ano={ano} mes={mes} API={API} setAno={setAno} setMes={setMes} />
+    </div>
+  );
+}
+
+// ── PRODUÇÃO: abas Visão Geral / Fluxo de Caixa ─────────────────────────────────
+const ABAS_PRODUCAO = [
+  { id: "visao_geral", label: "Visão Geral",         cor: "#0891B2" },
+  { id: "fluxo_caixa",  label: "💰 Fluxo de Caixa",   cor: "#10B981" },
+];
+
+function SecaoProducaoModulo({ periodoEfetivo }) {
+  const [aba, setAba] = useState("visao_geral");
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+        {ABAS_PRODUCAO.map(a => {
+          const ativo = aba === a.id;
+          return (
+            <button key={a.id} onClick={() => setAba(a.id)} style={{
+              padding:"9px 20px", borderRadius:12, fontSize:13, fontWeight:700,
+              cursor:"pointer", border:"none", transition:"all 0.15s",
+              background: ativo ? a.cor : "#fff",
+              color: ativo ? "#fff" : "#64748B",
+              boxShadow: ativo ? `0 4px 16px ${a.cor}40` : "0 1px 3px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.05)",
+              transform: ativo ? "translateY(-1px)" : "none",
+            }}>{a.label}</button>
+          );
+        })}
+      </div>
+      <div key={aba} style={{ animation:"fadeIn 0.25s ease" }}>
+        {aba === "visao_geral" && <SecaoProducaoMensal modulo={{}} periodoEfetivo={periodoEfetivo} />}
+        {aba === "fluxo_caixa"  && <SecaoFluxoCaixa />}
+      </div>
+    </div>
+  );
+}
+
+const PERIODOS_CAIXA = [
+  { value:"7d",  label:"7 dias"   },
+  { value:"30d", label:"Mês atual" },
+  { value:"90d", label:"90 dias"  },
+];
+
+function SecaoFluxoCaixa() {
+  const [periodo, setPeriodo] = useState("30d");
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [showNovaDespesa, setShowNovaDespesa] = useState(false);
+  const { data: resumo,       loading: lResumo } = useFetch("/api/financeiro/fluxo-caixa/resumo",       { periodo, _t: refreshTick });
+  const { data: diario,       loading: lDiario } = useFetch("/api/financeiro/fluxo-caixa/diario",       { periodo, _t: refreshTick });
+  const { data: projecao,     loading: lProj   } = useFetch("/api/financeiro/fluxo-caixa/projecao",     { dias: 30, _t: refreshTick });
+  const { data: categorias,   loading: lCat    } = useFetch("/api/financeiro/fluxo-caixa/categorias",   { periodo, _t: refreshTick });
+  const { data: fornecedores, loading: lForn   } = useFetch("/api/financeiro/fluxo-caixa/fornecedores", { periodo, _t: refreshTick });
+  const { data: comparativo,  loading: lComp   } = useFetch("/api/financeiro/comparativo",              { _t: refreshTick });
+
+  const brl0 = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
+
+  return (
+    <div>
+      {/* seletor de período + nova despesa */}
+      <div style={{ display:"flex", gap:8, marginBottom:16, alignItems:"center", flexWrap:"wrap", justifyContent:"space-between" }}>
+        <div style={{ display:"flex", gap:8 }}>
+          {PERIODOS_CAIXA.map(p => (
+            <button key={p.value} onClick={() => setPeriodo(p.value)} style={{
+              padding:"6px 16px", borderRadius:20, border:`1px solid ${periodo===p.value ? "#0891B2" : "#E2E8F0"}`,
+              background: periodo===p.value ? "#0891B2" : "#fff",
+              color: periodo===p.value ? "#fff" : "#64748B",
+              fontSize:12, fontWeight:700, cursor:"pointer",
+            }}>{p.label}</button>
+          ))}
+        </div>
+        <button onClick={() => setShowNovaDespesa(true)} style={{
+          padding:"9px 18px", borderRadius:10, border:"none", cursor:"pointer",
+          background:"#EF4444", color:"#fff", fontSize:13, fontWeight:700,
+          boxShadow:"0 4px 14px #EF444440", display:"flex", alignItems:"center", gap:6,
+        }}>+ Nova Despesa</button>
+      </div>
+
+      {showNovaDespesa && (
+        <NovaDespesaModal
+          onClose={() => setShowNovaDespesa(false)}
+          onSuccess={() => { setShowNovaDespesa(false); setRefreshTick(t => t + 1); }}
+        />
+      )}
+
+      {/* KPIs */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))", gap:14, marginBottom:20 }}>
+        <ModuloCard label="Entradas" value={brl0(resumo?.entradas)} color="#10B981" loading={lResumo} icon="dollar" />
+        <ModuloCard label="Saídas"   value={brl0(resumo?.saidas)}   color="#EF4444" loading={lResumo} icon="package" />
+        <ModuloCard label="Saldo do Período" value={brl0(resumo?.saldo)}
+          color={resumo?.saldo >= 0 ? "#10B981" : "#EF4444"} loading={lResumo} icon="money-trend" />
+        <ModuloCard label="Saldo Projetado (30d)" value={brl0(resumo?.saldo_projetado_30d)}
+          color="#0891B2" loading={lResumo} icon="money-trend"
+          sub={resumo ? `A receber ${brl0(resumo.a_receber_30d)} · A pagar ${brl0(resumo.a_pagar_30d)}` : undefined} />
+      </div>
+
+      {resumo?.em_atraso_valor > 0 && (
+        <div style={{ background:"#FEF3C7", border:"1px solid #FCD34D", borderRadius:12, padding:"12px 16px", marginBottom:20, fontSize:12.5, color:"#92400E", display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:16 }}>⚠️</span>
+          {num(resumo.em_atraso_qtd)} faturas em atraso somando {brl(resumo.em_atraso_valor)} (backlog histórico de cobrança — não entra no saldo projetado)
+        </div>
+      )}
+
+      {/* gráfico diário */}
+      <Card title="Entradas x Saídas Diárias" subtitle="Saldo acumulado no período" accent="#0891B2" style={{ marginBottom:16 }}>
+        {lDiario ? <Skeleton h={260} /> : !diario?.length ? (
+          <div style={{ textAlign:"center", color:"#94A3B8", fontSize:13, padding:"40px 0" }}>Sem movimentação no período</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <ComposedChart data={diario}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false} />
+              <XAxis dataKey="data" tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={v => v?.slice(5)} />
+              <YAxis tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={v => brlk(v)} />
+              <Tooltip formatter={v => brl(v)} labelFormatter={v => `Dia ${v}`} />
+              <Legend wrapperStyle={{ fontSize:12 }} />
+              <Bar dataKey="entrada" fill="#10B981" name="Entrada" radius={[3,3,0,0]} />
+              <Bar dataKey="saida" fill="#EF4444" name="Saída" radius={[3,3,0,0]} />
+              <Line type="monotone" dataKey="saldo_acumulado" stroke="#0891B2" strokeWidth={2.5} name="Saldo Acumulado" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </Card>
+
+      {/* projeção 30 dias */}
+      <Card title="Projeção — Próximos 30 dias" subtitle="A receber x A pagar por dia (vencimentos)" accent="#F59E0B" style={{ marginBottom:16 }}>
+        {lProj ? <Skeleton h={220} /> : !projecao?.length ? (
+          <div style={{ textAlign:"center", color:"#94A3B8", fontSize:13, padding:"30px 0" }}>Sem vencimentos previstos nos próximos 30 dias</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={220}>
+            <ComposedChart data={projecao}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" vertical={false} />
+              <XAxis dataKey="data" tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={v => v?.slice(5)} />
+              <YAxis tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={v => brlk(v)} />
+              <Tooltip formatter={v => brl(v)} labelFormatter={v => `Dia ${v}`} />
+              <Legend wrapperStyle={{ fontSize:12 }} />
+              <Bar dataKey="a_receber" fill="#10B981" name="A Receber" radius={[3,3,0,0]} />
+              <Bar dataKey="a_pagar" fill="#F59E0B" name="A Pagar" radius={[3,3,0,0]} />
+              <Line type="monotone" dataKey="saldo_projetado" stroke="#0891B2" strokeWidth={2.5} name="Saldo Projetado" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </Card>
+
+      {/* categorias + fornecedores */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(340px,1fr))", gap:16, marginBottom:16 }}>
+        <Card title="Despesas por Categoria" subtitle="Plano de contas (CCT)" accent="#8B5CF6">
+          {lCat ? <Skeleton h={220} /> : !categorias?.length ? (
+            <div style={{ textAlign:"center", color:"#94A3B8", fontSize:13, padding:"30px 0" }}>Sem despesas pagas no período</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={Math.max(160, categorias.length * 34)}>
+              <BarChart data={categorias} layout="vertical" margin={{ left:10, right:20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize:10, fill:"#94A3B8" }} tickFormatter={v => brlk(v)} />
+                <YAxis type="category" dataKey="categoria" tick={{ fontSize:11, fill:"#334155" }} width={150} />
+                <Tooltip formatter={v => brl(v)} />
+                <Bar dataKey="total" fill="#8B5CF6" radius={[0,4,4,0]} name="Total" />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
+
+        <Card title="Top Fornecedores" subtitle="Maiores despesas pagas no período" accent="#EF4444">
+          {lForn ? <Skeleton h={220} /> : !fornecedores?.length ? (
+            <div style={{ textAlign:"center", color:"#94A3B8", fontSize:13, padding:"30px 0" }}>Sem despesas pagas no período</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:8, maxHeight:260, overflowY:"auto" }}>
+              {fornecedores.map((f,i) => (
+                <div key={i} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 10px", background: i%2===0 ? "#F8FAFC" : "#fff", borderRadius:8 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0 }}>
+                    <span style={{ fontSize:11, fontWeight:800, color:"#94A3B8", width:18 }}>{i+1}</span>
+                    <span style={{ fontSize:12.5, fontWeight:600, color:"#334155", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.fornecedor}</span>
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+                    <span style={{ fontSize:10.5, color:"#94A3B8" }}>{f.qtd}x</span>
+                    <span style={{ fontSize:12.5, fontWeight:800, color:"#EF4444" }}>{brl(f.total)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* comparativo mensal */}
+      <Card title="Comparativo Mensal" subtitle="Faturado x Recebido x Pago · últimos meses" accent="#0891B2">
+        {lComp ? <Skeleton h={260} /> : !comparativo?.length ? (
+          <div style={{ textAlign:"center", color:"#94A3B8", fontSize:13, padding:"30px 0" }}>Sem dados</div>
+        ) : (
+          <div style={{ overflowX:"auto" }}>
+            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5 }}>
+              <thead>
+                <tr style={{ borderBottom:"2px solid #E2E8F0" }}>
+                  <th style={{ textAlign:"left", padding:"8px 10px", color:"#64748B" }}>Mês</th>
+                  <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Faturado</th>
+                  <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Recebido (caixa)</th>
+                  <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Em Aberto</th>
+                  <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Pago (despesas)</th>
+                  <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Saldo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {comparativo.map((r,i) => {
+                  const saldoMes = (r.recebido_caixa||0) - (r.pago_despesas||0);
+                  return (
+                    <tr key={i} style={{ borderBottom:"1px solid #F1F5F9" }}>
+                      <td style={{ padding:"8px 10px", fontWeight:700, color:"#334155" }}>{r.mes}</td>
+                      <td style={{ padding:"8px 10px", textAlign:"right", color:"#334155" }}>{brl(r.faturado)}</td>
+                      <td style={{ padding:"8px 10px", textAlign:"right", color:"#10B981", fontWeight:700 }}>{brl(r.recebido_caixa)}</td>
+                      <td style={{ padding:"8px 10px", textAlign:"right", color:"#F59E0B" }}>{brl(r.em_aberto)}</td>
+                      <td style={{ padding:"8px 10px", textAlign:"right", color:"#EF4444", fontWeight:700 }}>{brl(r.pago_despesas)}</td>
+                      <td style={{ padding:"8px 10px", textAlign:"right", fontWeight:800, color: saldoMes>=0 ? "#10B981" : "#EF4444" }}>{brl(saldoMes)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function NovaDespesaModal({ onClose, onSuccess }) {
+  const [fornecedorNome, setFornecedorNome] = useState("");
+  const [psvCod, setPsvCod] = useState(null);
+  const [sugestoes, setSugestoes] = useState([]);
+  const [buscando, setBuscando] = useState(false);
+  const [fisJur, setFisJur] = useState("J");
+  const [cicRg, setCicRg] = useState("");
+  const [cctCod, setCctCod] = useState("");
+  const [descricao, setDescricao] = useState("");
+  const [valorTotal, setValorTotal] = useState("");
+  const [parcelas, setParcelas] = useState(1);
+  const [dataPrimeira, setDataPrimeira] = useState(() => new Date().toISOString().slice(0,10));
+  const [enviando, setEnviando] = useState(false);
+  const [erro, setErro] = useState(null);
+  const [sucesso, setSucesso] = useState(null);
+
+  const { data: centrosCusto } = useFetch("/api/financeiro/centros-custo", {});
+
+  useEffect(() => {
+    if (psvCod || fornecedorNome.trim().length < 2) { setSugestoes([]); return; }
+    setBuscando(true);
+    const t = setTimeout(() => {
+      fetch(`${API}/api/financeiro/fornecedores/busca?q=${encodeURIComponent(fornecedorNome.trim())}`)
+        .then(r => r.json()).then(setSugestoes).catch(() => setSugestoes([])).finally(() => setBuscando(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [fornecedorNome, psvCod]);
+
+  const valido = fornecedorNome.trim().length > 0 && descricao.trim().length > 0
+    && Number(valorTotal) > 0 && Number(parcelas) >= 1 && dataPrimeira;
+
+  const submeter = async () => {
+    if (!valido || enviando) return;
+    setEnviando(true); setErro(null);
+    try {
+      const r = await fetch(`${API}/api/financeiro/despesas`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fornecedor_nome: fornecedorNome.trim(),
+          psv_cod: psvCod,
+          fis_jur: fisJur,
+          cic_rg: cicRg.trim(),
+          cct_cod: cctCod ? Number(cctCod) : null,
+          descricao: descricao.trim(),
+          valor_total: Number(valorTotal),
+          parcelas: Number(parcelas),
+          data_primeira_parcela: dataPrimeira,
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      setSucesso(j);
+      setTimeout(() => onSuccess(), 900);
+    } catch (e) {
+      setErro(e.message);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  return (
+    <div style={{
+      position:"fixed", inset:0, zIndex:9999, background:"rgba(0,0,0,0.45)",
+      display:"flex", alignItems:"center", justifyContent:"center", padding:16,
+    }} onClick={onClose}>
+      <div style={{
+        background:"#fff", borderRadius:16, padding:24, width:"100%", maxWidth:480,
+        maxHeight:"90vh", overflowY:"auto", boxShadow:"0 8px 40px rgba(0,0,0,0.25)",
+      }} onClick={e => e.stopPropagation()}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18 }}>
+          <div style={{ fontSize:16, fontWeight:800, color:"#111827" }}>💸 Nova Despesa</div>
+          <button onClick={onClose} style={{ border:"none", background:"transparent", fontSize:20, cursor:"pointer", color:"#94A3B8" }}>×</button>
+        </div>
+
+        {sucesso ? (
+          <div style={{ textAlign:"center", padding:"24px 0" }}>
+            <div style={{ fontSize:34, marginBottom:10 }}>✅</div>
+            <div style={{ fontSize:14, fontWeight:700, color:"#111827" }}>Despesa lançada com sucesso</div>
+            <div style={{ fontSize:12, color:"#94A3B8", marginTop:4 }}>
+              CPG {sucesso.cpg_serie}-{sucesso.cpg_num} · {sucesso.parcelas_criadas} parcela(s)
+            </div>
+          </div>
+        ) : (
+          <>
+            {erro && <Err msg={erro} />}
+
+            <div style={{ position:"relative", marginBottom:14 }}>
+              <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>Fornecedor</label>
+              <input value={fornecedorNome} onChange={e => { setFornecedorNome(e.target.value); setPsvCod(null); }}
+                placeholder="Buscar fornecedor ou digitar nome..."
+                style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box" }} />
+              {!psvCod && fornecedorNome.trim().length >= 2 && (buscando || sugestoes.length > 0) && (
+                <div style={{
+                  position:"absolute", top:"100%", left:0, right:0, zIndex:20, background:"#fff",
+                  borderRadius:8, boxShadow:"0 6px 20px rgba(0,0,0,0.15)", marginTop:4, maxHeight:180, overflowY:"auto",
+                }}>
+                  {buscando && <div style={{ padding:"8px 12px", fontSize:12, color:"#94A3B8" }}>Buscando...</div>}
+                  {sugestoes.map(s => (
+                    <div key={s.cod} onClick={() => { setFornecedorNome(s.nome); setPsvCod(s.cod); setSugestoes([]); }}
+                      style={{ padding:"8px 12px", fontSize:12.5, color:"#334155", cursor:"pointer", borderBottom:"1px solid #F1F5F9" }}
+                      onMouseEnter={e => e.currentTarget.style.background="#F8FAFC"} onMouseLeave={e => e.currentTarget.style.background="#fff"}>
+                      {s.nome}{s.cpf ? ` — ${s.cpf}` : ""}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {psvCod && <div style={{ fontSize:10.5, color:"#10B981", marginTop:3, fontWeight:700 }}>✓ Fornecedor cadastrado vinculado</div>}
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"110px 1fr", gap:10, marginBottom:14 }}>
+              <div>
+                <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>Tipo</label>
+                <select value={fisJur} onChange={e => setFisJur(e.target.value)}
+                  style={{ width:"100%", padding:"10px 8px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box" }}>
+                  <option value="J">Jurídica</option>
+                  <option value="F">Física</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>{fisJur === "F" ? "CPF" : "CNPJ"} (opcional)</label>
+                <input value={cicRg} onChange={e => setCicRg(e.target.value)} placeholder="Somente números"
+                  style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box" }} />
+              </div>
+            </div>
+
+            <div style={{ marginBottom:14 }}>
+              <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>Centro de Custo (opcional)</label>
+              <select value={cctCod} onChange={e => setCctCod(e.target.value)}
+                style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box" }}>
+                <option value="">— Não especificar —</option>
+                {(centrosCusto || []).map(c => <option key={c.cod} value={c.cod}>{c.descricao}</option>)}
+              </select>
+            </div>
+
+            <div style={{ marginBottom:14 }}>
+              <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>Descrição</label>
+              <textarea value={descricao} onChange={e => setDescricao(e.target.value)} rows={2}
+                placeholder="Ex: Conta de energia elétrica — Julho/2026"
+                style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box", resize:"vertical", fontFamily:"inherit" }} />
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 90px", gap:10, marginBottom:14 }}>
+              <div>
+                <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>Valor Total (R$)</label>
+                <input type="number" min="0.01" step="0.01" value={valorTotal} onChange={e => setValorTotal(e.target.value)}
+                  placeholder="0,00"
+                  style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box" }} />
+              </div>
+              <div>
+                <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>Parcelas</label>
+                <input type="number" min="1" max="60" value={parcelas} onChange={e => setParcelas(e.target.value)}
+                  style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box" }} />
+              </div>
+            </div>
+
+            <div style={{ marginBottom:18 }}>
+              <label style={{ fontSize:11, color:"#64748B", fontWeight:700, display:"block", marginBottom:4 }}>Vencimento da 1ª parcela</label>
+              <input type="date" value={dataPrimeira} onChange={e => setDataPrimeira(e.target.value)}
+                style={{ width:"100%", padding:"10px 12px", borderRadius:8, border:"1px solid #E2E8F0", fontSize:13.5, outline:"none", boxSizing:"border-box" }} />
+              {Number(parcelas) > 1 && (
+                <div style={{ fontSize:10.5, color:"#94A3B8", marginTop:3 }}>Demais parcelas vencem a cada 30 dias a partir desta data.</div>
+              )}
+            </div>
+
+            <button disabled={!valido || enviando} onClick={submeter} style={{
+              width:"100%", padding:"12px", borderRadius:10, border:"none",
+              background: valido && !enviando ? "#EF4444" : "#E2E8F0",
+              color: valido && !enviando ? "#fff" : "#94A3B8",
+              fontSize:14, fontWeight:800, cursor: valido && !enviando ? "pointer" : "not-allowed",
+            }}>{enviando ? "Lançando..." : "Lançar Despesa"}</button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -2204,6 +2974,22 @@ function PainelAgendaMedico() {
   const mapasMes = {};
   (agendaMes||[]).forEach(d => { mapasMes[d.data] = d; });
 
+  // Resumo do mês selecionado — faturamento e absenteísmo (aparece ao lado do médico)
+  const resumoMes = (() => {
+    const dias = agendaMes || [];
+    const totalMes        = dias.reduce((s,d) => s + (d.total||0), 0);
+    const executadosMes   = dias.reduce((s,d) => s + (d.executados||0), 0);
+    const canceladosMes   = dias.reduce((s,d) => s + (d.cancelados||0), 0);
+    const faturamentoMes  = dias.reduce((s,d) => s + (d.valor_total||0), 0);
+    // Absenteísmo: só considera dias que já passaram — "aberto" num dia passado
+    // e sem execução/cancelamento é o proxy de "paciente não veio".
+    const diasPassados    = dias.filter(d => d.data < hojeStr);
+    const totalPassado    = diasPassados.reduce((s,d) => s + (d.total||0), 0);
+    const faltantesPassado = diasPassados.reduce((s,d) => s + (d.abertos||0), 0);
+    const taxaAbsenteismo = totalPassado > 0 ? (faltantesPassado / totalPassado * 100) : 0;
+    return { totalMes, executadosMes, canceladosMes, faturamentoMes, taxaAbsenteismo, faltantesPassado };
+  })();
+
   // Monta calendário mensal
   const ultimoDia   = new Date(anoSel, mesSel, 0).getDate();
   const semanasCal  = (() => {
@@ -2226,20 +3012,43 @@ function PainelAgendaMedico() {
     m.apelido?.toLowerCase().includes(busca.toLowerCase())
   );
 
+  const PALETA_AVATAR = ["#8B1A1A","#0891B2","#7C3AED","#D97706","#059669","#DB2777","#4338CA"];
+  const corAvatar = (texto) => {
+    let h = 0;
+    for (let i = 0; i < (texto||"").length; i++) h = texto.charCodeAt(i) + ((h << 5) - h);
+    return PALETA_AVATAR[Math.abs(h) % PALETA_AVATAR.length];
+  };
+  const iniciais = (texto) => (texto||"").trim().split(/\s+/).slice(0,2).map(p=>p[0]).join("").toUpperCase();
+
+  const Avatar = ({ nome, tamanho=36, cor }) => (
+    <div style={{
+      width:tamanho, height:tamanho, borderRadius:"50%", flexShrink:0,
+      background: `linear-gradient(135deg, ${cor||corAvatar(nome)}, ${cor||corAvatar(nome)}CC)`,
+      display:"flex", alignItems:"center", justifyContent:"center",
+      color:"#fff", fontWeight:800, fontSize:tamanho*0.38,
+      boxShadow:`0 2px 8px ${cor||corAvatar(nome)}55`,
+    }}>
+      {iniciais(nome)}
+    </div>
+  );
+
   const btnView = (v, label) => (
     <button onClick={() => setView(v)} style={{
-      padding:"5px 14px", borderRadius:8, border:`1px solid ${view===v ? "#8B1A1A" : "#EAEDF2"}`,
-      background: view===v ? "#8B1A1A" : "#fff",
-      color: view===v ? "#0F172A" : "#6B7280",
-      fontSize:11, fontWeight:700, cursor:"pointer", transition:"all 0.15s",
+      padding:"6px 16px", borderRadius:20, border:"1px solid rgba(255,255,255,0.5)",
+      background: view===v ? "#fff" : "rgba(255,255,255,0.15)",
+      color: view===v ? "#111827" : "#fff",
+      fontSize:11.5, fontWeight:700, cursor:"pointer", transition:"all 0.15s",
     }}>{label}</button>
   );
 
   return (
-    <div style={{ marginTop:16 }}>
-      <div style={{ fontSize:13, fontWeight:800, color:"#111827", marginBottom:12 }}>Agenda do Médico</div>
+    <div style={{ animation:"fadeIn 0.35s ease" }}>
+      <div style={{ marginBottom:16 }}>
+        <div style={{ fontSize:18, fontWeight:900, color:"#111827" }}>Agenda do Médico</div>
+        <div style={{ fontSize:12, color:"#6B7280", marginTop:2 }}>Escolha um médico pra ver os horários do dia ou o calendário do mês</div>
+      </div>
 
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))", gap:12 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"260px minmax(0,1fr)", gap:12 }}>
 
         {/* ── COLUNA ESQUERDA: lista de médicos ── */}
         <div style={{ background:"#fff", border:`1px solid ${"#EAEDF2"}`, borderRadius:12, overflow:"hidden" }}>
@@ -2266,15 +3075,19 @@ function PainelAgendaMedico() {
                 background: medicoSel?.cod === m.cod ? "#FDF2F2" : "transparent",
                 cursor:"pointer", transition:"background 0.1s",
                 borderLeft: medicoSel?.cod === m.cod ? `3px solid ${"#8B1A1A"}` : "3px solid transparent",
+                display:"flex", alignItems:"center", gap:10,
               }}
                 onMouseEnter={e => { if(medicoSel?.cod !== m.cod) e.currentTarget.style.background="#F2F2F2"; }}
                 onMouseLeave={e => { if(medicoSel?.cod !== m.cod) e.currentTarget.style.background="transparent"; }}>
-                <div style={{ fontSize:12, fontWeight:700, color:"#111827" }}>
-                  {m.apelido || m.nome}
+                <Avatar nome={m.apelido || m.nome} tamanho={32} />
+                <div style={{ minWidth:0 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:"#111827", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {m.apelido || m.nome}
+                  </div>
+                  {m.especialidade && (
+                    <div style={{ fontSize:10, color:"#6B7280", marginTop:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{m.especialidade}</div>
+                  )}
                 </div>
-                {m.especialidade && (
-                  <div style={{ fontSize:10, color:"#6B7280", marginTop:2 }}>{m.especialidade}</div>
-                )}
               </button>
             ))}
           </div>
@@ -2284,26 +3097,31 @@ function PainelAgendaMedico() {
         <div>
           {!medicoSel ? (
             <div style={{
-              background:"#fff", border:`1px solid ${"#EAEDF2"}`, borderRadius:12,
-              padding:"60px 20px", textAlign:"center", color:"#6B7280", fontSize:13,
+              background:"linear-gradient(135deg, #FBF7F0, #F2F2F2)", border:`1px dashed #D8D0C0`, borderRadius:16,
+              padding:"70px 20px", textAlign:"center", color:"#9CA3AF", fontSize:13,
             }}>
+              <div style={{ fontSize:32, marginBottom:10 }}>🗓️</div>
               ← Selecione um médico para ver a agenda
             </div>
           ) : (
             <>
               {/* Header médico selecionado */}
               <div style={{
-                background:"#fff", border:`1px solid ${"#EAEDF2"}`, borderRadius:12,
-                padding:"14px 18px", marginBottom:10,
-                display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10,
+                background: `linear-gradient(120deg, ${corAvatar(medicoSel.apelido||medicoSel.nome)}, ${corAvatar(medicoSel.apelido||medicoSel.nome)}CC)`,
+                borderRadius:16, padding:"16px 20px", marginBottom:12,
+                display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12,
+                boxShadow:`0 8px 20px ${corAvatar(medicoSel.apelido||medicoSel.nome)}40`,
               }}>
-                <div>
-                  <div style={{ fontSize:14, fontWeight:800, color:"#8B1A1A" }}>
-                    {medicoSel.apelido || medicoSel.nome}
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <Avatar nome={medicoSel.apelido || medicoSel.nome} tamanho={44} cor="#ffffff33" />
+                  <div>
+                    <div style={{ fontSize:16, fontWeight:900, color:"#fff" }}>
+                      {medicoSel.apelido || medicoSel.nome}
+                    </div>
+                    {medicoSel.especialidade && (
+                      <div style={{ fontSize:11.5, color:"#ffffffcc", marginTop:2 }}>{medicoSel.especialidade}</div>
+                    )}
                   </div>
-                  {medicoSel.especialidade && (
-                    <div style={{ fontSize:11, color:"#6B7280", marginTop:2 }}>{medicoSel.especialidade}</div>
-                  )}
                 </div>
                 <div style={{ display:"flex", gap:6, alignItems:"center" }}>
                   {btnView("dia",    "📅 Diário")}
@@ -2311,15 +3129,48 @@ function PainelAgendaMedico() {
                 </div>
               </div>
 
-              {/* ── VIEW DIÁRIA ── */}
+              {/* ── RESUMO DO MÊS: faturamento e absenteísmo ── */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:10, marginBottom:12 }}>
+                {lMes ? (
+                  [1,2,3,4].map(i => <div key={i} style={{ background:"#fff", border:"1px solid #EAEDF2", borderRadius:12, padding:"12px 14px" }}><Skeleton h={40}/></div>)
+                ) : (
+                  <>
+                    <div style={{ background:"#fff", border:"1px solid #EAEDF2", borderRadius:12, padding:"12px 14px" }}>
+                      <div style={{ fontSize:10, color:"#6B7280", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>Marcações no Mês</div>
+                      <div style={{ fontSize:20, fontWeight:900, color:"#7C3AED", marginTop:3 }}>{resumoMes.totalMes}</div>
+                      <div style={{ fontSize:10, color:"#9CA3AF", marginTop:1 }}>{resumoMes.executadosMes} executadas</div>
+                    </div>
+                    <div style={{ background:"#fff", border:"1px solid #EAEDF2", borderRadius:12, padding:"12px 14px" }}>
+                      <div style={{ fontSize:10, color:"#6B7280", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>Faturamento do Mês</div>
+                      <div style={{ fontSize:20, fontWeight:900, color:"#F59E0B", marginTop:3 }}>{brlFull(resumoMes.faturamentoMes)}</div>
+                      <div style={{ fontSize:10, color:"#9CA3AF", marginTop:1 }}>{MESES_PT[mesSel-1]}/{anoSel}</div>
+                    </div>
+                    <div style={{ background:"#fff", border:"1px solid #EAEDF2", borderRadius:12, padding:"12px 14px" }}>
+                      <div style={{ fontSize:10, color:"#6B7280", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>Absenteísmo</div>
+                      <div style={{
+                        fontSize:20, fontWeight:900, marginTop:3,
+                        color: resumoMes.taxaAbsenteismo<=10 ? "#10B981" : resumoMes.taxaAbsenteismo<=25 ? "#D97706" : "#EF4444",
+                      }}>{resumoMes.taxaAbsenteismo.toFixed(1)}%</div>
+                      <div style={{ fontSize:10, color:"#9CA3AF", marginTop:1 }}>{resumoMes.faltantesPassado} não compareceram</div>
+                    </div>
+                    <div style={{ background:"#fff", border:"1px solid #EAEDF2", borderRadius:12, padding:"12px 14px" }}>
+                      <div style={{ fontSize:10, color:"#6B7280", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.04em" }}>Cancelados</div>
+                      <div style={{ fontSize:20, fontWeight:900, color:"#EF4444", marginTop:3 }}>{resumoMes.canceladosMes}</div>
+                      <div style={{ fontSize:10, color:"#9CA3AF", marginTop:1 }}>no mês</div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* ── VIEW DIÁRIA — linha do tempo ── */}
               {view === "dia" && (
-                <div style={{ background:"#fff", border:`1px solid ${"#EAEDF2"}`, borderRadius:12, overflow:"hidden" }}>
-                  <div style={{ padding:"12px 16px", borderBottom:`1px solid ${"#EAEDF2"}`, display:"flex", alignItems:"center", gap:12 }}>
+                <div style={{ background:"#fff", border:`1px solid ${"#EAEDF2"}`, borderRadius:16, overflow:"hidden" }}>
+                  <div style={{ padding:"14px 18px", borderBottom:`1px solid ${"#EAEDF2"}`, display:"flex", alignItems:"center", gap:12 }}>
                     <input type="date" value={dataSel} onChange={e => setDataSel(e.target.value)} style={{
-                      padding:"6px 10px", borderRadius:8, border:`1px solid ${"#EAEDF2"}`,
+                      padding:"7px 12px", borderRadius:8, border:`1px solid ${"#EAEDF2"}`,
                       background:"#EEEEEE", color:"#111827", fontSize:12, outline:"none", fontWeight:700,
                     }} />
-                    <span style={{ fontSize:11, color:"#6B7280" }}>
+                    <span style={{ fontSize:11.5, color:"#6B7280", fontWeight:600 }}>
                       {(agendaDia||[]).length} agendamento{(agendaDia||[]).length !== 1 ? "s" : ""}
                     </span>
                   </div>
@@ -2327,49 +3178,64 @@ function PainelAgendaMedico() {
                   {lDia ? (
                     <div style={{ padding:20 }}><Skeleton h={200} /></div>
                   ) : (agendaDia||[]).length === 0 ? (
-                    <div style={{ padding:"40px", textAlign:"center", color:"#6B7280", fontSize:12 }}>
+                    <div style={{ padding:"50px 20px", textAlign:"center", color:"#9CA3AF", fontSize:13 }}>
+                      <div style={{ fontSize:28, marginBottom:8 }}>🌤️</div>
                       Nenhum agendamento neste dia
                     </div>
                   ) : (
-                    <div style={{ overflowY:"auto", maxHeight:420 }}>
+                    <div style={{ overflowY:"auto", maxHeight:460, padding:"18px 20px 18px 8px", position:"relative" }}>
+                      {/* linha vertical contínua da timeline */}
+                      <div style={{
+                        position:"absolute", left:76, top:24, bottom:24, width:2,
+                        background:"linear-gradient(180deg, transparent, #EAEDF2 8%, #EAEDF2 92%, transparent)",
+                      }} />
                       {(agendaDia||[]).map((a,i) => (
-                        <div key={i} style={{
-                          padding:"12px 16px", borderBottom:`1px solid ${"#EAEDF2"}`,
-                          display:"grid", gridTemplateColumns:"60px 1fr auto",
-                          gap:12, alignItems:"center", transition:"background 0.1s",
-                        }}
-                          onMouseEnter={e => e.currentTarget.style.background="#F2F2F2"}
-                          onMouseLeave={e => e.currentTarget.style.background="transparent"}>
+                        <div key={i} style={{ position:"relative", display:"flex", alignItems:"flex-start", gap:14, padding:"9px 0" }}>
                           {/* Horário */}
-                          <div style={{ textAlign:"center" }}>
-                            <div style={{ fontSize:14, fontWeight:800, color:"#8B1A1A" }}>{a.hora_ini}</div>
-                            {a.hora_fim && <div style={{ fontSize:10, color:"#6B7280" }}>{a.hora_fim}</div>}
+                          <div style={{ width:58, textAlign:"right", flexShrink:0, paddingTop:10 }}>
+                            <div style={{ fontSize:13, fontWeight:800, color:"#8B1A1A" }}>{a.hora_ini}</div>
+                            {a.hora_fim && <div style={{ fontSize:9.5, color:"#9CA3AF" }}>{a.hora_fim}</div>}
                           </div>
-                          {/* Info */}
-                          <div>
-                            <div style={{ fontSize:13, fontWeight:700, color:"#111827" }}>{a.paciente}</div>
-                            <div style={{ display:"flex", gap:8, marginTop:4, flexWrap:"wrap" }}>
-                              {a.convenio && <span style={{ fontSize:10, color:"#6B7280" }}>{a.convenio}</span>}
-                              {a.local    && <span style={{ fontSize:10, color:"#6B7280" }}>• {a.local}</span>}
-                              {a.confirmacao_label && (
-                                <span style={{ fontSize:10, color: a.confirmacao==="C" ? "#10B981" : "#F59E0B" }}>
-                                  • {a.confirmacao_label}
-                                </span>
-                              )}
+                          {/* Bolinha na linha */}
+                          <div style={{
+                            width:13, height:13, borderRadius:"50%", flexShrink:0, marginTop:13, zIndex:1,
+                            background: STATUS_COR[a.status] || "#8B1A1A",
+                            border:"2.5px solid #fff",
+                            boxShadow:`0 0 0 3px ${(STATUS_COR[a.status]||"#8B1A1A")}22`,
+                          }} />
+                          {/* Card */}
+                          <div style={{
+                            flex:1, background:"#FAFAFA", borderRadius:12, padding:"11px 16px",
+                            border:"1px solid #F1F1F1", transition:"all 0.15s", minWidth:0,
+                          }}
+                            onMouseEnter={e => { e.currentTarget.style.background="#fff"; e.currentTarget.style.boxShadow="0 3px 10px rgba(0,0,0,.07)"; }}
+                            onMouseLeave={e => { e.currentTarget.style.background="#FAFAFA"; e.currentTarget.style.boxShadow="none"; }}>
+                            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10, flexWrap:"wrap" }}>
+                              <div style={{ minWidth:0 }}>
+                                <div style={{ fontSize:13.5, fontWeight:700, color:"#111827" }}>{a.paciente}</div>
+                                <div style={{ display:"flex", gap:8, marginTop:5, flexWrap:"wrap" }}>
+                                  {a.convenio && <span style={{ fontSize:10.5, color:"#6B7280" }}>{a.convenio}</span>}
+                                  {a.local    && <span style={{ fontSize:10.5, color:"#6B7280" }}>• {a.local}</span>}
+                                  {a.confirmacao_label && (
+                                    <span style={{ fontSize:10.5, color: a.confirmacao==="C" ? "#10B981" : "#F59E0B", fontWeight:600 }}>
+                                      • {a.confirmacao_label}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div style={{ textAlign:"right", flexShrink:0 }}>
+                                <span style={{
+                                  padding:"3px 11px", borderRadius:20, fontSize:10.5, fontWeight:700,
+                                  background: STATUS_BG[a.status] || "#EAEDF2",
+                                  color: STATUS_COR[a.status] || "#6B7280",
+                                  border:`1px solid ${(STATUS_COR[a.status]||"#6B7280")}55`,
+                                  display:"inline-block", marginBottom:4,
+                                }}>{STATUS_LBL[a.status] || a.status}</span>
+                                {a.valor > 0 && (
+                                  <div style={{ fontSize:11, color:"#F59E0B", fontWeight:700 }}>{brlFull(a.valor)}</div>
+                                )}
+                              </div>
                             </div>
-                          </div>
-                          {/* Status */}
-                          <div style={{ textAlign:"right" }}>
-                            <span style={{
-                              padding:"3px 10px", borderRadius:20, fontSize:11, fontWeight:700,
-                              background: STATUS_BG[a.status] || "#EAEDF2",
-                              color: STATUS_COR[a.status] || "#6B7280",
-                              border:`1px solid ${(STATUS_COR[a.status]||"#6B7280")}55`,
-                              display:"block", marginBottom:4,
-                            }}>{STATUS_LBL[a.status] || a.status}</span>
-                            {a.valor > 0 && (
-                              <div style={{ fontSize:11, color:"#F59E0B", fontWeight:700 }}>{brlFull(a.valor)}</div>
-                            )}
                           </div>
                         </div>
                       ))}
@@ -3811,37 +4677,182 @@ Destaque tipos em crescimento, oportunidades de captação de empresas e alertas
         </Card>
       </div>
 
-      <Card title="Top Empresas" subtitle="Por volume de atendimentos">
-        {loading ? <Skeleton h={280}/> : (
-          <div style={{ overflowX:"auto" }}>
-            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
-              <thead>
-                <tr style={{ background:"#F2F2F2", borderBottom:`1px solid ${C.border}` }}>
-                  {["#","Empresa","Adm.","Per.","Dem.","Total","Produção"].map(h=>(
-                    <th key={h} style={{ padding:"10px 14px", fontWeight:700, color:C.faint, textAlign:h==="Empresa"||h==="#"?"left":"right", fontSize:11, textTransform:"uppercase" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {(data?.empresas||[]).map((e,i)=>(
-                  <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}
-                    onMouseEnter={ev=>ev.currentTarget.style.background="#F2F2F2"}
-                    onMouseLeave={ev=>ev.currentTarget.style.background="transparent"}>
-                    <td style={{ padding:"10px 14px", color:C.faint, fontWeight:700 }}>{i+1}</td>
-                    <td style={{ padding:"10px 14px", fontWeight:600, color:"#111827" }}>{e.empresa}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", color:"#8B1A1A" }}>{num(e.adm)}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", color:"#10B981" }}>{num(e.per)}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", color:"#EF4444" }}>{num(e.dem)}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:"#111827" }}>{num(e.total)}</td>
-                    <td style={{ padding:"10px 14px", textAlign:"right", color:"#F59E0B", fontWeight:700 }}>{brl(e.faturamento)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      <CardTopEmpresas/>
+      <CardVariacaoEmpresas/>
     </div>
+  );
+}
+
+// ── Card Variação de Empresas — compara ano atual x ano anterior, achando
+// rápido quem está em queda/crescimento sem precisar cruzar manualmente ──
+function CardVariacaoEmpresas() {
+  const hoje = new Date();
+  const [ano, setAno] = useState(hoje.getFullYear());
+  const { data, loading } = useFetch("/api/modulo/ocupacional/variacao-empresas", { ano, ano_comparacao: ano - 1 });
+
+  const brl0 = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v) : "—";
+
+  const Tabela = ({ linhas, corVariacao }) => (
+    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5 }}>
+      <thead>
+        <tr style={{ borderBottom:"2px solid #E2E8F0" }}>
+          <th style={{ textAlign:"left", padding:"8px 10px", color:"#64748B" }}>Empresa</th>
+          <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>{data?.ano_comparacao}</th>
+          <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>{data?.ano}</th>
+          <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Variação</th>
+        </tr>
+      </thead>
+      <tbody>
+        {(linhas || []).map((e, i) => (
+          <tr key={i} style={{ borderBottom:"1px solid #F1F5F9" }}>
+            <td style={{ padding:"8px 10px", fontWeight:700, color:"#334155", maxWidth:220, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{e.empresa}</td>
+            <td style={{ padding:"8px 10px", textAlign:"right", color:"#94A3B8" }}>{brl0(e.valor_anterior)}</td>
+            <td style={{ padding:"8px 10px", textAlign:"right", color:"#334155", fontWeight:700 }}>{brl0(e.valor_atual)}</td>
+            <td style={{ padding:"8px 10px", textAlign:"right", fontWeight:800, color: corVariacao }}>
+              {e.variacao_valor >= 0 ? "+" : ""}{brl0(e.variacao_valor)}
+              {e.variacao_pct != null && <div style={{ fontSize:10.5, fontWeight:600 }}>{e.variacao_pct >= 0 ? "+" : ""}{e.variacao_pct}%</div>}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+
+  return (
+    <Card
+      title="Variação de Empresas — Ano a Ano"
+      subtitle="Compara o faturamento de cada empresa entre dois anos, pra achar rápido quem está em queda ou crescimento"
+      action={
+        <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+          <button onClick={() => setAno(a => a - 1)} style={{
+            width:26, height:26, borderRadius:7, border:`1px solid ${C.border}`, background:"#fff",
+            cursor:"pointer", fontSize:12, color:C.sub,
+          }}>‹</button>
+          <div style={{ fontSize:11.5, fontWeight:700, color:"#111827", minWidth:90, textAlign:"center", padding:"4px 8px", borderRadius:6, background:"#F8FAFC" }}>
+            {ano - 1} → {ano}
+          </div>
+          <button onClick={() => setAno(a => a + 1)} disabled={ano >= hoje.getFullYear()} style={{
+            width:26, height:26, borderRadius:7, border:`1px solid ${C.border}`,
+            background: ano >= hoje.getFullYear() ? "#F8FAFC" : "#fff",
+            cursor: ano >= hoje.getFullYear() ? "not-allowed" : "pointer",
+            fontSize:12, color: ano >= hoje.getFullYear() ? "#D1D5DB" : C.sub,
+          }}>›</button>
+        </div>
+      }
+    >
+      {loading ? <Skeleton h={280}/> : (
+        <>
+          <div style={{ display:"flex", gap:16, marginBottom:16, flexWrap:"wrap" }}>
+            <div style={{ fontSize:12.5, color:"#64748B" }}>
+              Total {data?.ano_comparacao}: <b style={{ color:"#111827" }}>{brl0(data?.total_anterior)}</b>
+            </div>
+            <div style={{ fontSize:12.5, color:"#64748B" }}>
+              Total {data?.ano}: <b style={{ color:"#111827" }}>{brl0(data?.total_atual)}</b>
+            </div>
+            <div style={{ fontSize:12.5, fontWeight:800, color: (data?.variacao_total || 0) >= 0 ? "#10B981" : "#EF4444" }}>
+              Variação total: {(data?.variacao_total || 0) >= 0 ? "+" : ""}{brl0(data?.variacao_total)}
+            </div>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(340px,1fr))", gap:16 }}>
+            <div>
+              <div style={{ fontSize:11.5, fontWeight:800, color:"#EF4444", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:8 }}>
+                🔻 Maiores Quedas
+              </div>
+              {!data?.quedas?.length ? (
+                <div style={{ textAlign:"center", color:"#94A3B8", fontSize:12.5, padding:"20px 0" }}>Sem quedas relevantes</div>
+              ) : <Tabela linhas={data.quedas} corVariacao="#EF4444" />}
+            </div>
+            <div>
+              <div style={{ fontSize:11.5, fontWeight:800, color:"#10B981", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:8 }}>
+                🔺 Maiores Altas
+              </div>
+              {!data?.altas?.length ? (
+                <div style={{ textAlign:"center", color:"#94A3B8", fontSize:12.5, padding:"20px 0" }}>Sem altas relevantes</div>
+              ) : <Tabela linhas={data.altas} corVariacao="#10B981" />}
+            </div>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+// ── Card Top Empresas — filtro próprio de período (mês navegável ou tudo) ──
+function CardTopEmpresas() {
+  const hoje = new Date();
+  const [modo, setModo] = useState("mes"); // "mes" | "todo"
+  const [ano, setAno] = useState(hoje.getFullYear());
+  const [mes, setMes] = useState(hoje.getMonth() + 1);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    const qs = modo === "todo" ? "modo=todo" : `modo=mes&ano=${ano}&mes=${mes}`;
+    fetch(`${API}/api/modulo/ocupacional/empresas?${qs}`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [modo, ano, mes]);
+
+  const mudarMes = (delta) => {
+    let m = mes + delta, a = ano;
+    if (m > 12) { m = 1; a++; } else if (m < 1) { m = 12; a--; }
+    setMes(m); setAno(a);
+  };
+  const noMesAtual = ano === hoje.getFullYear() && mes === hoje.getMonth() + 1;
+
+  const subtitle = modo === "todo"
+    ? "Histórico completo · clique numa coluna pra ordenar"
+    : `${MESES_PT[mes-1]} ${ano} · clique numa coluna pra ordenar`;
+
+  return (
+    <Card
+      title="Top Empresas"
+      subtitle={subtitle}
+      action={
+        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+          <div style={{ display:"flex", background:"#F8FAFC", borderRadius:8, padding:3, gap:2, border:`1px solid ${C.border}` }}>
+            {[{id:"mes",label:"Mês"},{id:"todo",label:"Todo o período"}].map(o=>(
+              <button key={o.id} onClick={()=>setModo(o.id)} style={{
+                padding:"5px 12px", borderRadius:6, border:"none", cursor:"pointer", fontSize:11.5, fontWeight:700,
+                background: modo===o.id ? "#D97706" : "transparent",
+                color: modo===o.id ? "#fff" : C.sub,
+              }}>{o.label}</button>
+            ))}
+          </div>
+          {modo === "mes" && (
+            <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+              <button onClick={()=>mudarMes(-1)} style={{
+                width:26, height:26, borderRadius:7, border:`1px solid ${C.border}`, background:"#fff",
+                cursor:"pointer", fontSize:12, color:C.sub,
+              }}>‹</button>
+              <div style={{ fontSize:11.5, fontWeight:700, color:"#111827", minWidth:96, textAlign:"center", padding:"4px 8px", borderRadius:6, background:"#F8FAFC" }}>
+                {MESES_PT[mes-1].slice(0,3)} {ano}
+              </div>
+              <button onClick={()=>mudarMes(1)} disabled={noMesAtual} style={{
+                width:26, height:26, borderRadius:7, border:`1px solid ${C.border}`,
+                background: noMesAtual ? "#F8FAFC" : "#fff",
+                cursor: noMesAtual ? "not-allowed" : "pointer",
+                fontSize:12, color: noMesAtual ? "#D1D5DB" : C.sub,
+              }}>›</button>
+            </div>
+          )}
+        </div>
+      }
+    >
+      {loading ? (
+        <div>
+          {modo === "todo" && (
+            <div style={{ fontSize:12, color:"#D97706", marginBottom:10, fontWeight:600 }}>
+              ⏳ Varrendo o histórico completo — pode levar até 1 minuto na primeira vez (fica em cache por 30min depois)...
+            </div>
+          )}
+          <Skeleton h={280}/>
+        </div>
+      ) : <TabelaTopEmpresas empresas={data?.empresas}/>}
+    </Card>
   );
 }
 
@@ -4187,6 +5198,144 @@ function TabelaMedicosLab({ medicos, labelColuna = "Médico", semDadosTexto = "S
           </tr>
         </tfoot>
       </table>
+    </div>
+  );
+}
+
+// ── Tabela de empresas (Ocupacional) — lista completa do período, com sort ──
+function TabelaTopEmpresas({ empresas }) {
+  const [sortCol, setSortCol] = useState("total");
+  const [sortDir, setSortDir] = useState("desc");
+  const [busca, setBusca] = useState("");
+  const [filtroTipo, setFiltroTipo] = useState("todas");
+  const num = v => v != null ? Number(v).toLocaleString("pt-BR") : "—";
+  const brl = v => v != null ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v) : "—";
+
+  const toggle = (col) => {
+    if (sortCol === col) setSortDir(d => d==="desc"?"asc":"desc");
+    else { setSortCol(col); setSortDir("desc"); }
+  };
+
+  const TIPOS = [
+    { id:"todas", label:"Todas", cor:"#D97706" },
+    { id:"adm",   label:"Com Admissional", cor:"#8B1A1A" },
+    { id:"per",   label:"Com Periódico",   cor:"#10B981" },
+    { id:"dem",   label:"Com Demissional", cor:"#EF4444" },
+  ];
+
+  const filtradas = (empresas||[]).filter(e => {
+    if (busca.trim() && !(e.empresa||"").toUpperCase().includes(busca.trim().toUpperCase())) return false;
+    if (filtroTipo !== "todas" && !(e[filtroTipo] > 0)) return false;
+    return true;
+  });
+
+  const sorted = [...filtradas].sort((a,b) => {
+    if (sortCol === "empresa") {
+      const cmp = (a.empresa||"").localeCompare(b.empresa||"");
+      return sortDir==="desc" ? -cmp : cmp;
+    }
+    const va = a[sortCol]||0, vb = b[sortCol]||0;
+    return sortDir==="desc" ? vb-va : va-vb;
+  });
+
+  const TH = ({ col, label, align="right" }) => {
+    const active = sortCol === col;
+    return (
+      <th onClick={() => toggle(col)} style={{
+        padding:"10px 14px", fontWeight:700, textAlign:align,
+        color: active ? "#D97706" : C.faint, fontSize:11,
+        textTransform:"uppercase", letterSpacing:"0.05em",
+        cursor:"pointer", userSelect:"none", whiteSpace:"nowrap",
+        background: active ? "#FFFBEB" : "transparent",
+        position:"sticky", top:0, zIndex:1,
+      }}>
+        {label} <span style={{ opacity:active?1:0.3 }}>{active?(sortDir==="desc"?"↓":"↑"):"↕"}</span>
+      </th>
+    );
+  };
+
+  if (!(empresas||[]).length) return (
+    <div style={{ padding:"32px", textAlign:"center", color:C.faint, fontSize:13 }}>Sem empresas no período</div>
+  );
+
+  return (
+    <div>
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center", marginBottom:12 }}>
+        <input
+          value={busca}
+          onChange={e=>setBusca(e.target.value)}
+          placeholder="Buscar empresa..."
+          style={{
+            flex:"1 1 220px", minWidth:180, padding:"8px 12px", borderRadius:8,
+            border:`1px solid ${C.border}`, fontSize:12.5, outline:"none", background:"#F8FAFC",
+          }}
+        />
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+          {TIPOS.map(t=>{
+            const active = filtroTipo === t.id;
+            return (
+              <button key={t.id} onClick={()=>setFiltroTipo(t.id)} style={{
+                padding:"7px 14px", borderRadius:99, fontSize:11.5, fontWeight:700,
+                border:`1.5px solid ${active ? t.cor : C.border}`,
+                background: active ? t.cor : "#fff",
+                color: active ? "#fff" : C.sub,
+                cursor:"pointer", whiteSpace:"nowrap",
+              }}>{t.label}</button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{ fontSize:11, color:C.faint, marginBottom:8 }}>
+        {sorted.length} de {empresas.length} empresa{empresas.length!==1?"s":""} {(busca||filtroTipo!=="todas") ? "(filtrado)" : "no período"} — clique numa coluna pra ordenar
+      </div>
+
+      {sorted.length === 0 ? (
+        <div style={{ padding:"32px", textAlign:"center", color:C.faint, fontSize:13, border:`1px solid ${C.border}`, borderRadius:8 }}>
+          Nenhuma empresa encontrada com esse filtro
+        </div>
+      ) : (
+      <div style={{ overflow:"auto", maxHeight:480, border:`1px solid ${C.border}`, borderRadius:8 }}>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+          <thead>
+            <tr style={{ background:"#F2F2F2" }}>
+              <th style={{ padding:"10px 14px", fontWeight:700, color:C.faint, textAlign:"left", fontSize:11, textTransform:"uppercase", position:"sticky", top:0, background:"#F2F2F2", zIndex:1 }}>#</th>
+              <TH col="empresa" label="Empresa" align="left"/>
+              <TH col="adm"   label="Adm."/>
+              <TH col="per"   label="Per."/>
+              <TH col="dem"   label="Dem."/>
+              <TH col="total" label="Total"/>
+              <TH col="faturamento" label="Produção"/>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((e,i)=>(
+              <tr key={i} style={{ borderBottom:`1px solid ${C.border}` }}
+                onMouseEnter={ev=>ev.currentTarget.style.background="#F2F2F2"}
+                onMouseLeave={ev=>ev.currentTarget.style.background="transparent"}>
+                <td style={{ padding:"10px 14px", color:C.faint, fontWeight:700 }}>{i+1}</td>
+                <td style={{ padding:"10px 14px", fontWeight:600, color:"#111827" }}>{e.empresa}</td>
+                <td style={{ padding:"10px 14px", textAlign:"right", color:sortCol==="adm"?"#8B1A1A":C.sub, fontWeight:sortCol==="adm"?800:500 }}>{num(e.adm)}</td>
+                <td style={{ padding:"10px 14px", textAlign:"right", color:sortCol==="per"?"#10B981":C.sub, fontWeight:sortCol==="per"?800:500 }}>{num(e.per)}</td>
+                <td style={{ padding:"10px 14px", textAlign:"right", color:sortCol==="dem"?"#EF4444":C.sub, fontWeight:sortCol==="dem"?800:500 }}>{num(e.dem)}</td>
+                <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:sortCol==="total"?800:700, color:"#111827" }}>{num(e.total)}</td>
+                <td style={{ padding:"10px 14px", textAlign:"right", color:sortCol==="faturamento"?"#D97706":"#F59E0B", fontWeight:sortCol==="faturamento"?800:700 }}>{brl(e.faturamento)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr style={{ background:"#FFFBEB", borderTop:"2px solid #D97706" }}>
+              <td colSpan={2} style={{ padding:"10px 14px", fontWeight:800, color:"#111827" }}>TOTAL</td>
+              <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:"#8B1A1A" }}>{num(sorted.reduce((s,e)=>s+(e.adm||0),0))}</td>
+              <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:"#10B981" }}>{num(sorted.reduce((s,e)=>s+(e.per||0),0))}</td>
+              <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:"#EF4444" }}>{num(sorted.reduce((s,e)=>s+(e.dem||0),0))}</td>
+              <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:"#111827" }}>{num(sorted.reduce((s,e)=>s+(e.total||0),0))}</td>
+              <td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:"#D97706" }}>{brl(sorted.reduce((s,e)=>s+(e.faturamento||0),0))}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      )}
     </div>
   );
 }
@@ -5355,8 +6504,6 @@ Destaque tendências de absenteísmo, eficiência da agenda e pontos de atençã
           <TabelaMedicosAgenda medicos={data?.top_medicos||[]} periodo={periodo}/>
         )}
       </Card>
-
-
     </div>
   );
 }
@@ -5369,6 +6516,8 @@ const ABAS_CLINICA = [
   { id: "ocupacional",  label: "Ocupacional",     cor: "#D97706" },
   { id: "servicos",     label: "Serviços Espec.", cor: "#8B5CF6" },
   { id: "agendamentos", label: "Agendamentos",    cor: "#7C3AED" },
+  { id: "agenda_medico", label: "📅 Agenda do Médico", cor: "#0891B2" },
+  { id: "valor_hora",   label: "💵 Valor/Hora",    cor: "#10B981" },
 ];
 
 function SecaoClinica({ periodo }) {
@@ -5396,10 +6545,96 @@ function SecaoClinica({ periodo }) {
       </div>
       {/* Conteúdo com animação */}
       <div key={aba} style={{ animation:"fadeIn 0.25s ease" }}>
-        {aba === "assistencial" && <SecaoModuloAssistencial periodo={periodo} />}
-        {aba === "ocupacional"  && <SecaoModuloOcupacional  periodo={periodo} />}
-        {aba === "servicos"     && <SecaoModuloServicos     periodo={periodo} />}
-        {aba === "agendamentos" && <SecaoModuloAgendamentos periodo={periodo} />}
+        {aba === "assistencial"  && <SecaoModuloAssistencial periodo={periodo} />}
+        {aba === "ocupacional"   && <SecaoModuloOcupacional  periodo={periodo} />}
+        {aba === "servicos"      && <SecaoModuloServicos     periodo={periodo} />}
+        {aba === "agendamentos"  && <SecaoModuloAgendamentos periodo={periodo} />}
+        {aba === "agenda_medico" && <PainelAgendaMedico />}
+        {aba === "valor_hora"    && <PainelValorHora />}
+      </div>
+    </div>
+  );
+}
+
+const PERIODOS_VALOR_HORA = [
+  { value:"7d",  label:"7 dias"   },
+  { value:"30d", label:"Mês atual" },
+  { value:"90d", label:"90 dias"  },
+];
+
+function TabelaValorHora({ titulo, subtitulo, linhas, loading, colNome }) {
+  return (
+    <Card title={titulo} subtitle={subtitulo} accent="#10B981">
+      {loading ? <Skeleton h={220} /> : !linhas?.length ? (
+        <div style={{ textAlign:"center", color:"#94A3B8", fontSize:13, padding:"30px 0" }}>
+          Sem atendimentos efetivados com pelo menos 1h no período
+        </div>
+      ) : (
+        <div style={{ overflowX:"auto" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5 }}>
+            <thead>
+              <tr style={{ borderBottom:"2px solid #E2E8F0" }}>
+                <th style={{ textAlign:"left", padding:"8px 10px", color:"#64748B" }}>{colNome}</th>
+                <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Atendimentos</th>
+                <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Horas ocupadas</th>
+                <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Valor total</th>
+                <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Valor/hora</th>
+              </tr>
+            </thead>
+            <tbody>
+              {linhas.map((r, i) => (
+                <tr key={r.cod ?? i} style={{ borderBottom:"1px solid #F1F5F9", background: i===0 ? "#F0FDF4" : "transparent" }}>
+                  <td style={{ padding:"8px 10px", fontWeight:700, color:"#334155" }}>
+                    {i===0 && "🏆 "}{r.nome}
+                  </td>
+                  <td style={{ padding:"8px 10px", textAlign:"right", color:"#64748B" }}>{num(r.qtd_atendimentos)}</td>
+                  <td style={{ padding:"8px 10px", textAlign:"right", color:"#64748B" }}>{r.horas_ocupadas}h</td>
+                  <td style={{ padding:"8px 10px", textAlign:"right", color:"#334155" }}>{brl(r.valor_total)}</td>
+                  <td style={{ padding:"8px 10px", textAlign:"right", fontWeight:800, color:"#10B981" }}>{brl(r.valor_hora)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function PainelValorHora() {
+  const [periodo, setPeriodo] = useState("30d");
+  const { data: porMedico,      loading: lMed  } = useFetch("/api/agenda/medicos/valor-hora",      { periodo });
+  const { data: porConsultorio, loading: lCons } = useFetch("/api/agenda/consultorios/valor-hora",  { periodo });
+
+  return (
+    <div>
+      <div style={{ display:"flex", gap:8, marginBottom:16, alignItems:"center", justifyContent:"space-between", flexWrap:"wrap" }}>
+        <div style={{ fontSize:12, color:"#94A3B8" }}>
+          Considera só atendimentos efetivados (status "Executado"), usando o horário e valor do agendamento — mede quanto cada médico/sala rendeu por hora realmente ocupada.
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          {PERIODOS_VALOR_HORA.map(p => (
+            <button key={p.value} onClick={() => setPeriodo(p.value)} style={{
+              padding:"6px 16px", borderRadius:20, border:`1px solid ${periodo===p.value ? "#10B981" : "#E2E8F0"}`,
+              background: periodo===p.value ? "#10B981" : "#fff",
+              color: periodo===p.value ? "#fff" : "#64748B",
+              fontSize:12, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap",
+            }}>{p.label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        <TabelaValorHora
+          titulo="Valor por Hora — Médico"
+          subtitulo="Ordenado do maior pro menor rendimento por hora"
+          linhas={porMedico} loading={lMed} colNome="Médico"
+        />
+        <TabelaValorHora
+          titulo="Valor por Hora — Consultório"
+          subtitulo='Hoje a agenda usa quase só um registro genérico de sala ("Consultorio 01") — útil se no futuro passarem a distribuir os agendamentos entre salas diferentes'
+          linhas={porConsultorio} loading={lCons} colNome="Consultório"
+        />
       </div>
     </div>
   );
@@ -5411,13 +6646,18 @@ function SecaoClinica({ periodo }) {
 const NAV = [
   { id: "home",       label: "Home",            icon: "home",         color: "#8B1A1A" },
   { id: "contratos",  label: "Contratos",       icon: "document",     color: "#0D9488", desc: "Gestão de contratos" },
+  { id: "faturamento",label: "Faturamento",     icon: "dollar",       color: "#059669", desc: "Guias pendentes de faturamento" },
   { id: "clinica",    label: "Clínica",         icon: "stethoscope",  color: "#8B1A1A", desc: "Assistencial · Ocupacional · Serviços · Agenda" },
+  { id: "atendimento",label: "Atendimento",     icon: "activity",     color: "#8B1A1A", desc: "Fila do médico · Prontuário (teste)" },
   { id: "laboratorio",label: "Laboratório",     icon: "flask",        color: "#10B981", desc: "Exames · Diagnóstico · Ocupacional" },
   { id: "recepcao",   label: "Recepção",        icon: "users",        color: "#D97706", desc: "Métricas por recepcionista" },
-  { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento mensal" },
-  { id: "pacientesdb",label: "Pacientes DB",    icon: "users",        color: "#0891B2", desc: "Base · logradouros · ranking · aniversários" },
+  { id: "assistente_agenda", label: "Assistente & Chat", icon: "activity", color: "#8B1A1A", desc: "Agenda por especialidade (IA) e chat interno entre setores" },
+  { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento" },
+  { id: "pacientesdb",label: "Pacientes",    icon: "layers",       color: "#0891B2", desc: "Base · logradouros · ranking · aniversários" },
   { id: "estoque",    label: "Estoque",         icon: "package",      color: "#0D9488", desc: "Posição, giro e validade" },
   { id: "painel_tv",  label: "Painel TV",       icon: "monitor",      color: "#7C3AED", desc: "Tempo real · para telão" },
+  { id: "gestao",     label: "Gestão",          icon: "grid",         color: "#4F46E5", desc: "Organograma e indicadores por setor" },
+  { id: "resultados", label: "Resultados Financeiros", icon: "money-trend", color: "#7C3AED", desc: "Visão executiva para apresentação aos sócios" },
   { id: "admin",      label: "Permissões",      icon: "settings",     color: "#374151", desc: "Gerenciar acessos" },
 ];
 
@@ -5441,13 +6681,18 @@ const RENDER_MAP = {
   home:        (p) => <Home periodoGlobal={p}/>,
   admin:       ()  => <AdminPermissoes/>,
   contratos:   ()  => <ModuloContratos/>,
+  faturamento: ()  => <Faturamento/>,
   clinica:     (p) => <SecaoClinica     periodo={p}/>,
+  atendimento: ()  => <Atendimento/>,
   recepcao:    (p) => <Recepcao         periodo={p}/>,
+  assistente_agenda: () => <AssistenteAgenda/>,
   pacientesdb: (p) => <PacientesDB      periodo={p}/>,
-  producao:    (p) => <SecaoProducaoMensal modulo={{}} periodoEfetivo={p}/>,
+  producao:    (p) => <SecaoProducaoModulo periodoEfetivo={p}/>,
   laboratorio: (p) => <SecaoModuloLaboratorio periodo={p}/>,
   estoque:     (p) => <SecaoEstoque     periodo={p}/>,
   painel_tv:   ()  => <PainelTV/>,
+  gestao:      ()  => <Gestao/>,
+  resultados:  ()  => <ResultadosFinanceiros/>,
 };
 
 
@@ -6844,10 +8089,15 @@ export default function App() {
 
 function AppInner() {
   const { user, logout, podeVer } = useAuth();
-  const [page,           setPage]           = useState("home");
+  // usuário sem acesso ao Home (ex: recepcionista só com Faturamento) cai
+  // direto no primeiro módulo liberado, em vez de ver a tela Home por padrão
+  const [page,           setPage]           = useState(() =>
+    (user?.admin || user?.modulos?.includes("home")) ? "home" : (user?.modulos?.[0] || "home")
+  );
   const [period,         setPeriod]         = useState("30d");
   const [online,         setOnline]         = useState(null);
   const [collapsed,      setCollapsed]      = useState(true);
+  const [navHover,       setNavHover]       = useState(null); // { id, top, left } do item da barra lateral em hover
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [dateIni,        setDateIni]        = useState("");
   const [dateFim,        setDateFim]        = useState("");
@@ -6857,6 +8107,7 @@ function AppInner() {
 
   // Find current group + item for breadcrumb
   const currentItem = NAV.find(n => n.id === page);
+  const isAtendimento = page === "atendimento"; // tela cheia, sem chrome de período — espelha EHR/prontuário eletrônico
 
   useEffect(() => {
     fetch(`${API}/api/health`).then(r=>r.json())
@@ -6866,6 +8117,9 @@ function AppInner() {
   return (
     <MobileCtx.Provider value={isMobile}>
     <div style={{ height:"100vh", display:"flex", flexDirection:"column", background:"#E5CACA", fontFamily:"'DM Sans','Helvetica Neue',sans-serif", color:"#111827", overflow:"hidden" }}>
+
+      {/* Popup global de mensagem importante — sempre montado, aparece em cima de qualquer tela */}
+      <AlertaImportante onAbrirChat={() => setPage("assistente_agenda")} />
 
       {/* ── TOPBAR ── */}
       <div style={{ background:"linear-gradient(135deg, #8B1A1A 0%, #6B1414 100%)", minHeight:68, display:"flex", alignItems:"center", padding:isMobile?"0 12px":"0 20px", gap:isMobile?8:16, flexShrink:0, boxShadow:"0 2px 12px rgba(0,0,0,0.25)", flexWrap:"wrap" }}>
@@ -6918,7 +8172,7 @@ function AppInner() {
           </button>
         </div>
 
-        {!isMobile && <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, position:"relative" }}>
+        {!isMobile && !isAtendimento && <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0, position:"relative" }}>
           <div style={{ display:"flex", background:"rgba(255,255,255,0.12)", borderRadius:8, padding:3, gap:1, border:"1px solid rgba(255,255,255,0.25)" }}>
             {PERIODS.map(p => (
               <button key={p.id} onClick={()=>{ setPeriod(p.id); setShowDatePicker(false); }} style={{
@@ -6987,8 +8241,14 @@ function AppInner() {
           )}
         </div>}
 
+        {!isMobile && (
+          <div style={{ background:"#fff", borderRadius:10, padding:"5px 10px", display:"flex", alignItems:"center", flexShrink:0 }}>
+            <img src="/icds_logo.png" alt="ICDS Gestão em Saúde" style={{ height:32, width:"auto", objectFit:"contain" }}/>
+          </div>
+        )}
+
         {/* Período mobile — strip abaixo do topbar */}
-        {isMobile && (
+        {isMobile && !isAtendimento && (
           <div style={{ width:"100%", borderTop:"1px solid rgba(255,255,255,0.15)", padding:"4px 10px 6px", background:"linear-gradient(135deg, #8B1A1A 0%, #6B1414 100%)" }}>
             <div style={{ display:"flex", overflowX:"auto", gap:4, WebkitOverflowScrolling:"touch", scrollbarWidth:"none" }}
               className="hide-scrollbar">
@@ -7065,7 +8325,7 @@ function AppInner() {
 
         {/* SIDEBAR — rail sempre compacto (não altera o layout) */}
         <aside style={{ width:SW, flexShrink:0, background:"linear-gradient(180deg, #8B1A1A 0%, #6B1414 100%)", borderRight:"1px solid rgba(255,255,255,0.12)",
-          overflow:isMobile?"hidden":"visible", display:"flex", flexDirection:"column", overflow:"hidden", position:"relative", zIndex:401 }}>
+          overflow:"hidden", display:"flex", flexDirection:"column", position:"relative", zIndex:401 }}>
           {/* Toggle */}
           <div style={{ padding:"10px 10px", borderBottom:"1px solid rgba(255,255,255,0.15)", display:"flex", justifyContent:"center" }}>
             <button onClick={()=>setCollapsed(v=>!v)} title={collapsed?"Abrir menu":"Fechar menu"} style={{ width:28, height:28, borderRadius:7, border:"1px solid rgba(255,255,255,0.3)", background:collapsed?"rgba(255,255,255,0.12)":"#fff", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
@@ -7079,7 +8339,9 @@ function AppInner() {
             {NAV.filter(n => n.id === "admin" ? user?.admin : podeVer(n.id)).map(n => {
               const active = page === n.id;
               return (
-                <button key={n.id} onClick={()=>{ setPage(n.id); setCollapsed(true); }} title={n.label}
+                <button key={n.id} onClick={()=>{ setPage(n.id); setCollapsed(true); }}
+                  onMouseEnter={(e)=>{ const r=e.currentTarget.getBoundingClientRect(); setNavHover({ id:n.id, top:r.top+r.height/2, left:r.right }); }}
+                  onMouseLeave={()=>setNavHover(h=>h?.id===n.id?null:h)}
                   style={{ width:44, height:44, borderRadius:10, border:"none", cursor:"pointer",
                     background:active?"rgba(255,255,255,0.15)":"transparent",
                     display:"flex", alignItems:"center", justifyContent:"center",
@@ -7094,6 +8356,23 @@ function AppInner() {
             })}
           </div>
         </aside>
+
+        {/* Tooltip com o nome do módulo — fixed, escapa do overflow:hidden da barra lateral */}
+        {navHover && !isMobile && collapsed && (
+          <div style={{
+            position:"fixed", top:navHover.top, left:navHover.left, transform:"translateY(-50%)",
+            marginLeft:10, background:"#111827", color:"#fff", fontSize:12.5, fontWeight:600,
+            padding:"6px 12px", borderRadius:8, whiteSpace:"nowrap", zIndex:600,
+            boxShadow:"0 4px 16px rgba(0,0,0,.3)", pointerEvents:"none",
+          }}>
+            {NAV.find(n => n.id === navHover.id)?.label}
+            <div style={{
+              position:"absolute", right:"100%", top:"50%", transform:"translateY(-50%)",
+              width:0, height:0, borderTop:"5px solid transparent", borderBottom:"5px solid transparent",
+              borderRight:"5px solid #111827",
+            }}/>
+          </div>
+        )}
 
         {/* PAINEL FLUTUANTE — abre por cima do conteúdo, sem empurrar o layout */}
         {!isMobile && !collapsed && (
@@ -7135,15 +8414,20 @@ function AppInner() {
         )}
 
         {/* MAIN */}
-        <main style={{ flex:1, overflowY:"auto", padding:isMobile?"12px":"32px 40px", minWidth:0, paddingBottom:isMobile?70:undefined }}>
-          <div style={{ marginBottom:24 }}>
-            <h1 style={{ fontSize:22, fontWeight:700, color:"#2D1B1B", letterSpacing:"-0.3px", margin:0, borderLeft:"3px solid #8B1A1A", paddingLeft:12 }}>
-              {currentItem?.label}
-            </h1>
-            {currentItem?.desc && (
-              <p style={{ fontSize:13, color:"#6B7280", marginTop:4 }}>{currentItem.desc}</p>
-            )}
-          </div>
+        <main style={isAtendimento
+          ? { flex:1, overflow:"hidden", minWidth:0, display:"flex", flexDirection:"column" }
+          : { flex:1, overflowY:"auto", padding:isMobile?"12px":"32px 40px", minWidth:0, paddingBottom:isMobile?70:undefined }
+        }>
+          {!isAtendimento && (
+            <div style={{ marginBottom:24 }}>
+              <h1 style={{ fontSize:22, fontWeight:700, color:"#2D1B1B", letterSpacing:"-0.3px", margin:0, borderLeft:"3px solid #8B1A1A", paddingLeft:12 }}>
+                {currentItem?.label}
+              </h1>
+              {currentItem?.desc && (
+                <p style={{ fontSize:13, color:"#6B7280", marginTop:4 }}>{currentItem.desc}</p>
+              )}
+            </div>
+          )}
           {(RENDER_MAP[page] || (() => <div>Página não encontrada</div>))(period)}
         </main>
       </div>

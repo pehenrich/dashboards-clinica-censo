@@ -6,6 +6,7 @@ Suporta: WPPConnect (local, sem Docker), Z-API, Evolution API
 """
 
 import os
+import re
 import requests
 import time
 from datetime import datetime, timedelta
@@ -162,7 +163,7 @@ def buscar_dados_manha(query_func):
         "SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat = 'C' THEN 1 ELSE 0 END) AS cancelados, "
         "COUNT(DISTINCT agm.agm_med) AS medicos, "
         "ISNULL((SELECT COUNT(*) FROM EX_HORARIOS WHERE HOR_DATA = '" + hoje + "'), 0) AS vagas_disp "
-        "FROM agm WHERE CAST(agm.agm_hini AS DATE) = '" + hoje + "'"
+        "FROM agm WHERE CAST(agm.agm_hini AS DATE) = '" + hoje + "' AND agm.agm_stat <> 'B'"
     )
 
     # Médicos divididos por turno (manhã = antes das 12h, tarde = 12h+).
@@ -181,6 +182,7 @@ def buscar_dados_manha(query_func):
         "FROM agm "
         "JOIN psv ON psv.psv_cod = agm.agm_med "
         "WHERE CAST(agm.agm_hini AS DATE) = '" + hoje + "' AND agm.agm_pac > 0 "
+        "AND agm.agm_stat NOT IN ('C','B') "
         "GROUP BY RTRIM(psv.psv_apel), RTRIM(ISNULL(psv.PSV_CONSELHO,'')) "
         "ORDER BY MIN(agm.agm_hini)"
     )
@@ -545,7 +547,7 @@ def buscar_dados_amanha(query_func):
         "SUM(CASE WHEN agm.agm_pac>0 AND agm.agm_stat='C' THEN 1 ELSE 0 END) AS cancelados, "
         "COUNT(DISTINCT agm.agm_med) AS medicos, "
         "ISNULL((SELECT COUNT(*) FROM EX_HORARIOS WHERE HOR_DATA='" + amanha + "'),0) AS vagas_disp "
-        "FROM agm WHERE CAST(agm.agm_hini AS DATE)='" + amanha + "'"
+        "FROM agm WHERE CAST(agm.agm_hini AS DATE)='" + amanha + "' AND agm.agm_stat <> 'B'"
     )
 
     medicos = query_func(
@@ -554,6 +556,7 @@ def buscar_dados_amanha(query_func):
         "MIN(agm.agm_hini) AS inicio, MAX(agm.agm_hini) AS fim "
         "FROM agm JOIN psv ON psv.psv_cod=agm.agm_med "
         "WHERE CAST(agm.agm_hini AS DATE)='" + amanha + "' AND agm.agm_pac>0 "
+        "AND agm.agm_stat NOT IN ('C','B') "
         "GROUP BY RTRIM(psv.psv_apel) ORDER BY MIN(agm.agm_hini)"
     )
     for r in medicos:
@@ -611,6 +614,43 @@ def buscar_dados_resumo(query_func):
     return buscar_dados_fechamento(query_func)
 
 
+def buscar_producao_hoje(query_func):
+    """Produção líquida de hoje x meta do dia (meta_diaria em dia de semana,
+    meta_sabado aos sábados), já aberta por recepção — usado pelo aviso de
+    'meta batida'."""
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    row = query_func(
+        "SELECT SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)"
+        "-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao "
+        "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+        "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje + "' AND smm.SMM_SFAT IN ('A','F','P')"
+    )
+    producao = float((row[0].get("producao") or 0) if row else 0)
+
+    recep_raw = query_func(
+        "SELECT RTRIM(osm.osm_str) AS recepcao_cod, "
+        "SUM(smm.SMM_VLR-ISNULL(smm.SMM_VLR_DESCONTO,0)"
+        "-ISNULL(smm.SMM_VLR_COPARTIC,0)+ISNULL(smm.SMM_AJUSTE_VLR,0)) AS producao "
+        "FROM osm JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num "
+        "WHERE CAST(osm.osm_dthr AS DATE)='" + hoje + "' AND smm.SMM_SFAT IN ('A','F','P') "
+        "AND RTRIM(osm.osm_str) IN ('RCN','RDI','ROC','RCI') "
+        "GROUP BY RTRIM(osm.osm_str)"
+    )
+    producao_por_recepcao = {cod: 0.0 for cod, _ in RECEPCOES_WPP}
+    for r in recep_raw:
+        cod = r.get("recepcao_cod")
+        if cod in producao_por_recepcao:
+            producao_por_recepcao[cod] = float(r.get("producao") or 0)
+
+    cfg = _carregar_metas_producao()
+    eh_sabado = datetime.now().weekday() == 5
+    meta_hoje = float(cfg["meta_sabado"] if eh_sabado else cfg["meta_diaria"])
+    return {
+        "hoje": hoje, "producao": producao, "meta": meta_hoje, "eh_sabado": eh_sabado,
+        "producao_por_recepcao": producao_por_recepcao,
+    }
+
+
 # ── Montadores de mensagem ───────────────────────────────────────────────────
 
 def montar_manha(dados):
@@ -627,16 +667,17 @@ def montar_manha(dados):
 
     msg  = "\U0001f305 *BOM DIA \u2014 AGENDA DE HOJE*" + n
     msg += "\U0001f4c5 " + hoje_fmt + n
-    msg += "\u2501" * 28 + n + n
+    msg += "\u2501" * 20 + n + n
 
-    msg += "  \U0001f468\u200d\u2695\ufe0f Profissionais:  *" + str(agd.get("medicos") or len(medicos)) + "*" + n
-    msg += "  \U0001f9d1\u200d\U0001f91d\u200d\U0001f9d1 Pac. marcados:  *" + num(marcacoes) + "*" + n
-    msg += "  \U0001f7e2 Vagas abertas:  *" + num(vagas_disp) + "*" + n
+    msg += "  👨‍⚕️ Profissionais: *" + str(agd.get("medicos") or len(medicos)) + "*" + n
+    msg += "  🧑‍🤝‍🧑 Pac. marcados: *" + num(marcacoes) + "*" + n
+    msg += "  🟢 Vagas abertas: *" + num(vagas_disp) + "*" + n
     if cancelados > 0:
-        msg += "  \U0001f534 Cancelamentos:  *" + num(cancelados) + "*" + n
+        msg += "  🔴 Cancelamentos: *" + num(cancelados) + "*" + n
 
     if previsao > 0:
-        msg += n + "💰 Previsao (se todos comparecerem):  *" + brl(previsao) + "*" + n
+        msg += n + "💰 Previsao de producao:" + n
+        msg += "    (100% comparecimento) *" + brl(previsao) + "*" + n
 
     medicos_manha = dados.get("medicos_manha", [])
     medicos_tarde = dados.get("medicos_tarde", [])
@@ -649,7 +690,8 @@ def montar_manha(dados):
             ini  = m.get("inicio_manha", "")
             fim  = m.get("fim_manha", "")
             marc = m.get("marcacoes_manha") or 0
-            out += "    • " + str(m["medico"]) + " — " + num(marc) + " pac. (" + ini + "–" + fim + ")" + n
+            out += "    • " + str(m["medico"]) + n
+            out += "      " + num(marc) + " pac. (" + ini + "–" + fim + ")" + n
         return out
 
     def _linhas_tarde(lista):
@@ -657,11 +699,12 @@ def montar_manha(dados):
         for m in lista:
             fim  = m.get("fim_tarde", "")
             marc = m.get("marcacoes_tarde") or 0
-            out += "    • " + str(m["medico"]) + " — " + num(marc) + " pac. (12:00–" + fim + ")" + n
+            out += "    • " + str(m["medico"]) + n
+            out += "      " + num(marc) + " pac. (12:00–" + fim + ")" + n
         return out
 
     if medicos_manha or medicos_tarde:
-        msg += n + "━" * 28 + n
+        msg += n + "━" * 20 + n
         msg += "👨‍⚕️ *EQUIPE MEDICA*" + n
         if medicos_manha:
             msg += "  Manha:" + n + _linhas_manha(medicos_manha)
@@ -675,7 +718,7 @@ def montar_manha(dados):
         if mult_tarde:
             msg += "  Tarde:" + n + _linhas_tarde(mult_tarde)
 
-    msg += n + "\u2501" * 28 + n
+    msg += n + "\u2501" * 20 + n
     msg += "_Dashboard Clinica  \u2022  " + datetime.now().strftime("%H:%M") + "_"
     return msg
 
@@ -713,7 +756,7 @@ def montar_fechamento(dados):
     # ── Cabeçalho ─────────────────────────────────────────────────────────────
     msg  = "\U0001f319 *FECHAMENTO DO DIA*" + n
     msg += "\U0001f4c5 " + hoje_fmt + n
-    msg += "\u2501" * 28 + n + n
+    msg += "\u2501" * 20 + n + n
 
     # ── Produção total ────────────────────────────────────────────────────────
     msg += "\U0001f4b5 *PRODUCAO TOTAL*" + n
@@ -721,23 +764,25 @@ def montar_fechamento(dados):
     if prod_mes_ant:
         var_pct = ((prod - prod_mes_ant) / prod_mes_ant * 100) if prod_mes_ant > 0 else 0
         sinal   = "+" if var_pct >= 0 else ""
-        msg += "  \U0001f4ca " + comp_label + ":  " + brl(prod_mes_ant) + n
-        msg += "  \U0001f4c8 Variacao:  *" + sinal + "{:.1f}%".format(var_pct) + "*" + n
+        msg += "  \U0001f4ca " + comp_label + ":" + n
+        msg += "    " + brl(prod_mes_ant) + n
+        msg += "  \U0001f4c8 Variacao: *" + sinal + "{:.1f}%".format(var_pct) + "*" + n
     msg += n
-    msg += "  \U0001f4c4 Guias: *" + num(total_os) + "*   |   \U0001f465 Pacientes: *" + num(pacientes) + "*" + n
+    msg += "  \U0001f4c4 Guias: *" + num(total_os) + "*" + n
+    msg += "  \U0001f465 Pacientes: *" + num(pacientes) + "*" + n
 
     # -- Por recepcao ------------------------------------------------------
-    msg += n + "━" * 28 + n
+    msg += n + "━" * 20 + n
     msg += "🔹 *PRODUCAO POR RECEPCAO*" + n
     for cod, nome in RECEPCOES_WPP:
         tipos = producao_por_recepcao.get(cod, {})
         total_recep = sum(tipos.values())
         if total_recep <= 0:
             continue
-        msg += n + "  " + nome + ":  *" + brl(total_recep) + "*" + n
+        msg += n + "  " + nome + ": *" + brl(total_recep) + "*" + n
         partes = [tipo + " " + brl(tipos.get(tipo, 0)) for tipo in ("Consultas", "Imagem", "SADT") if tipos.get(tipo, 0) > 0]
-        if partes:
-            msg += "    " + "  |  ".join(partes) + n
+        for parte in partes:
+            msg += "    " + parte + n
 
     # -- Agenda por profissional: quem tinha agendamento no dia, quantidade
     # de atendimentos (comparecimentos) e absenteismo em % -------------------
@@ -752,14 +797,15 @@ def montar_fechamento(dados):
         m_comp = m.get("compareceram") or 0
         m_falt = m.get("faltantes") or 0
         m_abs_pct = (m_falt / m_marc * 100) if m_marc > 0 else 0
-        return ("  • " + str(m["medico"]) + ":  " + num(m_marc) + " marc.  |  "
-                + num(m_comp) + " atend.  |  " + "{:.0f}%".format(m_abs_pct) + " abs." + n)
+        return ("  • " + str(m["medico"]) + n
+                + "    " + num(m_marc) + " marc. · " + num(m_comp) + " atend. · "
+                + "{:.0f}%".format(m_abs_pct) + " abs." + n)
 
     agenda_crm  = [m for m in agenda_med_filtrada if not _is_mult(m)]
     agenda_mult = [m for m in agenda_med_filtrada if _is_mult(m)]
 
     if agenda_crm:
-        msg += n + "━" * 28 + n
+        msg += n + "━" * 20 + n
         msg += "\U0001f4c5 *AGENDA POR MEDICO*" + n
         for m in agenda_crm:
             msg += _linha_agenda(m)
@@ -770,24 +816,27 @@ def montar_fechamento(dados):
             msg += _linha_agenda(m)
 
     # ── Agenda ────────────────────────────────────────────────────────────────
-    msg += n + "\u2501" * 28 + n
+    msg += n + "\u2501" * 20 + n
     msg += "\U0001f4c5 *AGENDA DO DIA*" + n
-    msg += "  \U0001f4cc Marcacoes:     *" + num(marcacoes) + "*" + n
-    msg += "  \u2705 Compareceram:  *" + num(compareceram) + "*  (" + "{:.1f}".format(taxa_comp) + "%)" + n
-    msg += "  " + abs_tag + " Absenteismo:   *" + "{:.1f}".format(taxa_abs) + "%*  (" + num(faltantes) + " faltantes)" + n
+    msg += "  \U0001f4cc Marcacoes: *" + num(marcacoes) + "*" + n
+    msg += "  \u2705 Compareceram: *" + num(compareceram) + "*  (" + "{:.1f}".format(taxa_comp) + "%)" + n
+    msg += "  " + abs_tag + " Absenteismo: *" + "{:.1f}".format(taxa_abs) + "%*  (" + num(faltantes) + " faltantes)" + n
     msg += "  \u274c Cancelamentos: *" + num(cancelados) + "*" + n
 
     # ── Metas ─────────────────────────────────────────────────────────────────
     sinal_dia = "+" if meta_dia_pct >= 100 else ""
     sinal_mes = "+" if meta_mes_pct >= 100 else ""
-    msg += n + "\u2501" * 28 + n
+    msg += n + "\u2501" * 20 + n
     msg += "📈 *PRODUCAO ACUMULADA*" + n
-    msg += "  Acumulado:    *" + brl(prod_mes) + "*  (" + num(int(guias_mes)) + " guias)" + n
-    msg += "  Media diaria: *" + brl(media_dia) + "*  vs  *" + brl(meta_dia) + "*  (" + sinal_dia + "{:.1f}%".format(meta_dia_pct - 100) + ")" + n
-    msg += "  Projecao mes: *" + brl(projecao) + "*  vs  *" + brl(meta_mensal) + "*  (" + sinal_mes + "{:.1f}%".format(meta_mes_pct - 100) + ")" + n
+    msg += "  Acumulado: *" + brl(prod_mes) + "*" + n
+    msg += "    (" + num(int(guias_mes)) + " guias)" + n
+    msg += "  Media diaria: *" + brl(media_dia) + "*" + n
+    msg += "    meta: " + brl(meta_dia) + "  (" + sinal_dia + "{:.1f}%".format(meta_dia_pct - 100) + ")" + n
+    msg += "  Projecao do mes: *" + brl(projecao) + "*" + n
+    msg += "    meta: " + brl(meta_mensal) + "  (" + sinal_mes + "{:.1f}%".format(meta_mes_pct - 100) + ")" + n
     msg += "  Falta p/ meta: *" + brl(falta_meta) + "*" + n
 
-    msg += n + "\u2501" * 28 + n
+    msg += n + "\u2501" * 20 + n
     msg += "_Dashboard Clinica  \u2022  " + datetime.now().strftime("%H:%M") + "_"
     return msg
 
@@ -813,7 +862,7 @@ def montar_previa_amanha(dados):
     msg += "*Agenda*" + n
     msg += "  Medicos com agenda: *" + str(agd.get("medicos") or len(medicos)) + "*" + n
     msg += "  Pacientes marcados: *" + num(marcacoes) + "*" + n
-    msg += "  Vagas disponiveis:  *" + num(vagas_disp) + "*" + n
+    msg += "  Vagas disponiveis: *" + num(vagas_disp) + "*" + n
     if cancelados > 0:
         msg += "  Ja cancelados: " + num(cancelados) + n
 
@@ -825,6 +874,38 @@ def montar_previa_amanha(dados):
         msg += "  _(" + rotulo_ticket + ": " + brl(ticket) + ")_" + n
 
     msg += n + "_Dashboard Clinica - " + datetime.now().strftime("%H:%M") + "_"
+    return msg
+
+
+def montar_meta_atingida(dados):
+    """Mensagem de comemoração quando a produção do dia (ou do sábado)
+    atinge a meta configurada."""
+    producao  = dados.get("producao") or 0
+    meta      = dados.get("meta") or 0
+    eh_sabado = dados.get("eh_sabado", False)
+    excedente = producao - meta
+    producao_por_recepcao = dados.get("producao_por_recepcao") or {}
+    n = "\n"
+
+    rotulo = "META DO SABADO" if eh_sabado else "META DO DIA"
+    msg  = "🎉 *" + rotulo + " BATIDA!*" + n
+    msg += "📅 " + datetime.now().strftime("%d/%m/%Y") + n
+    msg += "━" * 20 + n + n
+    msg += "💰 Produzido: *" + brl(producao) + "*" + n
+    msg += "🎯 Meta: *" + brl(meta) + "*" + n
+    if excedente > 0:
+        msg += "📈 Acima da meta: *" + brl(excedente) + "*" + n
+
+    partes_recep = [(nome, producao_por_recepcao.get(cod, 0)) for cod, nome in RECEPCOES_WPP]
+    partes_recep = [(nome, v) for nome, v in partes_recep if v > 0]
+    if partes_recep:
+        msg += n + "━" * 20 + n
+        msg += "🔹 *PRODUCAO POR RECEPCAO*" + n
+        for nome, v in partes_recep:
+            msg += "  " + nome + ": *" + brl(v) + "*" + n
+
+    msg += n + "Parabens pela equipe! 👏"
+    msg += n + n + "_Dashboard Clinica  •  " + datetime.now().strftime("%H:%M") + "_"
     return msg
 
 
@@ -868,16 +949,41 @@ def _wpp_regenerar_token():
     return None
 
 
+def _eh_grupo(destino: str) -> bool:
+    """Um grupo do WhatsApp é identificado por um JID longo terminado em
+    @g.us (ex: 120363023494603121@g.us), bem diferente de um número de
+    contato (ex: 5594999999999@c.us)."""
+    d = destino.strip()
+    if d.endswith("@g.us"):
+        return True
+    if d.endswith("@c.us"):
+        return False
+    return len(re.sub(r"\D", "", d)) >= 15
+
+
+def _normalizar_destino(destino: str):
+    """Retorna (id_limpo, eh_grupo) — remove +, espaços, - e sufixos @c.us/@g.us
+    já presentes, pra poder remontar o JID certo pra cada provider."""
+    eh_grupo = _eh_grupo(destino)
+    limpo = (destino.strip()
+             .replace("@g.us", "").replace("@c.us", "")
+             .replace("+", "").replace(" ", ""))
+    if not eh_grupo:
+        limpo = limpo.replace("-", "")
+    return limpo, eh_grupo
+
+
 def enviar_wppconnect(mensagem, numero):
     session   = os.getenv("WPPCONNECT_SESSION", WPPCONNECT_SESSION)
     token     = os.getenv("WPPCONNECT_TOKEN",   WPPCONNECT_TOKEN)
     base      = os.getenv("WPPCONNECT_URL",     WPPCONNECT_URL)
-    num_clean = numero.strip().replace("+", "").replace(" ", "").replace("-", "")
+    num_clean, eh_grupo = _normalizar_destino(numero)
+    sufixo    = "@g.us" if eh_grupo else "@c.us"
     endpoint  = base + "/api/" + session + "/send-message"
 
     def _tentar(tok):
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + tok}
-        payload = {"phone": num_clean + "@c.us", "message": mensagem, "isGroup": False}
+        payload = {"phone": num_clean + sufixo, "message": mensagem, "isGroup": eh_grupo}
         return requests.post(endpoint, headers=headers, json=payload, timeout=20)
 
     try:
@@ -897,14 +1003,83 @@ def enviar_wppconnect(mensagem, numero):
         return {"ok": False, "numero": numero, "erro": str(e)[:150]}
 
 
+def enviar_arquivo_wppconnect(caminho_arquivo, legenda, numero):
+    """Envia um arquivo (PDF/imagem) como anexo via WPPConnect — usado pro
+    relatório semanal visual, que não faz sentido só como texto."""
+    import base64 as _b64
+    session   = os.getenv("WPPCONNECT_SESSION", WPPCONNECT_SESSION)
+    token     = os.getenv("WPPCONNECT_TOKEN",   WPPCONNECT_TOKEN)
+    base      = os.getenv("WPPCONNECT_URL",     WPPCONNECT_URL)
+    num_clean, eh_grupo = _normalizar_destino(numero)
+    sufixo    = "@g.us" if eh_grupo else "@c.us"
+    endpoint  = base + "/api/" + session + "/send-file-base64"
+
+    try:
+        with open(caminho_arquivo, "rb") as f:
+            conteudo_b64 = _b64.b64encode(f.read()).decode()
+    except OSError as e:
+        return {"ok": False, "numero": numero, "erro": f"Falha ao ler arquivo: {e}"}
+
+    nome_arquivo = os.path.basename(caminho_arquivo)
+    mime = "application/pdf" if nome_arquivo.lower().endswith(".pdf") else "image/png"
+
+    def _tentar(tok):
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + tok}
+        payload = {
+            "phone": num_clean + sufixo, "isGroup": eh_grupo,
+            "filename": nome_arquivo, "caption": legenda,
+            "base64": f"data:{mime};base64,{conteudo_b64}",
+        }
+        return requests.post(endpoint, headers=headers, json=payload, timeout=30)
+
+    try:
+        resp = _tentar(token)
+        if resp.status_code == 401:
+            novo = _wpp_regenerar_token()
+            if novo:
+                resp = _tentar(novo)
+        resp.raise_for_status()
+        return {"ok": True, "numero": numero, "status": resp.status_code}
+    except requests.exceptions.ConnectionError:
+        return {"ok": False, "numero": numero, "erro": "WPPConnect nao encontrado em localhost:21465"}
+    except requests.exceptions.Timeout:
+        return {"ok": False, "numero": numero, "erro": "Timeout WPPConnect."}
+    except Exception as e:
+        return {"ok": False, "numero": numero, "erro": str(e)[:150]}
+
+
+def enviar_arquivo_whatsapp(caminho_arquivo, legenda, numeros=None):
+    """Envia um arquivo pra todos os números configurados (só suporta
+    provider wppconnect por enquanto, que é o ativo em produção)."""
+    provider = os.getenv("WPP_PROVIDER", WPP_PROVIDER)
+    if provider != "wppconnect":
+        return {"ok": False, "erro": f"Envio de arquivo não implementado pro provider '{provider}'"}
+
+    if numeros is None:
+        lista = DEST_NUMBERS
+    elif isinstance(numeros, str):
+        lista = [n.strip() for n in numeros.split(",") if n.strip()]
+    else:
+        lista = [n.strip() for n in numeros if n.strip()]
+
+    resultados = []
+    for n in lista:
+        r = enviar_arquivo_wppconnect(caminho_arquivo, legenda, n)
+        resultados.append(r)
+        time.sleep(1)
+
+    ok_count = sum(1 for r in resultados if r["ok"])
+    return {"ok": ok_count > 0, "enviados": ok_count, "total": len(lista), "detalhes": resultados}
+
+
 def enviar_zapi(mensagem, numero):
     inst  = os.getenv("ZAPI_INSTANCE",     ZAPI_INSTANCE)
     tok   = os.getenv("ZAPI_TOKEN",        ZAPI_TOKEN)
     ctok  = os.getenv("ZAPI_CLIENT_TOKEN", ZAPI_CLIENT_TOKEN)
-    num_clean = numero.strip().replace("+", "").replace(" ", "").replace("-", "")
+    num_clean, eh_grupo = _normalizar_destino(numero)
     endpoint = "https://api.z-api.io/instances/" + inst + "/token/" + tok + "/send-text"
     headers  = {"Content-Type": "application/json", "Client-Token": ctok}
-    payload  = {"phone": num_clean, "message": mensagem}
+    payload  = {"phone": (num_clean + "@g.us") if eh_grupo else num_clean, "message": mensagem}
     try:
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=20)
         resp.raise_for_status()
@@ -917,9 +1092,10 @@ def enviar_evolution(mensagem, numero):
     base     = os.getenv("EVOLUTION_URL",  EVOLUTION_URL)
     k        = os.getenv("EVOLUTION_KEY",  EVOLUTION_KEY)
     inst     = os.getenv("EVOLUTION_INST", EVOLUTION_INST)
+    num_clean, eh_grupo = _normalizar_destino(numero)
     endpoint = base + "/message/sendText/" + inst
     headers  = {"Content-Type": "application/json", "apikey": k}
-    payload  = {"number": numero.strip(), "text": mensagem, "delay": 1000}
+    payload  = {"number": (num_clean + "@g.us") if eh_grupo else num_clean, "text": mensagem, "delay": 1000}
     try:
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=15)
         resp.raise_for_status()
@@ -987,6 +1163,16 @@ def enviar_resumo(query_func, turno="auto", numero=None):
             "fechamento": {"mensagem": msg_fech,   "envio": r1},
             "previa":     {"mensagem": msg_amanha, "envio": r2},
         }
+
+
+def enviar_meta_atingida(query_func, numero=None):
+    """Verifica a produção de hoje contra a meta do dia (ou do sábado) e,
+    se já bateu, monta e envia o aviso de comemoração."""
+    dados     = buscar_producao_hoje(query_func)
+    mensagem  = montar_meta_atingida(dados)
+    resultado = enviar_whatsapp(mensagem, numeros=numero)
+    print("[WhatsApp] " + datetime.now().strftime("%H:%M:%S") + " meta_atingida ok=" + str(resultado["ok"]))
+    return {"mensagem": mensagem, "envio": resultado, "dados": dados}
 
 
 # ── Health check da sessão WhatsApp ─────────────────────────────────────────

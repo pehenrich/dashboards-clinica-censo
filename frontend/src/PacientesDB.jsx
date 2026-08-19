@@ -8,7 +8,7 @@ import {
 
 // App.jsx:
 //   import PacientesDB from "./PacientesDB";
-//   NAV: { id:"pacientesdb", label:"Pacientes DB", icon:"users", color:"#0891B2", desc:"Base de pacientes" }
+//   NAV: { id:"pacientesdb", label:"Pacientes", icon:"users", color:"#0891B2", desc:"Base de pacientes" }
 //   RENDER_MAP: pacientesdb: (p) => <PacientesDB periodo={p}/>
 
 const API = `${window.location.protocol}//${window.location.host}`;

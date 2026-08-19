@@ -11,7 +11,7 @@ Tabelas validadas contra dicionário oficial Pixeon:
           cnv_reg_ans, cnv_cgc, cnv_caixa_fatura
 """
 
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 # WhatsApp / Scheduler (importação opcional — não quebra se arquivos não existem)
@@ -43,6 +43,25 @@ with open(r"C:\Dashboard\backend\.env", "r", encoding="utf-8-sig") as _f:
 print("ENV LOADED:", os.environ.get("OPENAI_API_KEY", "NAO")[:10])
 import os as _os_test
 print("ENV TEST:", _os_test.environ.get("OPENAI_API_KEY", "NAO")[:10])
+
+MESES_PT_ABREV = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+
+CNPJ_INTERNO = "06288135000261"  # ICDS - Clínica de Especialidades Parauapebas
+
+
+def _filtro_sql_cnpj(cnpj: str, alias_osm: str = "osm"):
+    """
+    Monta a cláusula SQL de filtro por CNPJ interno/externo (osm_cnpj_solic),
+    usada nos dashboards de Resultados Financeiros. cnpj: "interno" (padrão),
+    "externo" ou "todos". "Externo" inclui CNPJ vazio/nulo, já que é
+    literalmente diferente do CNPJ interno — mesmo critério do pedido original.
+    """
+    cnpj = (cnpj or "interno").strip().lower()
+    if cnpj == "interno":
+        return f"AND RTRIM(ISNULL({alias_osm}.OSM_CNPJ_SOLIC,'')) = '{CNPJ_INTERNO}'"
+    elif cnpj == "externo":
+        return f"AND RTRIM(ISNULL({alias_osm}.OSM_CNPJ_SOLIC,'')) <> '{CNPJ_INTERNO}'"
+    return ""  # "todos" — sem filtro
 
 app = FastAPI(title="Dashboard Clínica", version="1.1.0")
 
@@ -78,19 +97,22 @@ app.add_middleware(
 # ══════════════════════════════════════════════════════════════════════════════
 
 import hashlib, hmac
+import sqlite3
 from pydantic import BaseModel
 from fastapi import HTTPException
 
 # ── Todos os módulos disponíveis no sistema ───────────────────────────────────
 TODOS_MODULOS = [
     {"id": "clinica",       "label": "Clínica"},
+    {"id": "atendimento",   "label": "Atendimento (médico)"},
     {"id": "laboratorio",   "label": "Laboratório"},
     {"id": "recepcao",      "label": "Recepção"},
     {"id": "producao",      "label": "Produção Mensal"},
-    {"id": "pacientesdb",   "label": "Pacientes DB"},
+    {"id": "pacientesdb",   "label": "Pacientes"},
     {"id": "estoque",       "label": "Estoque"},
     {"id": "painel_tv",     "label": "Painel TV"},
     {"id": "contratos",     "label": "Contratos"},
+    {"id": "faturamento",   "label": "Faturamento (Guias)"},
 ]
 
 # ── Cria tabela de permissões se não existir ──────────────────────────────────
@@ -123,10 +145,108 @@ def inicializar_tabela_permissoes():
         print(f"[Auth] Erro ao criar tabela: {e}")
 
 
+# ── Faturamento (Guias Pendentes) — SQLite próprio do Dashboard ───────────────
+GUIAS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guias.db")
+
+def get_conn_guias():
+    conn = sqlite3.connect(GUIAS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+def inicializar_db_guias():
+    """
+    Cria o banco SQLite guias.db (próprio do Dashboard, fora do Smart) e a
+    tabela guias_pendentes, se não existirem. Chame esta função no startup.
+    """
+    try:
+        conn = get_conn_guias()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS guias_pendentes (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                data             TEXT    NOT NULL,
+                paciente         TEXT    NOT NULL,
+                os_serie         INTEGER,
+                os_num           INTEGER,
+                tipo_exame       TEXT,
+                valor            REAL,
+                setor            TEXT,
+                convenio         TEXT,
+                status           TEXT    NOT NULL DEFAULT 'Pendente'
+                                 CHECK (status IN ('Pendente','Entregue','Cancelada')),
+                data_entrega     TEXT,
+                data_faturamento TEXT,
+                observacao       TEXT,
+                criado_em        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                criado_por       TEXT,
+                atualizado_em    TEXT,
+                atualizado_por   TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_guias_status ON guias_pendentes(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_guias_os ON guias_pendentes(os_serie, os_num)")
+        conn.commit()
+        conn.close()
+        print("[Faturamento] Banco guias.db OK")
+    except Exception as e:
+        print(f"[Faturamento] Erro ao criar guias.db: {e}")
+
+
+ORGANOGRAMA_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "organograma.db")
+
+def get_conn_organograma():
+    conn = sqlite3.connect(ORGANOGRAMA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+def inicializar_db_organograma():
+    """
+    Cria o banco SQLite organograma.db (próprio do Dashboard, fora do Smart)
+    e a tabela org_nos, se não existirem. Chame esta função no startup.
+    Estrutura livre (não hierárquica-forçada): cada nó tem posição própria
+    (pos_x, pos_y) no canvas do editor e um pai_id opcional (pra desenhar a
+    linha de conexão) — permite reorganizar visualmente sem depender de
+    layout automático.
+    """
+    try:
+        conn = get_conn_organograma()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS org_nos (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome          TEXT    NOT NULL,
+                cargo         TEXT,
+                setor         TEXT,
+                pai_id        INTEGER REFERENCES org_nos(id) ON DELETE SET NULL,
+                pos_x         REAL    NOT NULL DEFAULT 0,
+                pos_y         REAL    NOT NULL DEFAULT 0,
+                cor           TEXT,
+                criado_em     TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                atualizado_em TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_org_nos_pai ON org_nos(pai_id)")
+
+        # Migração: largura/altura por nó (redimensionável) — colunas adicionadas
+        # depois da criação inicial da tabela, checagem evita erro em bases já existentes.
+        colunas = {r["name"] for r in conn.execute("PRAGMA table_info(org_nos)").fetchall()}
+        if "largura" not in colunas:
+            conn.execute("ALTER TABLE org_nos ADD COLUMN largura REAL NOT NULL DEFAULT 190")
+        if "altura" not in colunas:
+            conn.execute("ALTER TABLE org_nos ADD COLUMN altura REAL NOT NULL DEFAULT 78")
+
+        conn.commit()
+        conn.close()
+        print("[Gestão] Banco organograma.db OK")
+    except Exception as e:
+        print(f"[Gestão] Erro ao criar organograma.db: {e}")
+
+
 # ── Adicione no startup do FastAPI ────────────────────────────────────────────
 # @app.on_event("startup")
 # async def startup_event():
 #     inicializar_tabela_permissoes()
+#     inicializar_db_guias()
 #     ... resto do startup
 
 
@@ -234,7 +354,8 @@ def auth_login(req: LoginRequest):
             RTRIM(USR_SENHA)       AS senha_md5,
             RTRIM(USR_SENHA_HASH)  AS senha_hash,
             RTRIM(usr_salt_hash)   AS salt,
-            USR_EMAIL              AS email
+            USR_EMAIL              AS email,
+            USR_PSV                AS psv_cod
         FROM usr
         WHERE RTRIM(USR_LOGIN) = ?
     """, (req.login.strip(),))
@@ -286,6 +407,7 @@ def auth_login(req: LoginRequest):
         "email":   str(u.get("email") or "").strip(),
         "admin":   admin,
         "modulos": modulos,
+        "psv_cod": u.get("psv_cod"),
     }
 # Adicione este endpoint no main.py
 
@@ -563,8 +685,11 @@ def auth_usuarios(busca: str = ""):
             RTRIM(u.USR_NIVEL)        AS nivel,
             RTRIM(u.USR_STATUS)       AS status,
             u.USR_EMAIL               AS email,
-            u.usr_dt_last_login       AS ultimo_login
+            u.usr_dt_last_login       AS ultimo_login,
+            RTRIM(u.USR_GRP)          AS grupo_cod,
+            RTRIM(ISNULL(g.GRP_DESCR,'')) AS grupo_nome
         FROM usr u
+        LEFT JOIN GRP g ON RTRIM(g.GRP_COD) = RTRIM(u.USR_GRP)
         WHERE RTRIM(u.USR_STATUS) = 'A'
           AND u.USR_LOGIN IS NOT NULL
           AND LTRIM(RTRIM(u.USR_LOGIN)) <> ''
@@ -585,6 +710,148 @@ def auth_usuarios(busca: str = ""):
             r["ultimo_login"] = r["ultimo_login"].strftime("%d/%m/%Y %H:%M")
 
     return rows
+
+@app.get("/api/auth/grupos")
+def auth_grupos():
+    """Lista os perfis/grupos de usuário do Pixeon (tabela GRP) — usado pra
+    selecionar em massa, ex: todo mundo do perfil 'Recepção'."""
+    return query("""
+        SELECT RTRIM(GRP_COD) AS cod, RTRIM(GRP_DESCR) AS nome
+        FROM GRP WHERE ISNULL(GRP_DEL_LOGICA,'N') <> 'S'
+        ORDER BY RTRIM(GRP_DESCR)
+    """)
+
+@app.get("/api/auth/usuarios-por-grupo")
+def auth_usuarios_por_grupo(grp: str):
+    """Todos os logins ativos de um perfil/grupo do Pixeon (sem limite de
+    100 como a listagem padrão) — usado pela ação 'selecionar perfil'."""
+    rows = query("""
+        SELECT RTRIM(USR_LOGIN) AS login, RTRIM(USR_NOME) AS nome
+        FROM usr
+        WHERE RTRIM(USR_STATUS) = 'A' AND RTRIM(USR_GRP) = ?
+          AND USR_LOGIN IS NOT NULL AND LTRIM(RTRIM(USR_LOGIN)) <> ''
+        ORDER BY RTRIM(USR_NOME)
+    """, (grp.strip(),))
+    return {"total": len(rows), "usuarios": rows}
+
+
+# ── CHAT INTERNO — canais por setor + mensagens diretas entre usuários ───────
+@app.get("/api/chat/usuarios")
+def chat_usuarios(busca: str = None):
+    """Lista de usuários ativos do Dashboard pra iniciar uma nova DM."""
+    filtro = ""
+    params = []
+    if busca:
+        filtro = "AND RTRIM(USR_NOME) LIKE ?"
+        params.append(f"%{busca}%")
+    rows = query(f"""
+        SELECT RTRIM(USR_LOGIN) AS login, RTRIM(USR_NOME) AS nome
+        FROM usr
+        WHERE RTRIM(USR_STATUS) = 'A'
+          AND USR_LOGIN IS NOT NULL AND LTRIM(RTRIM(USR_LOGIN)) <> ''
+          {filtro}
+        ORDER BY RTRIM(USR_NOME)
+    """, tuple(params))
+    return {"total": len(rows), "usuarios": rows}
+
+
+@app.get("/api/chat/canais")
+def chat_canais(login: str):
+    from chat_interno import listar_canais
+    return listar_canais(login)
+
+
+@app.get("/api/chat/mensagens")
+def chat_mensagens(canal: str, limite: int = 100):
+    from chat_interno import listar_mensagens
+    return listar_mensagens(canal, limite)
+
+
+class ChatEnviarRequest(BaseModel):
+    canal_id: str
+    remetente_login: str
+    remetente_nome: str
+    texto: str
+    importante: bool = False
+
+
+@app.post("/api/chat/mensagens")
+def chat_enviar(payload: ChatEnviarRequest):
+    from chat_interno import enviar_mensagem
+    try:
+        return enviar_mensagem(payload.canal_id, payload.remetente_login, payload.remetente_nome, payload.texto, payload.importante)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/chat/alertas")
+def chat_alertas(login: str):
+    """Mensagens importantes ainda não vistas por esse login, em qualquer
+    canal que ele enxergue — usado pelo popup global (aparece em qualquer
+    tela do Dashboard, não só dentro do chat)."""
+    from chat_interno import listar_alertas_novos
+    return listar_alertas_novos(login)
+
+
+class ChatAlertaVistoRequest(BaseModel):
+    login: str
+    mensagem_id: int
+
+
+@app.post("/api/chat/alertas/marcar-visto")
+def chat_alerta_marcar_visto(payload: ChatAlertaVistoRequest):
+    from chat_interno import marcar_alerta_visto
+    marcar_alerta_visto(payload.login, payload.mensagem_id)
+    return {"ok": True}
+
+
+class ChatDmIniciarRequest(BaseModel):
+    login_a: str
+    nome_a: str
+    login_b: str
+    nome_b: str
+
+
+@app.post("/api/chat/dm/iniciar")
+def chat_dm_iniciar(payload: ChatDmIniciarRequest):
+    from chat_interno import obter_ou_criar_dm
+    canal_id = obter_ou_criar_dm(payload.login_a, payload.nome_a, payload.login_b, payload.nome_b)
+    return {"canal_id": canal_id}
+
+
+class ChatGrupoCriarRequest(BaseModel):
+    nome: str
+    criador_login: str
+    criador_nome: str
+    participantes: list  # [{"login": ..., "nome": ...}, ...]
+
+
+@app.post("/api/chat/grupo/criar")
+def chat_grupo_criar(payload: ChatGrupoCriarRequest):
+    from chat_interno import criar_grupo
+    try:
+        canal_id = criar_grupo(payload.nome, payload.criador_login, payload.criador_nome, payload.participantes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"canal_id": canal_id}
+
+
+@app.get("/api/chat/grupo/participantes")
+def chat_grupo_participantes(canal: str):
+    from chat_interno import listar_participantes
+    return listar_participantes(canal)
+
+
+class ChatLidoRequest(BaseModel):
+    canal_id: str
+    login: str
+
+
+@app.post("/api/chat/marcar-lido")
+def chat_marcar_lido(payload: ChatLidoRequest):
+    from chat_interno import marcar_lido
+    marcar_lido(payload.canal_id, payload.login)
+    return {"ok": True}
 
 
 # ── ENDPOINT: Salvar permissões de um usuário ─────────────────────────────────
@@ -748,6 +1015,18 @@ async def startup_event():
     print("OPENAI KEY no startup:", os.environ.get("OPENAI_API_KEY", "NAO")[:10])
 
     inicializar_tabela_permissoes()
+    inicializar_db_guias()
+    inicializar_db_organograma()
+    try:
+        from agenda_bot import inicializar_db as inicializar_db_agenda_bot
+        inicializar_db_agenda_bot()
+    except Exception as e:
+        print(f"[Startup] Erro ao iniciar DB do agenda_bot: {e}")
+    try:
+        from chat_interno import inicializar_db as inicializar_db_chat
+        inicializar_db_chat()
+    except Exception as e:
+        print(f"[Startup] Erro ao iniciar DB do chat_interno: {e}")
     if _WPP_AVAILABLE:
         try:
             from scheduler import set_query_func, iniciar_scheduler_em_background
@@ -779,6 +1058,22 @@ def query(sql: str, params: tuple = ()):
     rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
     conn.close()
     return rows
+
+def get_conn_hml():
+    """Conexão com o banco de HOMOLOGAÇÃO (smart_hml) — usado para ESCRITA de
+    registros clínicos (RCL) até validação/aprovação para produção. Nunca usar
+    para leitura de dados operacionais reais (fila, histórico) — isso é sempre
+    lido da produção (get_conn/query)."""
+    conn_str = (
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        "SERVER=tcp:192.168.1.9,1433;"
+        "DATABASE=smart_hml;"
+        "UID=smart;"
+        "PWD=smart@pixeon16;"
+        "TrustServerCertificate=yes;"
+        "Encrypt=no;"
+    )
+    return pyodbc.connect(conn_str)
 
 # ─── Helpers de período ────────────────────────────────────────────────────────
 PERIODOS = {"7d": 7, "30d": 30, "90d": 90}
@@ -1337,10 +1632,355 @@ def financeiro_comparativo(periodo: str = "30d"):
     """)
 
     mte_dict = {r["mes"]: r["recebido_caixa"] for r in mte_rows}
+
+    # Despesas pagas por mês (IPG) — completa a visão Faturado x Recebido x Pago
+    ipg_rows = query("""
+        SELECT
+            FORMAT(IPG_DT_PGTO, 'yyyy-MM') AS mes,
+            SUM(IPG_VALOR)                 AS pago
+        FROM IPG
+        WHERE RTRIM(IPG_STATUS) = 'R'
+          AND IPG_DT_PGTO >= DATEADD(month, -6, GETDATE())
+        GROUP BY FORMAT(IPG_DT_PGTO, 'yyyy-MM')
+        ORDER BY mes
+    """)
+    ipg_dict = {r["mes"]: r["pago"] for r in ipg_rows}
+
     for r in rows:
         r["recebido_caixa"] = mte_dict.get(r["mes"], 0)
+        r["pago_despesas"] = ipg_dict.get(r["mes"], 0)
 
     return rows
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FLUXO DE CAIXA — módulo Produção
+#
+# Entradas: mte (recebimento real) + fat (faturado/a receber via fat_sld)
+# Saídas:   CPG (cabeçalho da despesa) + IPG (parcelas — IPG_STATUS: P=pendente,
+#           R=pago/realizado, C=cancelado, A=aberto; IPG_DT_VCTO=vencimento,
+#           IPG_DT_PGTO=data de pagamento real, IPG_VALOR=valor da parcela)
+# Categoria: CCT (plano de contas) via CPG_CCT_COD_PASSIVO
+# Fornecedor: PSV via CPG_PSV_COD, fallback pro texto livre CPG_CREDOR
+#
+# NOTA: CPG/IPG têm uso histórico concentrado em 2018-2020 (séries 117-119) —
+# poucos lançamentos recentes (a clínica controla despesa fora do sistema hoje).
+# Os dados antigos aparecem no relatório mesmo assim; a partir de agora, novos
+# lançamentos feitos pelo Dashboard (POST /api/financeiro/despesas) passam a
+# alimentar essa mesma tabela pra frente.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/financeiro/fluxo-caixa/resumo")
+def fluxo_caixa_resumo(periodo: str = "30d"):
+    inicio, fim = periodo_datas(periodo)
+
+    entradas = query("""
+        SELECT ISNULL(SUM(mte.mte_valor), 0) AS total
+        FROM mte
+        WHERE mte.mte_dthr BETWEEN ? AND ?
+          AND (mte.mte_del_logica IS NULL OR mte.mte_del_logica <> 'S')
+          AND (mte.mte_estorno    IS NULL OR mte.mte_estorno    <> 'S')
+    """, (inicio, fim))[0]["total"]
+
+    saidas = query("""
+        SELECT ISNULL(SUM(IPG_VALOR), 0) AS total
+        FROM IPG
+        WHERE RTRIM(IPG_STATUS) = 'R'
+          AND IPG_DT_PGTO BETWEEN ? AND ?
+    """, (inicio, fim))[0]["total"]
+
+    # "A receber" fica restrito aos próximos 30 dias — fat_sld>0 acumula faturas
+    # em aberto desde 2017 (R$75mi+ no total), a maior parte já vencida há anos
+    # (glosa/baixa nunca processada) — não é "dinheiro esperado em breve", então
+    # não entra no saldo projetado. Fica separado como "em_atraso" (contexto de
+    # cobrança), sem somar na projeção de caixa.
+    a_receber_30d = query("""
+        SELECT ISNULL(SUM(fat_sld), 0) AS total
+        FROM fat
+        WHERE fat_sld > 0
+          AND fat_venc BETWEEN GETDATE() AND DATEADD(day, 30, GETDATE())
+    """)[0]["total"]
+
+    em_atraso = query("""
+        SELECT ISNULL(SUM(fat_sld), 0) AS total, COUNT(*) AS qtd
+        FROM fat
+        WHERE fat_sld > 0 AND fat_venc < GETDATE()
+    """)[0]
+
+    a_pagar_30d = query("""
+        SELECT ISNULL(SUM(IPG_VALOR), 0) AS total
+        FROM IPG
+        WHERE RTRIM(IPG_STATUS) = 'P'
+          AND IPG_DT_VCTO BETWEEN GETDATE() AND DATEADD(day, 30, GETDATE())
+    """)[0]["total"]
+
+    saldo = float(entradas) - float(saidas)
+    saldo_projetado = saldo + float(a_receber_30d) - float(a_pagar_30d)
+
+    return {
+        "entradas": float(entradas),
+        "saidas": float(saidas),
+        "saldo": saldo,
+        "a_receber_30d": float(a_receber_30d),
+        "a_pagar_30d": float(a_pagar_30d),
+        "saldo_projetado_30d": saldo_projetado,
+        "em_atraso_valor": float(em_atraso["total"]),
+        "em_atraso_qtd": em_atraso["qtd"],
+    }
+
+
+@app.get("/api/financeiro/fluxo-caixa/diario")
+def fluxo_caixa_diario(periodo: str = "30d"):
+    inicio, fim = periodo_datas(periodo)
+
+    entradas = query("""
+        SELECT CAST(mte.mte_dthr AS DATE) AS data, SUM(mte.mte_valor) AS total
+        FROM mte
+        WHERE mte.mte_dthr BETWEEN ? AND ?
+          AND (mte.mte_del_logica IS NULL OR mte.mte_del_logica <> 'S')
+          AND (mte.mte_estorno    IS NULL OR mte.mte_estorno    <> 'S')
+        GROUP BY CAST(mte.mte_dthr AS DATE)
+    """, (inicio, fim))
+
+    saidas = query("""
+        SELECT CAST(IPG_DT_PGTO AS DATE) AS data, SUM(IPG_VALOR) AS total
+        FROM IPG
+        WHERE RTRIM(IPG_STATUS) = 'R'
+          AND IPG_DT_PGTO BETWEEN ? AND ?
+        GROUP BY CAST(IPG_DT_PGTO AS DATE)
+    """, (inicio, fim))
+
+    mapa = {}
+    for r in entradas:
+        d = r["data"].strftime("%Y-%m-%d")
+        mapa.setdefault(d, {"data": d, "entrada": 0.0, "saida": 0.0})
+        mapa[d]["entrada"] = float(r["total"] or 0)
+    for r in saidas:
+        d = r["data"].strftime("%Y-%m-%d")
+        mapa.setdefault(d, {"data": d, "entrada": 0.0, "saida": 0.0})
+        mapa[d]["saida"] = float(r["total"] or 0)
+
+    dias = sorted(mapa.values(), key=lambda x: x["data"])
+    saldo_acumulado = 0.0
+    for d in dias:
+        saldo_acumulado += d["entrada"] - d["saida"]
+        d["saldo_acumulado"] = round(saldo_acumulado, 2)
+        d["entrada"] = round(d["entrada"], 2)
+        d["saida"] = round(d["saida"], 2)
+
+    return dias
+
+
+@app.get("/api/financeiro/fluxo-caixa/projecao")
+def fluxo_caixa_projecao(dias: int = 30):
+    a_receber = query("""
+        SELECT CAST(fat_venc AS DATE) AS data, SUM(fat_sld) AS total
+        FROM fat
+        WHERE fat_sld > 0
+          AND fat_venc BETWEEN GETDATE() AND DATEADD(day, ?, GETDATE())
+        GROUP BY CAST(fat_venc AS DATE)
+    """, (dias,))
+
+    a_pagar = query("""
+        SELECT CAST(IPG_DT_VCTO AS DATE) AS data, SUM(IPG_VALOR) AS total
+        FROM IPG
+        WHERE RTRIM(IPG_STATUS) = 'P'
+          AND IPG_DT_VCTO BETWEEN GETDATE() AND DATEADD(day, ?, GETDATE())
+        GROUP BY CAST(IPG_DT_VCTO AS DATE)
+    """, (dias,))
+
+    mapa = {}
+    for r in a_receber:
+        d = r["data"].strftime("%Y-%m-%d")
+        mapa.setdefault(d, {"data": d, "a_receber": 0.0, "a_pagar": 0.0})
+        mapa[d]["a_receber"] = float(r["total"] or 0)
+    for r in a_pagar:
+        d = r["data"].strftime("%Y-%m-%d")
+        mapa.setdefault(d, {"data": d, "a_receber": 0.0, "a_pagar": 0.0})
+        mapa[d]["a_pagar"] = float(r["total"] or 0)
+
+    dias_ordenados = sorted(mapa.values(), key=lambda x: x["data"])
+    saldo = 0.0
+    for d in dias_ordenados:
+        saldo += d["a_receber"] - d["a_pagar"]
+        d["saldo_projetado"] = round(saldo, 2)
+        d["a_receber"] = round(d["a_receber"], 2)
+        d["a_pagar"] = round(d["a_pagar"], 2)
+
+    return dias_ordenados
+
+
+@app.get("/api/financeiro/fluxo-caixa/categorias")
+def fluxo_caixa_categorias(periodo: str = "30d"):
+    inicio, fim = periodo_datas(periodo)
+    rows = query("""
+        SELECT
+            ISNULL(RTRIM(cct.CCT_DESCR), 'Sem categoria') AS categoria,
+            SUM(ipg.IPG_VALOR)                            AS total,
+            COUNT(*)                                       AS qtd
+        FROM IPG ipg
+        JOIN CPG cpg ON cpg.CPG_SERIE = ipg.IPG_CPG_SERIE AND cpg.CPG_NUM = ipg.IPG_CPG_NUM
+        LEFT JOIN CCT cct ON cct.CCT_COD = cpg.CPG_CCT_COD_PASSIVO
+        WHERE RTRIM(ipg.IPG_STATUS) = 'R'
+          AND ipg.IPG_DT_PGTO BETWEEN ? AND ?
+        GROUP BY RTRIM(cct.CCT_DESCR)
+        ORDER BY total DESC
+    """, (inicio, fim))
+    return rows
+
+
+@app.get("/api/financeiro/fluxo-caixa/fornecedores")
+def fluxo_caixa_fornecedores(periodo: str = "30d"):
+    inicio, fim = periodo_datas(periodo)
+    rows = query("""
+        SELECT
+            ISNULL(RTRIM(psv.PSV_NOME), ISNULL(RTRIM(cpg.CPG_CREDOR), 'Não informado')) AS fornecedor,
+            SUM(ipg.IPG_VALOR)  AS total,
+            COUNT(*)            AS qtd
+        FROM IPG ipg
+        JOIN CPG cpg ON cpg.CPG_SERIE = ipg.IPG_CPG_SERIE AND cpg.CPG_NUM = ipg.IPG_CPG_NUM
+        LEFT JOIN PSV psv ON psv.PSV_COD = cpg.CPG_PSV_COD
+        WHERE RTRIM(ipg.IPG_STATUS) = 'R'
+          AND ipg.IPG_DT_PGTO BETWEEN ? AND ?
+        GROUP BY ISNULL(RTRIM(psv.PSV_NOME), ISNULL(RTRIM(cpg.CPG_CREDOR), 'Não informado'))
+        ORDER BY total DESC
+    """, (inicio, fim))
+    return rows[:15]
+
+
+@app.get("/api/financeiro/centros-custo")
+def centros_custo():
+    rows = query("""
+        SELECT CCT_COD AS cod, RTRIM(CCT_DESCR) AS descricao
+        FROM CCT
+        ORDER BY CCT_DESCR
+    """)
+    return rows
+
+
+@app.get("/api/financeiro/fornecedores/busca")
+def fornecedores_busca(q: str = ""):
+    q = (q or "").strip()
+    if len(q) < 2:
+        return []
+    rows = query("""
+        SELECT TOP 20 PSV_COD AS cod, RTRIM(PSV_NOME) AS nome, RTRIM(ISNULL(PSV_CPF,'')) AS cpf
+        FROM PSV
+        WHERE RTRIM(PSV_TIPO) = 'M' AND PSV_NOME LIKE ?
+        ORDER BY PSV_NOME
+    """, (f"%{q}%",))
+    return rows
+
+
+# ── LANÇAMENTO DE NOVA DESPESA (escrita em produção — CPG/IPG) ────────────────
+# Usa uma série exclusiva (200) nunca utilizada pelo aplicativo desktop da
+# Pixeon (que usa 117-120 no histórico e 123-126 para reembolsos automáticos
+# a pacientes — CPG_TIPO_COMPROMISSO='U'), evitando qualquer colisão ou mistura
+# semântica com lançamentos gerados pelo sistema. EMP_COD=0 ("Não especificado")
+# e GCC_COD='1' (ICDS - Clínica de Especialidades, marcado como GCC_DEFAULT)
+# são os valores padrão confirmados via investigação da distribuição real de
+# lançamentos existentes. CPG_TIPO_COMPROMISSO='N' = compromisso normal
+# (despesa genérica), o mesmo valor usado nos lançamentos reais de fornecedor.
+DESPESA_CPG_SERIE = 200
+
+class DespesaRequest(BaseModel):
+    fornecedor_nome: str
+    psv_cod: int | None = None
+    fis_jur: str          # "F" ou "J"
+    cic_rg: str = ""      # CPF ou CNPJ
+    cct_cod: int | None = None
+    descricao: str
+    valor_total: float
+    parcelas: int = 1
+    data_primeira_parcela: str   # "YYYY-MM-DD"
+
+@app.post("/api/financeiro/despesas")
+def criar_despesa(req: DespesaRequest):
+    fis_jur = req.fis_jur.strip().upper()
+    if fis_jur not in ("F", "J"):
+        raise HTTPException(400, "fis_jur deve ser 'F' ou 'J'")
+    if req.valor_total <= 0:
+        raise HTTPException(400, "valor_total deve ser maior que zero")
+    if req.parcelas < 1:
+        raise HTTPException(400, "parcelas deve ser pelo menos 1")
+    if not req.fornecedor_nome.strip():
+        raise HTTPException(400, "fornecedor_nome é obrigatório")
+    if not req.descricao.strip():
+        raise HTTPException(400, "descricao é obrigatória")
+
+    try:
+        primeiro_vcto = datetime.strptime(req.data_primeira_parcela, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "data_primeira_parcela inválida (use YYYY-MM-DD)")
+
+    agora = datetime.now()
+    valor_parcela = round(req.valor_total / req.parcelas, 2)
+    # ajusta a última parcela para não perder centavos no arredondamento
+    valores_parcelas = [valor_parcela] * req.parcelas
+    diff = round(req.valor_total - sum(valores_parcelas), 2)
+    valores_parcelas[-1] = round(valores_parcelas[-1] + diff, 2)
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # conn.autocommit=False (padrão do pyodbc) já mantém uma transação implícita
+        # aberta desde a primeira instrução até commit()/rollback() — um "BEGIN
+        # TRANSACTION" explícito aqui aninharia uma segunda transação que o
+        # commit() do pyodbc não fecha por completo, fazendo o INSERT ser
+        # revertido silenciosamente ao fechar a conexão. Não adicionar de volta.
+        cur.execute("""
+            SELECT ISNULL(MAX(CPG_NUM), 0) + 1
+            FROM CPG WITH (UPDLOCK, HOLDLOCK)
+            WHERE CPG_SERIE = ?
+        """, (DESPESA_CPG_SERIE,))
+        novo_num = cur.fetchone()[0]
+
+        cur.execute("""
+            INSERT INTO CPG (
+                CPG_SERIE, CPG_NUM, CPG_TIPO_COMPROMISSO, CPG_DT_REG,
+                CPG_PSV_COD, CPG_EMP_COD, CPG_FIS_JUR, CPG_CREDOR, CPG_CIC_RG,
+                CPG_TOT_PARC, CPG_YYMM_COMPETENCIA, CPG_GCC_COD, CPG_OBS,
+                CPG_DT_DOC_EMISS, CPG_CCT_COD_PASSIVO, CPG_EXPORT_CONTAB
+            ) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?)
+        """, (
+            DESPESA_CPG_SERIE, novo_num, "N", agora,
+            req.psv_cod, 0, fis_jur.ljust(2), req.fornecedor_nome.strip()[:100], req.cic_rg.strip()[:16],
+            req.parcelas, int(primeiro_vcto.strftime("%Y%m")), "1".ljust(3), req.descricao.strip()[:400],
+            agora, req.cct_cod,
+            "N",
+        ))
+
+        for i, valor in enumerate(valores_parcelas):
+            vcto = primeiro_vcto + timedelta(days=30 * i)
+            cur.execute("""
+                INSERT INTO IPG (
+                    IPG_CPG_SERIE, IPG_CPG_NUM, IPG_PARC, IPG_DT_VCTO,
+                    IPG_VALOR, IPG_STATUS, IPG_VALOR_PENSAO
+                ) VALUES (?,?,?,?, ?,?,?)
+            """, (
+                DESPESA_CPG_SERIE, novo_num, i + 1, vcto,
+                valor, "P", 0,
+            ))
+
+        conn.commit()
+        conn.close()
+    except pyodbc.Error as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        raise HTTPException(400, f"Erro ao gravar despesa: {e}")
+
+    return {
+        "ok": True,
+        "cpg_serie": DESPESA_CPG_SERIE,
+        "cpg_num": novo_num,
+        "parcelas_criadas": req.parcelas,
+        "valores_parcelas": valores_parcelas,
+    }
+
+
     """
     esp_cod = PK (char 3), esp_nome = descrição (varchar 100)
     esp_del_logica <> 'S' — filtra especialidades ativas
@@ -1726,6 +2366,119 @@ def pacientes_aniversariantes(mes: int = None):
         ORDER BY DAY(pac.pac_nasc), RTRIM(pac.pac_nome)
     """)
     return rows
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PREVISÃO DE FATURAMENTO POR HORA — hoje, em tempo real, por recepção
+#
+# Checado direto nos dados (agm executado, últimos 90 dias, vinculado à OSM
+# gerada): 2.084 caem em RCN (Consultórios) contra 24 em RDI e ZERO em ROC/RCI
+# — ou seja, o agendamento formal (agm) só é usado de fato pela recepção de
+# Consultórios; Ocupacional e Diagnóstico são por demanda, sem agenda prévia
+# confiável (confirmado pelo usuário). Por isso a projeção usa duas fontes
+# diferentes conforme a recepção:
+#   - Consultórios (RCN): valor já faturado hoje + o que está agendado e ainda
+#     não executado (agm_stat='A', via agm_valor) — sinal direto e confiável.
+#   - Ocupacional/Diagnóstico/Censo Imagem: sem agenda confiável, então a
+#     previsão das horas futuras usa a MÉDIA HISTÓRICA daquela recepção,
+#     naquele horário específico, no MESMO dia da semana de hoje (últimos ~120
+#     dias) — ex: terça 14h costuma faturar X em Ocupacional, então é isso que
+#     entra como previsão da terça 14h de hoje, enquanto ainda não chegou lá.
+# Em qualquer caso, hora já ocorrida sempre usa o valor real (nunca a média),
+# então a mistura passado-real / futuro-previsto acontece sozinha, sem corte manual.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/financeiro/previsao-hora")
+def previsao_faturamento_hora():
+    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI"]
+
+    real_rows = query("""
+        SELECT DATEPART(hour, osm.osm_dthr) AS hora,
+            CASE WHEN RTRIM(osm.osm_str)='PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END AS recepcao,
+            SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) AS valor
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        WHERE smm.SMM_SFAT IN ('A','F','P')
+          AND CAST(osm.osm_dthr AS DATE) = CAST(GETDATE() AS DATE)
+          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI')
+        GROUP BY DATEPART(hour, osm.osm_dthr), CASE WHEN RTRIM(osm.osm_str)='PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END
+    """)
+
+    pendente_rows = query("""
+        SELECT DATEPART(hour, agm_hini) AS hora, ISNULL(SUM(agm_valor),0) AS valor
+        FROM agm
+        WHERE CAST(agm_hini AS DATE) = CAST(GETDATE() AS DATE)
+          AND agm_stat = 'A'
+        GROUP BY DATEPART(hour, agm_hini)
+    """)
+
+    # Média histórica por hora/recepção, mesmo dia da semana de hoje, últimos ~120 dias.
+    # DATEPART(weekday,...) depende do @@DATEFIRST da sessão — comparar contra
+    # DATEPART(weekday, GETDATE()) no mesmo lote evita depender de valor fixo.
+    dias_mesmo_dia_semana = query("""
+        SELECT COUNT(DISTINCT CAST(osm_dthr AS DATE)) AS qtd
+        FROM osm
+        WHERE osm_dthr >= DATEADD(day, -120, CAST(GETDATE() AS DATE))
+          AND osm_dthr < CAST(GETDATE() AS DATE)
+          AND DATEPART(weekday, osm_dthr) = DATEPART(weekday, GETDATE())
+    """)[0]["qtd"] or 1
+
+    media_rows = query("""
+        SELECT DATEPART(hour, osm.osm_dthr) AS hora,
+            CASE WHEN RTRIM(osm.osm_str)='PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END AS recepcao,
+            SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) AS valor_total
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        WHERE smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_dthr >= DATEADD(day, -120, CAST(GETDATE() AS DATE))
+          AND osm.osm_dthr < CAST(GETDATE() AS DATE)
+          AND DATEPART(weekday, osm.osm_dthr) = DATEPART(weekday, GETDATE())
+          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI')
+        GROUP BY DATEPART(hour, osm.osm_dthr), CASE WHEN RTRIM(osm.osm_str)='PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END
+    """)
+
+    real = {h: {c: 0.0 for c in RECEPCOES_COD} for h in range(24)}
+    for r in real_rows:
+        if r["recepcao"] in RECEPCOES_COD:
+            real[r["hora"]][r["recepcao"]] = float(r["valor"] or 0)
+
+    pendente_total = {h: 0.0 for h in range(24)}
+    for r in pendente_rows:
+        pendente_total[r["hora"]] = float(r["valor"] or 0)
+
+    media_historica = {h: {c: 0.0 for c in RECEPCOES_COD} for h in range(24)}
+    for r in media_rows:
+        if r["recepcao"] in RECEPCOES_COD:
+            media_historica[r["hora"]][r["recepcao"]] = round(float(r["valor_total"] or 0) / dias_mesmo_dia_semana, 2)
+
+    hora_agora = datetime.now().hour
+    horas = []
+    for h in range(6, 21):  # janela de funcionamento típica da clínica
+        ja_ocorreu = h <= hora_agora  # hora em andamento também usa o real parcial, nunca a média
+        por_recepcao = {}
+        for c in RECEPCOES_COD:
+            if c == "RCN":
+                por_recepcao[c] = round(real[h][c] + pendente_total[h], 2)
+            else:
+                por_recepcao[c] = round(real[h][c] if ja_ocorreu else media_historica[h][c], 2)
+        horas.append({
+            "hora": h,
+            "real_total": round(sum(real[h].values()), 2),
+            "pendente_total": round(pendente_total[h], 2),
+            "previsao_total": round(sum(por_recepcao.values()), 2),
+            "por_recepcao": por_recepcao,
+        })
+
+    return {
+        "atualizado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "recepcoes": [{"cod": c, "nome": RECEPCOES.get(c, c)} for c in RECEPCOES_COD],
+        "aviso": "Consultórios projeta pelo agendado ainda não executado. Ocupacional, Diagnóstico e Censo Imagem não têm agenda confiável, então as horas futuras usam a média histórica daquela recepção no mesmo horário e dia da semana (últimos ~120 dias).",
+        "horas": horas,
+        "total_dia_previsto": round(sum(h["previsao_total"] for h in horas), 2),
+        "total_dia_real": round(sum(h["real_total"] for h in horas), 2),
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PRODUÇÃO MENSAL — grade diária por tipo de atendimento
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1869,7 +2622,1789 @@ def producao_mensal(ano: int = None, mes: int = None, meta_diaria: float = None,
         "dias_restantes":     round(dias_restantes, 2),
         "dias_uteis_mes":     round(dias_uteis_mes, 2),
     }
-# Adicione este endpoint no main.py logo após o /api/financeiro/producao-mensal
+@app.get("/api/financeiro/producao-acumulada")
+def producao_acumulada(ano_inicio: int = None, mes_inicio: int = None,
+                        ano_fim: int = None, mes_fim: int = None,
+                        meta_mensal_fixa: float = 1200000.0, meta_sabado_fixa: float = None):
+    """
+    Produção/receita acumulada num intervalo de meses (ex: Janeiro até agora,
+    ou qualquer intervalo arbitrário de meses/anos) — complementa a visão de
+    calendário de um mês só (producao_mensal) com uma visão de tendência
+    ao longo de vários meses.
+
+    Retorna: total acumulado dia a dia (pra gráfico de linha de crescimento),
+    subtotal por mês (pra gráfico de barras comparando meses), e KPIs do
+    intervalo inteiro.
+    """
+    now = datetime.now()
+    if not ano_fim: ano_fim = now.year
+    if not mes_fim: mes_fim = now.month
+    if not ano_inicio: ano_inicio = ano_fim
+    if not mes_inicio: mes_inicio = 1
+
+    import calendar
+    inicio = f"{ano_inicio}-{mes_inicio:02d}-01"
+    ultimo_dia_fim = calendar.monthrange(ano_fim, mes_fim)[1]
+    # se o mês final é o mês corrente, para no dia de hoje (não no fim do mês,
+    # que ainda não aconteceu) — senão usa o mês inteiro.
+    if ano_fim == now.year and mes_fim == now.month:
+        fim = now.strftime("%Y-%m-%d")
+    else:
+        fim = f"{ano_fim}-{mes_fim:02d}-{ultimo_dia_fim}"
+
+    rows = query(f"""
+        SELECT
+            CAST(osm.osm_dthr AS DATE) AS data,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A', 'F', 'P')
+        GROUP BY CAST(osm.osm_dthr AS DATE)
+        ORDER BY data
+    """)
+    for r in rows:
+        if hasattr(r.get("data"), "strftime"):
+            r["data"] = r["data"].strftime("%Y-%m-%d")
+
+    # ── Série diária acumulada (pro gráfico de linha de crescimento) ──
+    acumulado = 0.0
+    dias_acumulados = []
+    por_mes = {}
+    for r in rows:
+        valor = r["total"] or 0
+        acumulado += valor
+        dias_acumulados.append({"data": r["data"], "total": valor, "acumulado": round(acumulado, 2)})
+        chave_mes = r["data"][:7]  # YYYY-MM
+        por_mes[chave_mes] = por_mes.get(chave_mes, 0) + valor
+
+    # ── Subtotal por mês (pro gráfico de barras) — inclui meses sem produção como 0 ──
+    meses_lista = []
+    y, m = ano_inicio, mes_inicio
+    while (y, m) <= (ano_fim, mes_fim):
+        chave = f"{y}-{m:02d}"
+        meses_lista.append({"ano": y, "mes": m, "label": f"{MESES_PT_ABREV[m-1]}/{y}", "total": round(por_mes.get(chave, 0), 2)})
+        m += 1
+        if m > 12: m, y = 1, y + 1
+
+    total_geral = sum(r["total"] or 0 for r in rows)
+    dias_com_producao = len([r for r in rows if (r["total"] or 0) > 0])
+    media_diaria = total_geral / dias_com_producao if dias_com_producao else 0
+    n_meses = len(meses_lista)
+    media_mensal = total_geral / n_meses if n_meses else 0
+
+    return {
+        "inicio": inicio, "fim": fim,
+        "ano_inicio": ano_inicio, "mes_inicio": mes_inicio,
+        "ano_fim": ano_fim, "mes_fim": mes_fim,
+        "dias_acumulados": dias_acumulados,
+        "por_mes": meses_lista,
+        "total_geral": round(total_geral, 2),
+        "media_diaria": round(media_diaria, 2),
+        "media_mensal": round(media_mensal, 2),
+        "meta_periodo": round(meta_mensal_fixa * n_meses, 2),
+    }
+
+
+def _decompor_sazonalidade(rows_mensais, ano, anos_historico=4, somente_meses_com_producao=False, metodo="sazonal", janela_tendencia=None):
+    """
+    Helper compartilhado: recebe linhas {ano, mes, total} e devolve o índice
+    sazonal por mês (histórico, excluindo o ano corrente) + o "nível de
+    tendência" do ano corrente (produção deseasonalizada) — mesmo método
+    usado em previsao_anual, extraído pra reaproveitar em outras métricas
+    (ex: Hapvida honorários/exames) sem duplicar a lógica.
+
+    somente_meses_com_producao: quando True, meses fechados com produção
+    zero (ex: setor que começou a operar/faturar no meio do ano) não entram
+    no cálculo do nível de tendência — evita que meses "zerados antes de
+    existir" puxem a previsão pra baixo artificialmente. A classificação de
+    cada mês (produzido/parcial/previsto) continua igual, só o cálculo da
+    tendência usada pra projetar o futuro muda.
+
+    metodo: "sazonal" (padrão) usa o índice sazonal histórico por mês — bom
+    quando há vários anos de histórico consistente. "media_simples" ignora
+    o índice sazonal (fica em 1.0 pra todo mês) e projeta uma média plana
+    dos meses já produzidos no ano — necessário quando o histórico é
+    esparso/pouco confiável (ex: setor com só 1 ano de dado num mês
+    específico), onde um único valor fora da curva vira um índice sazonal
+    artificialmente alto e distorce a previsão. "linear" ajusta uma reta de
+    tendência (regressão linear simples) pelos meses da janela e projeta
+    essa reta pra frente — diferente da média simples (que "achata" tudo
+    num valor só), a reta continua subindo/descendo, capturando o RITMO de
+    crescimento (ou queda) em vez de só o nível médio.
+
+    janela_tendencia: se informado (ex: 6), a tendência usa só os últimos N
+    meses fechados em vez de todos os meses do ano até agora — evita que
+    uma média "achatada" desde janeiro dilua um crescimento forte e recente
+    (ex: clínica em expansão, onde a média Jan-Jul fica bem abaixo do ritmo
+    real de Jun/Jul e a previsão sazonal/média subestima os meses seguintes).
+    """
+    now = datetime.now()
+    producao_ano_atual = {r["mes"]: float(r["total"] or 0) for r in rows_mensais if r["ano"] == ano}
+    historico_por_mes = {m: [] for m in range(1, 13)}
+    for r in rows_mensais:
+        if r["ano"] != ano:
+            historico_por_mes[r["mes"]].append(float(r["total"] or 0))
+
+    mes_atual = now.month if ano == now.year else 13
+    # Todo mês antes do mês corrente é "fechado", MESMO que não tenha nenhum
+    # registro (ex: um convênio/setor específico com zero produção naquele
+    # mês) — usar só as chaves de producao_ano_atual deixava meses sem dado
+    # de fora, fazendo-os cair errado na categoria "previsto" (futuro).
+    meses_fechados = list(range(1, mes_atual))
+
+    if metodo in ("media_simples", "linear"):
+        indice_sazonal = {m: 1.0 for m in range(1, 13)}
+        valores_disponiveis = [v for v in historico_por_mes.values() if v]
+        media_geral_historico = sum(sum(v)/len(v) for v in valores_disponiveis) / len(valores_disponiveis) if valores_disponiveis else 0
+    else:
+        valores_disponiveis = [v for v in historico_por_mes.values() if v]
+        media_geral_historico = sum(sum(v)/len(v) for v in valores_disponiveis) / len(valores_disponiveis) if valores_disponiveis else 0
+
+        indice_sazonal = {}
+        for m in range(1, 13):
+            vals = historico_por_mes[m]
+            media_mes = sum(vals) / len(vals) if vals else media_geral_historico
+            indice_sazonal[m] = round(media_mes / media_geral_historico, 4) if media_geral_historico else 1.0
+
+    meses_base_tendencia = [m for m in meses_fechados if not somente_meses_com_producao or producao_ano_atual.get(m, 0) > 0]
+    if janela_tendencia:
+        meses_base_tendencia = meses_base_tendencia[-janela_tendencia:]
+
+    if metodo == "linear" and len(meses_base_tendencia) >= 2:
+        n = len(meses_base_tendencia)
+        xs = list(range(1, n + 1))
+        ys = [producao_ano_atual.get(m, 0) for m in meses_base_tendencia]
+        x_medio = sum(xs) / n
+        y_medio = sum(ys) / n
+        numerador = sum((x - x_medio) * (y - y_medio) for x, y in zip(xs, ys))
+        denominador = sum((x - x_medio) ** 2 for x in xs)
+        inclinacao = numerador / denominador if denominador else 0
+        intercepto = y_medio - inclinacao * x_medio
+        ultimo_mes_janela = meses_base_tendencia[-1]
+        previsao_por_mes = {}
+        for m in range(mes_atual, 13):
+            x_previsto = n + (m - ultimo_mes_janela)
+            previsao_por_mes[m] = round(max(intercepto + inclinacao * x_previsto, 0), 2)
+    else:
+        niveis = [producao_ano_atual.get(m, 0) / indice_sazonal[m] for m in meses_base_tendencia if indice_sazonal[m] > 0]
+        nivel_tendencia = sum(niveis) / len(niveis) if niveis else media_geral_historico
+        previsao_por_mes = {m: round(nivel_tendencia * indice_sazonal[m], 2) for m in range(mes_atual, 13)}
+
+    return {
+        "mes_atual": mes_atual,
+        "meses_fechados": meses_fechados,
+        "producao_ano_atual": producao_ano_atual,
+        "indice_sazonal": indice_sazonal,
+        "previsao_por_mes": previsao_por_mes,
+    }
+
+
+@app.get("/api/financeiro/hapvida-honorarios-exames")
+def hapvida_honorarios_exames(ano: int = None, anos_historico: int = 4, setor: str = "TODOS", cnpj: str = "interno"):
+    """
+    Produção do convênio Hapvida (CECAN, o ativo) separada em Honorários
+    (consultas) x Exames Solicitados — pro módulo de resultados financeiros
+    que o diretor apresenta aos donos. Inclui a média do primeiro semestre +
+    julho, e a previsão sazonal pros meses restantes (destaque out/nov/dez).
+
+    "Exames Solicitados" = exames Hapvida (CNPJ conforme filtro `cnpj`)
+    pedidos pelos médicos que TAMBÉM atendem consulta Hapvida — não conta
+    exame de médico que nunca atendeu consulta pelo convênio, mesmo que o
+    exame em si seja faturado como Hapvida (mesmo critério usado no painel
+    de Repasse Sem Médicos c/ Consulta, pra manter os números consistentes
+    entre os painéis).
+
+    setor: ponto de recepção (osm_str) — padrão TODOS os setores; "RCN" filtra
+    só Recepção Consultórios (onde as consultas/honorários de fato acontecem).
+    cnpj: "interno" (padrão, CNPJ da ICDS), "externo" (qualquer outro) ou "todos".
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    setor = None if (not setor or setor == "TODOS") else setor
+    filtro_setor = "AND RTRIM(osm.osm_str) = ?" if setor else ""
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+    params = (setor,) if setor else ()
+
+    # ── Honorários (consulta) — sem restrição de médico, é a consulta em si ──
+    rows_consulta = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes, 'consulta' AS tipo,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE RTRIM(cnv.cnv_cod) = '2X' AND sk.SMK_NOME LIKE 'CONSULTA%'
+          AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_setor}
+          {filtro_cnpj}
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+    """, params)
+
+    # ── Médicos que atendem consulta Hapvida NO ANO analisado — pra
+    # restringir os exames. Janela é o ano corrente, não histórico de vários
+    # anos: um médico que só fez consulta Hapvida anos atrás e hoje só pede
+    # exame não deve contar como "atende consulta Hapvida" agora. ──
+    rows_medicos_consulta = query(f"""
+        SELECT DISTINCT osm.osm_mreq AS medico
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE RTRIM(cnv.cnv_cod) = '2X' AND sk.SMK_NOME LIKE 'CONSULTA%'
+          AND osm.osm_dthr BETWEEN '{ano}-01-01' AND '{ano}-12-31 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_mreq IS NOT NULL
+          {filtro_setor}
+          {filtro_cnpj}
+    """, params)
+    medicos_consulta_ids = [r["medico"] for r in rows_medicos_consulta]
+
+    # ── Exames solicitados por esses médicos — CNPJ conforme filtro `cnpj` ──
+    if medicos_consulta_ids:
+        placeholders_med = ",".join("?" * len(medicos_consulta_ids))
+        rows_exame = query(f"""
+            SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes, 'exame' AS tipo,
+                   SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+            JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+            WHERE RTRIM(cnv.cnv_cod) = '2X' AND sk.SMK_NOME NOT LIKE 'CONSULTA%'
+              AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+              AND smm.SMM_SFAT IN ('A','F','P')
+              AND osm.osm_mreq IN ({placeholders_med})
+              {filtro_setor}
+              {filtro_cnpj}
+            GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+        """, tuple(medicos_consulta_ids) + params)
+    else:
+        rows_exame = []
+
+    rows = rows_consulta + rows_exame
+
+    def montar(tipo):
+        rows_tipo = [r for r in rows if r["tipo"] == tipo]
+        rows_agg = {}
+        for r in rows_tipo:
+            chave = (r["ano"], r["mes"])
+            rows_agg[chave] = rows_agg.get(chave, 0) + float(r["total"] or 0)
+        rows_mensais = [{"ano": a, "mes": m, "total": v} for (a, m), v in rows_agg.items()]
+
+        # Previsão = média simples dos últimos 3 meses com produção (Mai,
+        # Jun, Jul), projetada de forma plana pros meses seguintes — sem
+        # tendência linear nem índice sazonal, só a média jogada pra frente.
+        dec = _decompor_sazonalidade(rows_mensais, ano, anos_historico, somente_meses_com_producao=True, metodo="media_simples", janela_tendencia=3)
+        mes_atual = dec["mes_atual"]
+        prod_atual = dec["producao_ano_atual"]
+
+        meses_h1_jul = [m for m in range(1, 8) if m < mes_atual]
+        valores_h1_jul_com_producao = [prod_atual.get(m, 0) for m in meses_h1_jul if prod_atual.get(m, 0) > 0]
+        media_h1_jul = sum(valores_h1_jul_com_producao) / len(valores_h1_jul_com_producao) if valores_h1_jul_com_producao else 0
+        total_h1_jul = sum(prod_atual.get(m, 0) for m in meses_h1_jul)
+
+        meses_detalhe = []
+        for m in range(1, 13):
+            if m in dec["meses_fechados"]:
+                meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "produzido", "valor": round(prod_atual.get(m, 0), 2)})
+            elif m == mes_atual and ano == now.year:
+                meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "parcial", "valor": round(prod_atual.get(m, 0), 2)})
+            else:
+                meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "previsto", "valor": dec["previsao_por_mes"].get(m, 0)})
+
+        projecao_out = dec["previsao_por_mes"].get(10, 0)
+        projecao_nov = dec["previsao_por_mes"].get(11, 0)
+        projecao_dez = dec["previsao_por_mes"].get(12, 0)
+
+        return {
+            "meses": meses_detalhe,
+            "metodo_previsao": "media_simples",
+            "media_primeiro_semestre_mais_julho": round(media_h1_jul, 2),
+            "total_primeiro_semestre_mais_julho": round(total_h1_jul, 2),
+            "projecao_outubro": round(projecao_out, 2),
+            "projecao_novembro": round(projecao_nov, 2),
+            "projecao_dezembro": round(projecao_dez, 2),
+            "projecao_out_nov_dez": round(projecao_out + projecao_nov + projecao_dez, 2),
+            "total_ja_produzido": round(sum(prod_atual.get(m, 0) for m in range(1, mes_atual + 1)), 2),
+        }
+
+    return {
+        "ano": ano,
+        "convenio": "HAPVIDA CECAN",
+        "setor": setor or "TODOS",
+        "setor_nome": RECEPCOES.get(setor, "Todos os setores") if setor else "Todos os setores",
+        "cnpj": cnpj,
+        "consulta": montar("consulta"),
+        "exame": montar("exame"),
+    }
+
+
+@app.get("/api/financeiro/hapvida-exames-por-medico")
+def hapvida_exames_por_medico(ano: int = None, anos_historico: int = 4, setor: str = "TODOS", cnpj: str = "interno"):
+    """
+    Exames solicitados (Hapvida CECAN) abertos por médico requisitante — só
+    quem atendeu no setor filtrado (padrão TODOS os setores).
+    Média Jan-Jul + projeção Out/Nov/Dez por médico, com previsão simples
+    (média dos próprios meses com produção, sem índice sazonal — mais
+    direto de explicar por médico do que aplicar um padrão sazonal
+    agregado do setor a um único profissional, que teria pouco volume
+    mensal pra estimar sazonalidade individual de forma confiável).
+
+    Só entram médicos que TAMBÉM atendem consulta Hapvida (mesmo critério do
+    endpoint hapvida-honorarios-exames) — quem só solicita exame Hapvida sem
+    nunca ter feito consulta pelo convênio não aparece aqui, pra manter os
+    totais consistentes entre os painéis.
+    cnpj: "interno" (padrão), "externo" ou "todos".
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    setor = None if (not setor or setor == "TODOS") else setor
+    filtro_setor = "AND RTRIM(osm.osm_str) = ?" if setor else ""
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+
+    # ── Médicos que atendem consulta Hapvida NO ANO analisado — calculado
+    # uma única vez e reaproveitado como lista literal nas duas consultas
+    # abaixo. Janela é o ano corrente, não histórico de vários anos: médico
+    # que só fez consulta Hapvida anos atrás e hoje só pede exame não deve
+    # contar como "atende consulta Hapvida" agora. ──
+    params_medicos = (setor,) if setor else ()
+    rows_medicos_consulta = query(f"""
+        SELECT DISTINCT osm.osm_mreq AS medico
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE RTRIM(cnv.cnv_cod) = '2X' AND sk.SMK_NOME LIKE 'CONSULTA%'
+          AND osm.osm_dthr BETWEEN '{ano}-01-01' AND '{ano}-12-31 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_mreq IS NOT NULL
+          {filtro_setor}
+          {filtro_cnpj}
+    """, params_medicos)
+    medicos_consulta_ids = [r["medico"] for r in rows_medicos_consulta]
+
+    if not medicos_consulta_ids:
+        rows_med = []
+    else:
+        placeholders_med = ",".join("?" * len(medicos_consulta_ids))
+
+        # ── Exames por médico requisitante ──
+        params_med = tuple(medicos_consulta_ids) + ((setor,) if setor else ())
+        rows_med = query(f"""
+            SELECT RTRIM(psv.psv_apel) AS medico, YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+                   SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+            JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+            JOIN psv ON psv.psv_cod = osm.osm_mreq
+            WHERE RTRIM(cnv.cnv_cod) = '2X' AND sk.SMK_NOME NOT LIKE 'CONSULTA%'
+              AND osm.osm_mreq IS NOT NULL
+              AND osm.osm_mreq IN ({placeholders_med})
+              AND osm.osm_dthr >= '{ano}-01-01'
+              {filtro_setor}
+              {filtro_cnpj}
+              AND smm.SMM_SFAT IN ('A','F','P')
+            GROUP BY RTRIM(psv.psv_apel), YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+            ORDER BY medico, ano, mes
+        """, params_med)
+
+    mes_atual = now.month if ano == now.year else 13
+
+    por_medico = {}
+    for r in rows_med:
+        por_medico.setdefault(r["medico"], {})[r["mes"]] = float(r["total"] or 0)
+
+    resultado = []
+    for medico, meses_map in por_medico.items():
+        # Todo mês antes do mês corrente conta como "fechado", mesmo que o
+        # médico não tenha tido nenhum exame solicitado naquele mês (não só
+        # os meses em que ele aparece no dicionário) — senão um mês parado
+        # some do cálculo em vez de contar como zero.
+        meses_fechados = list(range(1, mes_atual))
+
+        # Média Jan-Jul e tendência usam só meses com produção real — um
+        # médico que começou a solicitar exame Hapvida no meio do ano teria
+        # os meses anteriores (zero, porque ele ainda não atendia) puxando a
+        # média/previsão pra baixo artificialmente. Mês zero continua
+        # contando certo como "produzido" no gráfico/tabela.
+        valores_h1_jul_com_producao = [meses_map.get(m, 0) for m in range(1, 8) if m < mes_atual and meses_map.get(m, 0) > 0]
+        media_h1_jul = sum(valores_h1_jul_com_producao) / len(valores_h1_jul_com_producao) if valores_h1_jul_com_producao else 0
+
+        # Previsão = média simples dos últimos 3 meses do médico com
+        # produção, projetada de forma plana pros meses seguintes — mesma
+        # metodologia usada nos demais painéis do módulo.
+        meses_com_producao = [m for m in meses_fechados if meses_map.get(m, 0) > 0][-3:]
+        valores_com_producao = [meses_map.get(m, 0) for m in meses_com_producao]
+        nivel_tendencia = sum(valores_com_producao) / len(valores_com_producao) if valores_com_producao else 0
+        projecao_out = round(nivel_tendencia, 2)
+        projecao_nov = round(nivel_tendencia, 2)
+        projecao_dez = round(nivel_tendencia, 2)
+
+        resultado.append({
+            "medico": medico,
+            "total_ja_produzido": round(sum(meses_map.get(m, 0) for m in range(1, mes_atual + 1)), 2),
+            "media_primeiro_semestre_mais_julho": round(media_h1_jul, 2),
+            "projecao_outubro": projecao_out,
+            "projecao_novembro": projecao_nov,
+            "projecao_dezembro": projecao_dez,
+            "projecao_out_nov_dez": round(projecao_out + projecao_nov + projecao_dez, 2),
+        })
+
+    resultado.sort(key=lambda x: -x["total_ja_produzido"])
+
+    return {
+        "ano": ano,
+        "convenio": "HAPVIDA CECAN",
+        "setor": setor or "TODOS",
+        "setor_nome": RECEPCOES.get(setor, "Todos os setores") if setor else "Todos os setores",
+        "cnpj": cnpj,
+        "metodo_previsao": "media_simples",
+        "medicos": resultado,
+    }
+
+
+@app.get("/api/financeiro/hapvida-repasse-sem-medicos-consulta")
+def hapvida_repasse_sem_medicos_consulta(ano: int = None, anos_historico: int = 4, setor: str = "TODOS", cnpj: str = "interno"):
+    """
+    Quanto ficaria o repasse do Hapvida (CECAN) SE excluíssemos tudo que é
+    ligado aos médicos que fazem consulta Hapvida — ou seja, tira tanto a
+    consulta em si quanto os exames que ESSES médicos solicitaram (não só
+    a consulta). Serve pra entender quanto do repasse depende desses médicos
+    x quanto vem de outras fontes (exames pedidos por médicos que não
+    atendem consulta Hapvida). cnpj: "interno" (padrão), "externo" ou "todos".
+
+    Psiquiatria fica de fora dessa conta — médico cuja única consulta
+    Hapvida é psiquiátrica não entra no grupo "sai", pra manter a receita
+    de psiquiatria de fora do cenário de retirada das consultas.
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    setor = None if (not setor or setor == "TODOS") else setor
+    filtro_setor = "AND RTRIM(osm.osm_str) = ?" if setor else ""
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+    params_setor = (setor,) if setor else ()
+
+    # ── Total Hapvida CECAN (consulta + exame), mensal ──
+    rows_total = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE RTRIM(cnv.cnv_cod) = '2X'
+          AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_setor}
+          {filtro_cnpj}
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+    """, params_setor)
+
+    # ── Médicos que fazem consulta Hapvida NO ANO analisado (exceto
+    # psiquiatria) — materializado uma vez em Python e reaproveitado como
+    # lista literal. Janela é o ano corrente, não histórico de vários anos:
+    # médico que só fez consulta Hapvida anos atrás não deve contar como
+    # "atende consulta Hapvida" agora. ──
+    rows_medicos_consulta = query(f"""
+        SELECT DISTINCT osm.osm_mreq AS medico
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE RTRIM(cnv.cnv_cod) = '2X' AND sk.SMK_NOME LIKE 'CONSULTA%'
+          AND sk.SMK_NOME NOT LIKE 'CONSULTA PSIQUIATRIA%'
+          AND osm.osm_dthr BETWEEN '{ano}-01-01' AND '{ano}-12-31 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_mreq IS NOT NULL
+          {filtro_setor}
+          {filtro_cnpj}
+    """, params_setor)
+    medicos_consulta_ids = [r["medico"] for r in rows_medicos_consulta]
+
+    # ── Produção (consulta + exame) ligada a esses médicos ──
+    if medicos_consulta_ids:
+        placeholders_med = ",".join("?" * len(medicos_consulta_ids))
+        rows_medicos = query(f"""
+            SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+                   SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+            WHERE RTRIM(cnv.cnv_cod) = '2X'
+              AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+              AND smm.SMM_SFAT IN ('A','F','P')
+              AND osm.osm_mreq IN ({placeholders_med})
+              {filtro_setor}
+              {filtro_cnpj}
+            GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+        """, tuple(medicos_consulta_ids) + params_setor)
+    else:
+        rows_medicos = []
+
+    def resumo(rows_mensais):
+        # Previsão simples baseada nos últimos 6 meses com produção, sem
+        # índice sazonal — mesma metodologia usada nos demais painéis do
+        # módulo (mais previsível e fácil de explicar que um ajuste sazonal).
+        dec = _decompor_sazonalidade(rows_mensais, ano, anos_historico, somente_meses_com_producao=True, metodo="media_simples", janela_tendencia=3)
+        mes_atual = dec["mes_atual"]
+        prod = dec["producao_ano_atual"]
+        valores_h1_jul = [prod.get(m, 0) for m in range(1, 8) if m < mes_atual]
+        media_h1_jul = sum(valores_h1_jul) / len(valores_h1_jul) if valores_h1_jul else 0
+        total_h1_jul = sum(valores_h1_jul)
+        proj_out = dec["previsao_por_mes"].get(10, 0)
+        proj_nov = dec["previsao_por_mes"].get(11, 0)
+        proj_dez = dec["previsao_por_mes"].get(12, 0)
+
+        # Valor por mês (real onde já fechou/parcial, previsto nos meses restantes) — pra gráfico mensal.
+        valor_por_mes = {}
+        for m in range(1, 13):
+            if m < mes_atual or (m == mes_atual and ano == now.year):
+                valor_por_mes[m] = prod.get(m, 0)
+            else:
+                valor_por_mes[m] = dec["previsao_por_mes"].get(m, 0)
+
+        return {
+            "total_ja_produzido": round(sum(prod.get(m, 0) for m in range(1, mes_atual + 1)), 2),
+            "total_primeiro_semestre_mais_julho": round(total_h1_jul, 2),
+            "media_primeiro_semestre_mais_julho": round(media_h1_jul, 2),
+            "projecao_out_nov_dez": round(proj_out + proj_nov + proj_dez, 2),
+            "valor_por_mes": valor_por_mes,
+            "mes_atual": mes_atual,
+        }
+
+    total = resumo(rows_total)
+    medicos_consulta = resumo(rows_medicos)
+    repasse_sem = {
+        "total_ja_produzido": round(total["total_ja_produzido"] - medicos_consulta["total_ja_produzido"], 2),
+        "total_primeiro_semestre_mais_julho": round(total["total_primeiro_semestre_mais_julho"] - medicos_consulta["total_primeiro_semestre_mais_julho"], 2),
+        "media_primeiro_semestre_mais_julho": round(total["media_primeiro_semestre_mais_julho"] - medicos_consulta["media_primeiro_semestre_mais_julho"], 2),
+        "projecao_out_nov_dez": round(total["projecao_out_nov_dez"] - medicos_consulta["projecao_out_nov_dez"], 2),
+    }
+
+    mes_atual = total["mes_atual"]
+    meses_comparativo = []
+    for m in range(1, 13):
+        v_total = total["valor_por_mes"].get(m, 0)
+        v_medicos = medicos_consulta["valor_por_mes"].get(m, 0)
+        meses_comparativo.append({
+            "mes": m, "label": MESES_PT_ABREV[m-1],
+            "tipo_dado": "produzido" if m < mes_atual else ("parcial" if m == mes_atual and ano == now.year else "previsto"),
+            "total_hapvida": round(v_total, 2),
+            "medicos_com_consulta": round(v_medicos, 2),
+            "repasse_sem_medicos_consulta": round(v_total - v_medicos, 2),
+        })
+
+    total.pop("valor_por_mes", None); total.pop("mes_atual", None)
+    medicos_consulta.pop("valor_por_mes", None); medicos_consulta.pop("mes_atual", None)
+
+    return {
+        "ano": ano,
+        "convenio": "HAPVIDA CECAN",
+        "setor": setor or "TODOS",
+        "setor_nome": RECEPCOES.get(setor, "Todos os setores") if setor else "Todos os setores",
+        "cnpj": cnpj,
+        "total_hapvida": total,
+        "medicos_com_consulta": medicos_consulta,
+        "repasse_sem_medicos_consulta": repasse_sem,
+        "meses": meses_comparativo,
+    }
+
+
+@app.get("/api/financeiro/visao-geral-hapvida")
+def visao_geral_hapvida(ano: int = None, anos_historico: int = 4, setor: str = "TODOS", cnpj: str = "interno"):
+    """
+    Visão executiva: produção total da clínica por mês, quanto o Hapvida
+    CECAN representa dessa produção, e o impacto de retirar o Hapvida das
+    consultas — removendo tanto o honorário da consulta quanto os exames
+    solicitados pelos médicos que fazem consulta Hapvida (mantém-se o
+    atendimento em si, só sai a receita ligada a esses médicos via Hapvida).
+
+    Psiquiatria fica de fora do cenário de retirada — médico cuja única
+    consulta Hapvida é psiquiátrica não entra no grupo "sai", a receita de
+    psiquiatria continua contando no que "restaria".
+    cnpj: "interno" (padrão), "externo" ou "todos".
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    setor = None if (not setor or setor == "TODOS") else setor
+    filtro_setor = "AND RTRIM(osm.osm_str) = ?" if setor else ""
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+    params_setor = (setor,) if setor else ()
+
+    # ── Produção total da clínica (todos os convênios E todos os CNPJs),
+    # mensal — sempre o total real, ignora o filtro de CNPJ de propósito,
+    # pra bater sempre com o módulo Produção Mensal (que também não filtra
+    # por CNPJ). Hapvida e o cálculo de impacto abaixo continuam respeitando
+    # o filtro normalmente. ──
+    rows_total_clinica = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_setor}
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+    """, params_setor)
+
+    # ── Total Hapvida CECAN (consulta + exame), mensal ──
+    rows_hapvida = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE RTRIM(cnv.cnv_cod) = '2X'
+          AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_setor}
+          {filtro_cnpj}
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+    """, params_setor)
+
+    # ── Médicos que fazem consulta Hapvida NO ANO analisado (exceto
+    # psiquiatria) — materializado uma vez em Python e reaproveitado como
+    # lista literal. Janela é o ano corrente, não histórico de vários anos:
+    # médico que só fez consulta Hapvida anos atrás não deve contar como
+    # "atende consulta Hapvida" agora. ──
+    rows_medicos_ids = query(f"""
+        SELECT DISTINCT osm.osm_mreq AS medico
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE RTRIM(cnv.cnv_cod) = '2X' AND sk.SMK_NOME LIKE 'CONSULTA%'
+          AND sk.SMK_NOME NOT LIKE 'CONSULTA PSIQUIATRIA%'
+          AND osm.osm_dthr BETWEEN '{ano}-01-01' AND '{ano}-12-31 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_mreq IS NOT NULL
+          {filtro_setor}
+          {filtro_cnpj}
+    """, params_setor)
+    medicos_consulta_ids = [r["medico"] for r in rows_medicos_ids]
+
+    # ── Produção (consulta + exame) ligada a esses médicos — é isso que
+    # sairia se removêssemos o Hapvida das consultas, mantendo o
+    # atendimento em si (outros convênios/particular seguem). ──
+    if medicos_consulta_ids:
+        placeholders_med = ",".join("?" * len(medicos_consulta_ids))
+        rows_medicos_consulta = query(f"""
+            SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+                   SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+            WHERE RTRIM(cnv.cnv_cod) = '2X'
+              AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+              AND smm.SMM_SFAT IN ('A','F','P')
+              AND osm.osm_mreq IN ({placeholders_med})
+              {filtro_setor}
+              {filtro_cnpj}
+            GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+        """, tuple(medicos_consulta_ids) + params_setor)
+    else:
+        rows_medicos_consulta = []
+
+    def resumo(rows_mensais):
+        # Previsão simples baseada nos últimos 6 meses fechados, sem índice
+        # sazonal — uma clínica em forte expansão (como esta, que mais que
+        # dobrou a produção de jan a jul/2026) fica com uma média "achatada"
+        # bem abaixo do ritmo mais recente se usar o ano inteiro ou um ajuste
+        # sazonal baseado em anos anteriores; a média móvel dos últimos 6
+        # meses reflete melhor o momento atual da clínica.
+        dec = _decompor_sazonalidade(rows_mensais, ano, anos_historico, somente_meses_com_producao=True, metodo="media_simples", janela_tendencia=3)
+        mes_atual = dec["mes_atual"]
+        prod = dec["producao_ano_atual"]
+        valores_h1_jul = [prod.get(m, 0) for m in range(1, 8) if m < mes_atual]
+        media_h1_jul = sum(valores_h1_jul) / len(valores_h1_jul) if valores_h1_jul else 0
+        total_h1_jul = sum(valores_h1_jul)
+        proj_out = dec["previsao_por_mes"].get(10, 0)
+        proj_nov = dec["previsao_por_mes"].get(11, 0)
+        proj_dez = dec["previsao_por_mes"].get(12, 0)
+
+        valor_por_mes = {}
+        for m in range(1, 13):
+            if m < mes_atual or (m == mes_atual and ano == now.year):
+                valor_por_mes[m] = prod.get(m, 0)
+            else:
+                valor_por_mes[m] = dec["previsao_por_mes"].get(m, 0)
+
+        return {
+            "total_ja_produzido": round(sum(prod.get(m, 0) for m in range(1, mes_atual + 1)), 2),
+            "total_primeiro_semestre_mais_julho": round(total_h1_jul, 2),
+            "media_primeiro_semestre_mais_julho": round(media_h1_jul, 2),
+            "projecao_outubro": round(proj_out, 2),
+            "projecao_novembro": round(proj_nov, 2),
+            "projecao_dezembro": round(proj_dez, 2),
+            "projecao_out_nov_dez": round(proj_out + proj_nov + proj_dez, 2),
+            "valor_por_mes": valor_por_mes,
+            "mes_atual": mes_atual,
+        }
+
+    total_clinica = resumo(rows_total_clinica)
+    hapvida = resumo(rows_hapvida)
+    medicos_consulta = resumo(rows_medicos_consulta)
+
+    impacto = {
+        "total_ja_produzido": round(total_clinica["total_ja_produzido"] - medicos_consulta["total_ja_produzido"], 2),
+        "total_primeiro_semestre_mais_julho": round(total_clinica["total_primeiro_semestre_mais_julho"] - medicos_consulta["total_primeiro_semestre_mais_julho"], 2),
+        "media_primeiro_semestre_mais_julho": round(total_clinica["media_primeiro_semestre_mais_julho"] - medicos_consulta["media_primeiro_semestre_mais_julho"], 2),
+        "projecao_outubro": round(total_clinica["projecao_outubro"] - medicos_consulta["projecao_outubro"], 2),
+        "projecao_novembro": round(total_clinica["projecao_novembro"] - medicos_consulta["projecao_novembro"], 2),
+        "projecao_dezembro": round(total_clinica["projecao_dezembro"] - medicos_consulta["projecao_dezembro"], 2),
+        "projecao_out_nov_dez": round(total_clinica["projecao_out_nov_dez"] - medicos_consulta["projecao_out_nov_dez"], 2),
+    }
+
+    mes_atual = total_clinica["mes_atual"]
+    meses_comparativo = []
+    for m in range(1, 13):
+        v_total = total_clinica["valor_por_mes"].get(m, 0)
+        v_hapvida = hapvida["valor_por_mes"].get(m, 0)
+        v_medicos = medicos_consulta["valor_por_mes"].get(m, 0)
+        meses_comparativo.append({
+            "mes": m, "label": MESES_PT_ABREV[m-1],
+            "tipo_dado": "produzido" if m < mes_atual else ("parcial" if m == mes_atual and ano == now.year else "previsto"),
+            "producao_total": round(v_total, 2),
+            "producao_hapvida": round(v_hapvida, 2),
+            "percentual_hapvida": round((v_hapvida / v_total * 100), 1) if v_total else 0,
+            "impacto_retirada_consultas": round(v_total - v_medicos, 2),
+            "medicos_com_consulta_hapvida": round(v_medicos, 2),
+        })
+
+    for d in (total_clinica, hapvida, medicos_consulta):
+        d.pop("valor_por_mes", None)
+        d.pop("mes_atual", None)
+
+    pct_hapvida_ano = round((hapvida["total_ja_produzido"] / total_clinica["total_ja_produzido"] * 100), 1) if total_clinica["total_ja_produzido"] else 0
+
+    return {
+        "ano": ano,
+        "setor": setor or "TODOS",
+        "setor_nome": RECEPCOES.get(setor, "Todos os setores") if setor else "Todos os setores",
+        "cnpj": cnpj,
+        "producao_total": total_clinica,
+        "producao_hapvida": hapvida,
+        "medicos_com_consulta_hapvida": medicos_consulta,
+        "impacto_retirada_consultas_hapvida": impacto,
+        "percentual_hapvida_no_ano": pct_hapvida_ano,
+        "meses": meses_comparativo,
+    }
+
+
+@app.get("/api/financeiro/receita-por-convenio")
+def receita_por_convenio_ano(ano: int = None, cnpj: str = "interno", top: int = 5, mes_ini: int = 1, mes_fim: int = 7):
+    """
+    Demonstrativo de receita por convênio no período (padrão: Jan a Jul) — só
+    planos de saúde de verdade (cnv_tipo AM/HP/AH: Ambulatorial/Hospitalar/
+    Ambul+Hosp), excluindo o que foi executado na Recepção Ocupacional (ROC).
+    Os convênios de empresa (cnv_tipo MC = Medicina Ocupacional, são
+    milhares de códigos, um por empresa contratante) entram consolidados
+    numa única linha "Ocupacional" — união de tudo que é ROC (local de
+    execução) OU cnv_tipo=MC (convênio pagador), pra pegar tanto quem foi
+    atendido no balcão do Ocupacional quanto exame faturado por empresa mas
+    executado em outra recepção. Essa partição (planos de saúde sem ROC +
+    Ocupacional) bate exatamente com o total real da clínica, sem contar
+    nada em dobro nem deixar nada de fora.
+
+    Sempre usa o valor real (ignora o parâmetro `cnpj` de propósito, igual
+    Centro de Resultado) — planos de saúde também têm uma fatia relevante
+    faturada fora do CNPJ interno, então filtrar subestimava o total.
+
+    Mostra os `top` maiores por receita (ranking pelo total do período, que é
+    proporcional à média mensal) e agrupa o restante em "Outros". Cada item
+    traz total do período e média mensal (total / nº de meses do período).
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    n_meses = mes_fim - mes_ini + 1
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    # Planos de saude, EXCLUINDO o que foi executado na Recepcao Ocupacional
+    # (ROC) -- essa fatia entra em "Ocupacional" abaixo, pra nao contar em
+    # dobro (existem exames de plano de saude executados no balcao do
+    # Ocupacional).
+    rows = query(f"""
+        SELECT RTRIM(cnv.cnv_nome) AS convenio, SUM({vliq}) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE YEAR(osm.osm_dthr) = {ano}
+          AND MONTH(osm.osm_dthr) BETWEEN {mes_ini} AND {mes_fim}
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND RTRIM(cnv.cnv_tipo) IN ('AM','HP','AH')
+          AND RTRIM(osm.osm_str) <> 'ROC'
+        GROUP BY RTRIM(cnv.cnv_nome)
+        HAVING SUM({vliq}) > 0
+        ORDER BY total DESC
+    """)
+
+    # "Ocupacional" = uniao de Recepcao Ocupacional (local de execucao) com
+    # convenio tipo MC (Medicina Ocupacional/empresa), onde quer que seja
+    # executado -- pega tanto quem foi atendido no balcao do Ocupacional
+    # quanto exame faturado por empresa mas executado em outra recepcao.
+    # Combinado com a exclusao acima em "rows", essa particao bate
+    # exatamente com o total real da clinica (sem contar nada em dobro nem
+    # deixar nada de fora).
+    row_ocupacional = query(f"""
+        SELECT SUM({vliq}) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE YEAR(osm.osm_dthr) = {ano}
+          AND MONTH(osm.osm_dthr) BETWEEN {mes_ini} AND {mes_fim}
+          AND smm.SMM_SFAT IN ('A','F','P')
+          AND (RTRIM(osm.osm_str) = 'ROC' OR RTRIM(cnv.cnv_tipo) = 'MC')
+    """)
+    ocupacional_total = row_ocupacional[0]["total"] or 0 if row_ocupacional else 0
+
+    todas_linhas = [{"convenio": r["convenio"], "total": r["total"]} for r in rows]
+    if ocupacional_total > 0:
+        todas_linhas.append({"convenio": "Ocupacional", "total": ocupacional_total})
+
+    # Ajuste de reconciliação com o DRE da contabilidade (Jan-Jun/2026: a
+    # planilha "RE 2026" fechou em R$ 6.339.168,01 contra R$ 6.317.905,25 do
+    # Smart — diferença de R$ 21.262,76, valor fixo e já apurado). A pedido,
+    # a diferença entra somada no Hapvida CECAN em vez de virar uma linha
+    # separada de ajuste.
+    if ano == 2026 and mes_ini == 1 and mes_fim == 6:
+        ajuste = 21262.76
+        hapvida_row = next((r for r in todas_linhas if "HAPVIDA" in r["convenio"].upper()), None)
+        if hapvida_row is not None:
+            hapvida_row["total"] += ajuste
+
+    todas_linhas.sort(key=lambda r: -r["total"])
+
+    total_geral = round(sum(r["total"] or 0 for r in todas_linhas), 2)
+    top_n = todas_linhas[:top]
+    resto = todas_linhas[top:]
+    outros_total = round(sum(r["total"] or 0 for r in resto), 2)
+
+    def pct(v):
+        return round(v / total_geral * 100, 1) if total_geral else 0
+
+    itens = [{"convenio": r["convenio"], "total": round(r["total"], 2), "media_mensal": round(r["total"] / n_meses, 2), "percentual": pct(r["total"])} for r in top_n]
+    if outros_total > 0:
+        itens.append({"convenio": f"Outros ({len(resto)} convênios)", "total": outros_total, "media_mensal": round(outros_total / n_meses, 2), "percentual": pct(outros_total)})
+
+    return {
+        "ano": ano, "cnpj": cnpj, "top": top,
+        "mes_ini": mes_ini, "mes_fim": mes_fim, "n_meses": n_meses,
+        "total_geral": total_geral,
+        "media_mensal_geral": round(total_geral / n_meses, 2),
+        "qtd_convenios_total": len(todas_linhas),
+        "itens": itens,
+    }
+
+
+@app.get("/api/financeiro/receita-por-centro-resultado")
+def receita_por_centro_resultado(ano: int = None, cnpj: str = "interno", top: int = 5, mes_ini: int = 1, mes_fim: int = 6):
+    """
+    Demonstrativo de receita por centro de resultado no período — padrão Jan
+    a Jun (semestre). Só existem 4 centros de resultado de verdade: Recepção
+    Diagnóstico (RDI), Recepção Ocupacional (ROC), Recepção Censo Imagem
+    (RCI) e Recepção Consultórios (RCN) — este último absorve todo o resto do
+    movimento (osm_str que não seja RDI/ROC/RCI), já que USG, PSI, NUT, OFT
+    e outras especialidades pequenas funcionam fisicamente dentro da
+    Recepção Consultórios. Mostra os `top` maiores por receita e agrupa o
+    restante em "Outros" (se um dia surgir um 5º centro de verdade). Cada
+    item traz total do período e média mensal — a média é sobre os meses em
+    que aquele centro teve produção de verdade, não sobre o período inteiro
+    (Censo Imagem, por exemplo, só começou a produzir em junho/2026; dividir
+    pelos 6 meses do semestre inteiro subestimaria a média real do centro).
+
+    Sempre usa o valor real (ignora o parâmetro `cnpj` de propósito, igual
+    "Produção Total" no painel de Visão Geral) — Ocupacional em especial é
+    majoritariamente faturado por fora do CNPJ interno (contratos de empresa),
+    então filtrar por CNPJ interno subestimava a receita real do centro em
+    ~90%.
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    n_meses = mes_fim - mes_ini + 1
+    centro_expr = "CASE WHEN RTRIM(osm.osm_str) IN ('RDI','ROC','RCI') THEN RTRIM(osm.osm_str) ELSE 'RCN' END"
+
+    rows_mensal = query(f"""
+        SELECT {centro_expr} AS cod, MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE YEAR(osm.osm_dthr) = {ano}
+          AND MONTH(osm.osm_dthr) BETWEEN {mes_ini} AND {mes_fim}
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY {centro_expr}, MONTH(osm.osm_dthr)
+    """)
+
+    total_por_centro = defaultdict(float)
+    meses_com_producao_por_centro = defaultdict(int)
+    for r in rows_mensal:
+        if r["total"] and r["total"] > 0:
+            total_por_centro[r["cod"]] += r["total"]
+            meses_com_producao_por_centro[r["cod"]] += 1
+
+    rows = [{"cod": cod, "total": total} for cod, total in total_por_centro.items() if total > 0]
+
+    # Ajuste de reconciliação com o DRE da contabilidade (Jan-Jun/2026: a
+    # planilha "RE 2026" fechou em R$ 6.339.168,01 contra R$ 6.317.905,25 do
+    # Smart — diferença de R$ 21.262,76, valor fixo e já apurado). A pedido,
+    # a diferença entra somada na Recepção Diagnóstico.
+    if ano == 2026 and mes_ini == 1 and mes_fim == 6:
+        ajuste = 21262.76
+        rdi_row = next((r for r in rows if r["cod"] == "RDI"), None)
+        if rdi_row is not None:
+            rdi_row["total"] += ajuste
+
+    rows.sort(key=lambda r: -r["total"])
+
+    total_geral = round(sum(r["total"] for r in rows), 2)
+    top_n = rows[:top]
+    resto = rows[top:]
+    outros_total = round(sum(r["total"] for r in resto), 2)
+    outros_meses = sum(meses_com_producao_por_centro[r["cod"]] for r in resto)
+
+    def pct(v):
+        return round(v / total_geral * 100, 1) if total_geral else 0
+
+    itens = [
+        {
+            "centro": RECEPCOES.get(r["cod"], r["cod"]),
+            "total": round(r["total"], 2),
+            "media_mensal": round(r["total"] / meses_com_producao_por_centro[r["cod"]], 2),
+            "meses_com_producao": meses_com_producao_por_centro[r["cod"]],
+            "percentual": pct(r["total"]),
+        }
+        for r in top_n
+    ]
+    if outros_total > 0:
+        itens.append({
+            "centro": f"Outros ({len(resto)} centros)",
+            "total": outros_total,
+            "media_mensal": round(outros_total / outros_meses, 2) if outros_meses else 0,
+            "meses_com_producao": outros_meses,
+            "percentual": pct(outros_total),
+        })
+
+    # Censo Imagem (RCI) começou a produzir só em junho/2026, no meio do
+    # semestre — a média mensal dele fica mais representativa calculada de
+    # junho até o mês atual (não só dentro da janela Jan-Jun do card), pra
+    # refletir o ritmo real de operação em vez de ficar preso à métrica do
+    # resto do card. Só a média muda; total e percentual continuam do
+    # período do card, pra bater com o total_geral.
+    item_rci = next((it for it in itens if it["centro"] == RECEPCOES.get("RCI", "RCI")), None)
+    if item_rci and now.year == ano:
+        rows_rci_recente = query(f"""
+            SELECT MONTH(osm.osm_dthr) AS mes,
+                   SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            WHERE RTRIM(osm.osm_str) = 'RCI'
+              AND YEAR(osm.osm_dthr) = {ano}
+              AND MONTH(osm.osm_dthr) BETWEEN 6 AND {now.month}
+              AND smm.SMM_SFAT IN ('A','F','P')
+            GROUP BY MONTH(osm.osm_dthr)
+            HAVING SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) > 0
+        """)
+        if rows_rci_recente:
+            total_rci_recente = sum(r["total"] for r in rows_rci_recente)
+            item_rci["media_mensal"] = round(total_rci_recente / len(rows_rci_recente), 2)
+            item_rci["meses_com_producao"] = len(rows_rci_recente)
+
+    return {
+        "ano": ano, "cnpj": cnpj, "top": top,
+        "mes_ini": mes_ini, "mes_fim": mes_fim, "n_meses": n_meses,
+        "total_geral": total_geral,
+        "media_mensal_geral": round(total_geral / n_meses, 2),
+        "qtd_centros_total": len(rows),
+        "itens": itens,
+    }
+
+
+@app.get("/api/financeiro/receita-por-tipo-servico")
+def receita_por_tipo_servico(ano: int = None, cnpj: str = "interno", mes_ini: int = 1, mes_fim: int = 6):
+    """
+    Demonstrativo do semestre por tipo de serviço: Exames de Sangue (esp
+    Analises Clinicas), Exames de Imagem (esp Radiologia + Ultrassonografia)
+    e Honorarios Medicos (servicos "CONSULTA%") — o resto vira "Outros".
+
+    O total_geral é calculado igual ao usado em "Produção Total"/Centro de
+    Resultado (só smm+osm, sem join de especialidade, e sempre valor real —
+    ignora o parâmetro `cnpj` de propósito, mesma razão do Centro de
+    Resultado), e "Outros" é o resto (total_geral - soma das 3 categorias) —
+    assim a soma das 4 fatias sempre bate exatamente com o total já usado no
+    resto do módulo, mesmo que uma pequena fatia de OS não tenha
+    SMK/especialidade cadastrada corretamente (~0,2% do total, historicamente).
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    n_meses = mes_fim - mes_ini + 1
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+
+    row_total = query(f"""
+        SELECT SUM({vliq}) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE YEAR(osm.osm_dthr) = {ano}
+          AND MONTH(osm.osm_dthr) BETWEEN {mes_ini} AND {mes_fim}
+          AND smm.SMM_SFAT IN ('A','F','P')
+    """)
+    total_geral = round(row_total[0]["total"] or 0, 2)
+
+    categ_expr = """
+        CASE
+          WHEN RTRIM(esp.esp_nome) = 'Analises Clinicas' THEN 'sangue'
+          WHEN RTRIM(esp.esp_nome) IN ('Radiologia','Ultrassonografia') THEN 'imagem'
+          WHEN sk.SMK_NOME LIKE 'CONSULTA%' THEN 'honorarios'
+          WHEN RTRIM(esp.esp_nome) = 'Medicina Ocupacional' THEN 'ocupacional'
+          ELSE 'outros'
+        END
+    """
+    rows_categ = query(f"""
+        SELECT {categ_expr} AS categ, SUM({vliq}) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        JOIN esp ON esp.esp_cod = sk.SMK_ESP_COD
+        WHERE YEAR(osm.osm_dthr) = {ano}
+          AND MONTH(osm.osm_dthr) BETWEEN {mes_ini} AND {mes_fim}
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY {categ_expr}
+    """)
+    por_categ = {r["categ"]: round(r["total"] or 0, 2) for r in rows_categ}
+    sangue = por_categ.get("sangue", 0)
+    imagem = por_categ.get("imagem", 0)
+    honorarios = por_categ.get("honorarios", 0)
+    ocupacional = por_categ.get("ocupacional", 0)
+
+    # Ajuste de reconciliação com o DRE da contabilidade (Jan-Jun/2026: a
+    # planilha "RE 2026" fechou em R$ 6.339.168,01 contra R$ 6.317.905,25 do
+    # Smart — diferença de R$ 21.262,76, valor fixo e já apurado). A pedido,
+    # a diferença entra somada no Laboratório de Análises Clínicas.
+    if ano == 2026 and mes_ini == 1 and mes_fim == 6:
+        ajuste = 21262.76
+        sangue += ajuste
+        total_geral = round(total_geral + ajuste, 2)
+
+    outros = round(total_geral - sangue - imagem - honorarios - ocupacional, 2)
+
+    def pct(v):
+        return round(v / total_geral * 100, 1) if total_geral else 0
+
+    itens = [
+        {"categoria": "Laboratorio de Analises Clinicas", "total": sangue, "media_mensal": round(sangue / n_meses, 2), "percentual": pct(sangue)},
+        {"categoria": "Exames de Imagem", "total": imagem, "media_mensal": round(imagem / n_meses, 2), "percentual": pct(imagem)},
+        {"categoria": "Honorarios Medicos", "total": honorarios, "media_mensal": round(honorarios / n_meses, 2), "percentual": pct(honorarios)},
+        {"categoria": "Medicina Ocupacional", "total": ocupacional, "media_mensal": round(ocupacional / n_meses, 2), "percentual": pct(ocupacional)},
+        {"categoria": "Outros", "total": outros, "media_mensal": round(outros / n_meses, 2), "percentual": pct(outros)},
+    ]
+
+    return {
+        "ano": ano, "cnpj": cnpj, "mes_ini": mes_ini, "mes_fim": mes_fim, "n_meses": n_meses,
+        "total_geral": total_geral,
+        "media_mensal_geral": round(total_geral / n_meses, 2),
+        "itens": itens,
+    }
+
+
+@app.get("/api/financeiro/receita-assistencial-ocupacional")
+def receita_assistencial_ocupacional(ano: int = None, mes_ini: int = 1, mes_fim: int = 6):
+    """
+    Demonstrativo do semestre por linha: Assistencial (osm_atend ASS/EME/
+    CRG/TAM) x Ocupacional (osm_atend ADM/PER/DEM/RTB/MDF/MOC) — mesma
+    classificação já usada no painel Home (Faturamento diário Ocupacional x
+    Assistencial). As duas linhas cobrem 100% dos atendimentos, então a soma
+    bate exatamente com o total geral do módulo sem precisar de "Outros".
+    Traz total/média mensal do período e a série mensal (pro gráfico).
+    Sempre valor real, ignora CNPJ (mesma razão do Centro de Resultado).
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    n_meses = mes_fim - mes_ini + 1
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+    linha_expr = """
+        CASE
+          WHEN osm.osm_atend IN ('ASS','EME','CRG','TAM') THEN 'Assistencial'
+          WHEN osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC') THEN 'Ocupacional'
+          ELSE 'Outros'
+        END
+    """
+
+    rows = query(f"""
+        SELECT {linha_expr} AS linha, MONTH(osm.osm_dthr) AS mes, SUM({vliq}) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE YEAR(osm.osm_dthr) = {ano}
+          AND MONTH(osm.osm_dthr) BETWEEN {mes_ini} AND {mes_fim}
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY {linha_expr}, MONTH(osm.osm_dthr)
+    """)
+
+    por_linha = defaultdict(lambda: defaultdict(float))
+    for r in rows:
+        por_linha[r["linha"]][r["mes"]] += r["total"] or 0
+
+    # Ajuste de reconciliação com o DRE da contabilidade (Jan-Jun/2026: a
+    # planilha "RE 2026" fechou em R$ 6.339.168,01 contra R$ 6.317.905,25 do
+    # Smart — diferença de R$ 21.262,76, valor fixo e já apurado). A pedido,
+    # a diferença entra somada na linha Assistencial (mês de junho, pra não
+    # mexer na série histórica dos meses já fechados antes).
+    if ano == 2026 and mes_ini == 1 and mes_fim == 6:
+        por_linha["Assistencial"][6] += 21262.76
+
+    total_geral = round(sum(sum(meses.values()) for meses in por_linha.values()), 2)
+
+    def pct(v):
+        return round(v / total_geral * 100, 1) if total_geral else 0
+
+    itens = []
+    for linha in ("Assistencial", "Ocupacional", "Outros"):
+        meses_map = por_linha.get(linha, {})
+        total_linha = round(sum(meses_map.values()), 2)
+        if total_linha <= 0:
+            continue
+        itens.append({
+            "linha": linha,
+            "total": total_linha,
+            "media_mensal": round(total_linha / n_meses, 2),
+            "percentual": pct(total_linha),
+            "meses": [{"mes": m, "label": MESES_PT_ABREV[m - 1], "valor": round(meses_map.get(m, 0), 2)} for m in range(mes_ini, mes_fim + 1)],
+        })
+
+    return {
+        "ano": ano, "mes_ini": mes_ini, "mes_fim": mes_fim, "n_meses": n_meses,
+        "total_geral": total_geral,
+        "media_mensal_geral": round(total_geral / n_meses, 2),
+        "itens": itens,
+    }
+
+
+_FILTRO_SERVICOS_OBSTETRICIA = "(sk.SMK_NOME LIKE 'US OBST%' OR sk.SMK_NOME LIKE '%OBSTETR%' OR sk.SMK_NOME LIKE '%GESTANTE%')"
+
+
+@app.get("/api/financeiro/obstetricia-servicos")
+def obstetricia_servicos(ano: int = None, percentual_honorario: float = 0.9, cnpj: str = "interno"):
+    """
+    Relatório de serviços de Obstetrícia (US obstétrica, curvas glicêmicas de
+    gestante, etc. — identificados pelo nome do serviço, não pela especialidade
+    do médico, já que o cadastro de especialidade dos profissionais não está
+    preenchido no Smart) — pro módulo de resultados financeiros.
+
+    "Número de agendas" = número de OS distintas com pelo menos um serviço de
+    obstetrícia (não veio de agm/agenda porque essas OS não ficam vinculadas
+    a um registro de agendamento nesse recorte — OS é a melhor proxy
+    disponível de "atendimento realizado").
+
+    percentual_honorario: fração da produção que vira honorário do médico
+    (padrão 90%), agregado por convênio.
+    cnpj: "interno" (padrão), "externo" ou "todos".
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    inicio, fim = f"{ano}-01-01", f"{ano}-12-31"
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+
+    rows_convenio = query(f"""
+        SELECT RTRIM(ISNULL(cnv.cnv_nome, 'Sem convênio')) AS convenio,
+               COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num) AS qtd_atendimentos,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS producao
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        LEFT JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE {_FILTRO_SERVICOS_OBSTETRICIA}
+          AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_cnpj}
+        GROUP BY RTRIM(ISNULL(cnv.cnv_nome, 'Sem convênio'))
+        ORDER BY producao DESC
+    """)
+    for r in rows_convenio:
+        r["producao"] = round(float(r["producao"] or 0), 2)
+        r["valor_honorario"] = round(r["producao"] * percentual_honorario, 2)
+
+    rows_mensal = query(f"""
+        SELECT MONTH(osm.osm_dthr) AS mes,
+               COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num) AS qtd_atendimentos,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS producao
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE {_FILTRO_SERVICOS_OBSTETRICIA}
+          AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_cnpj}
+        GROUP BY MONTH(osm.osm_dthr)
+        ORDER BY mes
+    """)
+    mapa_mensal = {r["mes"]: r for r in rows_mensal}
+    meses_detalhe = []
+    for m in range(1, 13):
+        r = mapa_mensal.get(m)
+        producao = round(float(r["producao"] or 0), 2) if r else 0.0
+        qtd = r["qtd_atendimentos"] if r else 0
+        meses_detalhe.append({
+            "mes": m, "label": MESES_PT_ABREV[m-1],
+            "producao": producao, "qtd_atendimentos": qtd,
+            "valor_honorario": round(producao * percentual_honorario, 2),
+        })
+
+    rows_servicos = query(f"""
+        SELECT RTRIM(sk.SMK_NOME) AS servico,
+               COUNT(*) AS qtd,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS producao
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE {_FILTRO_SERVICOS_OBSTETRICIA}
+          AND osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_cnpj}
+        GROUP BY RTRIM(sk.SMK_NOME)
+        ORDER BY producao DESC
+    """)
+    for r in rows_servicos:
+        r["producao"] = round(float(r["producao"] or 0), 2)
+
+    producao_total = round(sum(r["producao"] for r in rows_convenio), 2)
+    qtd_total = sum(r["qtd_atendimentos"] for r in rows_convenio)
+
+    return {
+        "ano": ano,
+        "percentual_honorario": percentual_honorario,
+        "cnpj": cnpj,
+        "producao_total": producao_total,
+        "qtd_atendimentos_total": qtd_total,
+        "valor_honorario_total": round(producao_total * percentual_honorario, 2),
+        "por_convenio": rows_convenio,
+        "por_mes": meses_detalhe,
+        "por_servico": rows_servicos,
+    }
+
+
+@app.get("/api/financeiro/exames-solicitados-medicas-obstetricia")
+def exames_solicitados_medicas_obstetricia(ano: int = None, anos_historico: int = 4,
+                                            medicos: str = "BARBARA BARROS,GIULYA CRIST PEREIRA",
+                                            cnpj: str = "interno"):
+    """
+    Exames solicitados pelas médicas que atendem consulta de ginecologia/
+    obstetrícia (padrão: Barbara Barros e Giulya Crist Pereira) — todos os
+    convênios, não só Hapvida. Já produzido + média Jan-Jul + previsão
+    sazonal Out/Nov/Dez, no total e aberto por médica e por convênio.
+    cnpj: "interno" (padrão), "externo" ou "todos".
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    lista_medicos = [m.strip().upper() for m in medicos.split(",") if m.strip()]
+    if not lista_medicos:
+        raise HTTPException(400, "Informe ao menos um médico")
+    placeholders = ",".join(f"'{m}'" for m in lista_medicos)
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+
+    # ── Total (todas as médicas somadas), mensal — pra sazonalidade/previsão ──
+    rows_total_mensal = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        JOIN psv ON psv.psv_cod = osm.osm_mreq
+        WHERE RTRIM(UPPER(psv.psv_apel)) IN ({placeholders})
+          AND sk.SMK_NOME NOT LIKE 'CONSULTA%'
+          AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_cnpj}
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+    """)
+    # Previsão simples baseada nos últimos 6 meses com produção, sem
+    # índice sazonal — mesma metodologia usada nos demais painéis do módulo.
+    dec = _decompor_sazonalidade(rows_total_mensal, ano, anos_historico, somente_meses_com_producao=True, metodo="media_simples", janela_tendencia=3)
+    mes_atual = dec["mes_atual"]
+    prod_atual = dec["producao_ano_atual"]
+    valores_h1_jul = [prod_atual.get(m, 0) for m in range(1, 8) if m < mes_atual]
+    media_h1_jul = sum(valores_h1_jul) / len(valores_h1_jul) if valores_h1_jul else 0
+    proj_out = dec["previsao_por_mes"].get(10, 0)
+    proj_nov = dec["previsao_por_mes"].get(11, 0)
+    proj_dez = dec["previsao_por_mes"].get(12, 0)
+
+    meses_detalhe = []
+    for m in range(1, 13):
+        if m in dec["meses_fechados"]:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "produzido", "valor": round(prod_atual.get(m, 0), 2)})
+        elif m == mes_atual and ano == now.year:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "parcial", "valor": round(prod_atual.get(m, 0), 2)})
+        else:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "previsto", "valor": round(dec["previsao_por_mes"].get(m, 0), 2)})
+
+    # ── Aberto por médica (ano corrente até agora) ──
+    rows_por_medica = query(f"""
+        SELECT RTRIM(psv.psv_apel) AS medica,
+               COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num) AS qtd_atendimentos,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS producao
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        JOIN psv ON psv.psv_cod = osm.osm_mreq
+        WHERE RTRIM(UPPER(psv.psv_apel)) IN ({placeholders})
+          AND sk.SMK_NOME NOT LIKE 'CONSULTA%'
+          AND osm.osm_dthr BETWEEN '{ano}-01-01' AND '{ano}-12-31 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY RTRIM(psv.psv_apel)
+        ORDER BY producao DESC
+    """)
+    for r in rows_por_medica:
+        r["producao"] = round(float(r["producao"] or 0), 2)
+
+    # ── Aberto por convênio (ano corrente até agora) ──
+    rows_por_convenio = query(f"""
+        SELECT RTRIM(ISNULL(cnv.cnv_nome, 'Sem convênio')) AS convenio,
+               COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num) AS qtd_atendimentos,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS producao
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        JOIN psv ON psv.psv_cod = osm.osm_mreq
+        LEFT JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE RTRIM(UPPER(psv.psv_apel)) IN ({placeholders})
+          AND sk.SMK_NOME NOT LIKE 'CONSULTA%'
+          AND osm.osm_dthr BETWEEN '{ano}-01-01' AND '{ano}-12-31 23:59:59'
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY RTRIM(ISNULL(cnv.cnv_nome, 'Sem convênio'))
+        ORDER BY producao DESC
+    """)
+    for r in rows_por_convenio:
+        r["producao"] = round(float(r["producao"] or 0), 2)
+
+    total_ja_produzido = round(sum(prod_atual.get(m, 0) for m in range(1, mes_atual + 1)), 2)
+
+    return {
+        "ano": ano,
+        "medicos": lista_medicos,
+        "metodo_previsao": "media_simples",
+        "total_ja_produzido": total_ja_produzido,
+        "media_primeiro_semestre_mais_julho": round(media_h1_jul, 2),
+        "total_primeiro_semestre_mais_julho": round(sum(valores_h1_jul), 2),
+        "projecao_out_nov_dez": round(proj_out + proj_nov + proj_dez, 2),
+        "meses": meses_detalhe,
+        "por_medica": rows_por_medica,
+        "por_convenio": rows_por_convenio,
+    }
+
+
+@app.get("/api/financeiro/producao-mensal-por-setor")
+def producao_mensal_por_setor(ano: int = None, anos_historico: int = 4, setor: str = "RCI", cnpj: str = "interno"):
+    """
+    Produção líquida mensal de um ponto de recepção (osm_str), todos os
+    convênios — média Jan-Jul e previsão sazonal Out/Nov/Dez, mesmo padrão
+    dos painéis Hapvida, mas cobrindo o total do setor (não um convênio
+    específico). Padrão: RCI (Recepção Censo Imagem).
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    setor = (setor or "RCI").strip().upper()
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+
+    rows = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE RTRIM(osm.osm_str) = '{setor}'
+          AND osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_cnpj}
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+        ORDER BY ano, mes
+    """)
+
+    # Previsão = média simples dos últimos 3 meses com produção, projetada
+    # de forma plana pros meses seguintes — mesma metodologia usada nos
+    # demais painéis do módulo.
+    metodo = "media_simples"
+    dec = _decompor_sazonalidade(rows, ano, anos_historico, somente_meses_com_producao=True, metodo=metodo, janela_tendencia=3)
+    mes_atual = dec["mes_atual"]
+    prod_atual = dec["producao_ano_atual"]
+
+    valores_h1_jul = [prod_atual.get(m, 0) for m in range(1, 8) if m < mes_atual]
+    media_h1_jul = sum(valores_h1_jul) / len(valores_h1_jul) if valores_h1_jul else 0
+
+    meses_detalhe = []
+    for m in range(1, 13):
+        if m in dec["meses_fechados"]:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "produzido", "valor": round(prod_atual.get(m, 0), 2)})
+        elif m == mes_atual and ano == now.year:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "parcial", "valor": round(prod_atual.get(m, 0), 2)})
+        else:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo_dado": "previsto", "valor": round(dec["previsao_por_mes"].get(m, 0), 2)})
+
+    projecao_out = dec["previsao_por_mes"].get(10, 0)
+    projecao_nov = dec["previsao_por_mes"].get(11, 0)
+    projecao_dez = dec["previsao_por_mes"].get(12, 0)
+
+    return {
+        "ano": ano,
+        "setor": setor,
+        "setor_nome": RECEPCOES.get(setor, setor),
+        "cnpj": cnpj,
+        "metodo_previsao": metodo,
+        "meses": meses_detalhe,
+        "total_ja_produzido": round(sum(prod_atual.get(m, 0) for m in range(1, mes_atual + 1)), 2),
+        "media_primeiro_semestre_mais_julho": round(media_h1_jul, 2),
+        "total_primeiro_semestre_mais_julho": round(sum(valores_h1_jul), 2),
+        "projecao_outubro": round(projecao_out, 2),
+        "projecao_novembro": round(projecao_nov, 2),
+        "projecao_dezembro": round(projecao_dez, 2),
+        "projecao_out_nov_dez": round(projecao_out + projecao_nov + projecao_dez, 2),
+    }
+
+
+@app.get("/api/financeiro/estudo-novo-ponto-coleta")
+def estudo_novo_ponto_coleta(ano: int = None, setor: str = "RCN", mes_inicio_operacao: int = 6, cnpj: str = "interno"):
+    """
+    Estudo de viabilidade: um ponto de recepção que passou a executar exames
+    LABORATORIAIS (especialidade "Analises Clinicas") em escala só a partir
+    de um mês específico (padrão: RCN/Consultórios, a partir de junho/2026
+    — o volume de exames laboratoriais ali saltou de poucas dezenas/mês pra
+    mais de 1.300 em junho e 6.000 em julho, um salto real de operação, não
+    crescimento orgânico gradual). Mostra o quanto foi arrecadado de fato x
+    quanto teria sido arrecadado SE esse ponto de coleta já operasse nesse
+    ritmo desde janeiro — extrapolando pra trás a média dos meses já em
+    regime pleno (mês de início até o último mês fechado).
+    cnpj: "interno" (padrão), "externo" ou "todos".
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    setor = (setor or "RCN").strip().upper()
+    filtro_cnpj = _filtro_sql_cnpj(cnpj)
+
+    rows = query(f"""
+        SELECT MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total,
+               COUNT(*) AS qtd
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        JOIN esp ON esp.esp_cod = sk.SMK_ESP_COD
+        WHERE RTRIM(osm.osm_str) = '{setor}' AND RTRIM(esp.esp_nome) = 'Analises Clinicas'
+          AND YEAR(osm.osm_dthr) = {ano}
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_cnpj}
+        GROUP BY MONTH(osm.osm_dthr)
+        ORDER BY mes
+    """)
+
+    # ── Consultas do mesmo setor — só como CONTEXTO ao lado do estudo, não
+    # entra no cálculo de "oportunidade perdida". Consultas já vinham
+    # crescendo organicamente antes de junho (sem salto de operação como os
+    # exames), então misturar distorceria o cenário hipotético. ──
+    rows_consulta = query(f"""
+        SELECT MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total,
+               COUNT(*) AS qtd
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE RTRIM(osm.osm_str) = '{setor}' AND sk.SMK_NOME LIKE 'CONSULTA%'
+          AND YEAR(osm.osm_dthr) = {ano}
+          AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_cnpj}
+        GROUP BY MONTH(osm.osm_dthr)
+        ORDER BY mes
+    """)
+
+    mes_atual = now.month if ano == now.year else 13
+    producao_por_mes = {r["mes"]: float(r["total"] or 0) for r in rows}
+    qtd_por_mes = {r["mes"]: r["qtd"] for r in rows}
+    consulta_por_mes = {r["mes"]: float(r["total"] or 0) for r in rows_consulta}
+    qtd_consulta_por_mes = {r["mes"]: r["qtd"] for r in rows_consulta}
+
+    # Meses já em "regime pleno" (do mês de início até o último mês fechado) — base pra extrapolar pra trás.
+    meses_operacao_plena = [m for m in range(mes_inicio_operacao, mes_atual) if producao_por_mes.get(m, 0) > 0]
+    media_operacao_plena = (
+        sum(producao_por_mes.get(m, 0) for m in meses_operacao_plena) / len(meses_operacao_plena)
+        if meses_operacao_plena else 0
+    )
+
+    meses_detalhe = []
+    total_real = 0.0
+    total_hipotetico = 0.0
+    total_consulta = 0.0
+    for m in range(1, mes_atual):
+        real = round(producao_por_mes.get(m, 0), 2)
+        em_operacao_plena = m >= mes_inicio_operacao
+        hipotetico = real if em_operacao_plena else round(media_operacao_plena, 2)
+        consulta = round(consulta_por_mes.get(m, 0), 2)
+        total_real += real
+        total_hipotetico += hipotetico
+        total_consulta += consulta
+        meses_detalhe.append({
+            "mes": m, "label": MESES_PT_ABREV[m - 1],
+            "real": real, "hipotetico": hipotetico,
+            "qtd_exames": qtd_por_mes.get(m, 0),
+            "em_operacao_plena": em_operacao_plena,
+            "consulta": consulta,
+            "qtd_consultas": qtd_consulta_por_mes.get(m, 0),
+        })
+
+    return {
+        "ano": ano,
+        "setor": setor,
+        "setor_nome": RECEPCOES.get(setor, setor),
+        "cnpj": cnpj,
+        "mes_inicio_operacao": mes_inicio_operacao,
+        "mes_inicio_operacao_label": MESES_PT_ABREV[mes_inicio_operacao - 1],
+        "media_mensal_operacao_plena": round(media_operacao_plena, 2),
+        "meses": meses_detalhe,
+        "total_real": round(total_real, 2),
+        "total_hipotetico": round(total_hipotetico, 2),
+        "diferenca_oportunidade_perdida": round(total_hipotetico - total_real, 2),
+        "total_consulta": round(total_consulta, 2),
+    }
+
+
+@app.get("/api/financeiro/previsao-anual")
+def previsao_anual(ano: int = None, anos_historico: int = 4):
+    """
+    Previsão de produção pros meses restantes do ano, baseada no PADRÃO
+    SAZONAL histórico (não numa média simples) — alguns meses historicamente
+    produzem mais (ex: outubro/novembro) e outros menos (ex: dezembro, por
+    causa das festas de fim de ano), então a projeção usa esse fator por mês
+    em vez de simplesmente repetir a média do ano corrente.
+
+    Método (decomposição sazonal clássica):
+    1. Índice sazonal de cada mês = média histórica daquele mês (últimos N
+       anos, excluindo o ano corrente) ÷ média histórica geral de todos os
+       meses. Ex: se outubro tem índice 1.18, ele produz 18% acima da média.
+    2. "Nível de tendência" do ano corrente = média dos meses já fechados
+       deste ano, cada um DIVIDIDO pelo próprio índice sazonal (remove o
+       efeito sazonal, isolando só o crescimento/queda real do ano).
+    3. Previsão de cada mês restante = nível de tendência × índice sazonal
+       daquele mês.
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+
+    rows = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
+               SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS total
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
+        ORDER BY ano, mes
+    """)
+
+    # ── Separa: meses do ano corrente (JÁ PRODUZIDO) vs meses de anos anteriores (histórico p/ sazonalidade) ──
+    producao_ano_atual = {r["mes"]: float(r["total"] or 0) for r in rows if r["ano"] == ano}
+    historico_por_mes = {m: [] for m in range(1, 13)}
+    for r in rows:
+        if r["ano"] != ano:
+            historico_por_mes[r["mes"]].append(float(r["total"] or 0))
+
+    # Mês corrente normalmente está incompleto (poucos dias) — não entra
+    # nem como "já produzido" (mês fechado) nem distorce a tendência.
+    mes_atual = now.month if ano == now.year else 13
+    # Todo mês antes do corrente é "fechado", mesmo sem nenhum registro (ex:
+    # zero produção genuína naquele mês) — usar só as chaves presentes em
+    # producao_ano_atual deixava meses sem dado de fora, classificando-os
+    # errado como "previsto" (futuro) em vez de "produzido" (passado, zero).
+    meses_fechados = list(range(1, mes_atual))
+
+    media_geral_historico = sum(sum(v)/len(v) for v in historico_por_mes.values() if v) / len([v for v in historico_por_mes.values() if v])
+    indice_sazonal = {}
+    for m in range(1, 13):
+        vals = historico_por_mes[m]
+        media_mes = sum(vals) / len(vals) if vals else media_geral_historico
+        indice_sazonal[m] = round(media_mes / media_geral_historico, 4) if media_geral_historico else 1.0
+
+    # Nível de tendência do ano corrente (deseasonalizado)
+    niveis = [producao_ano_atual.get(m, 0) / indice_sazonal[m] for m in meses_fechados if indice_sazonal[m] > 0]
+    nivel_tendencia = sum(niveis) / len(niveis) if niveis else media_geral_historico
+
+    meses_restantes = [m for m in range(mes_atual, 13)]
+    previsao_por_mes = {m: round(nivel_tendencia * indice_sazonal[m], 2) for m in meses_restantes}
+
+    total_ja_produzido = sum(producao_ano_atual.get(m, 0) for m in meses_fechados)
+    total_mes_corrente_parcial = producao_ano_atual.get(mes_atual, 0.0) if ano == now.year else 0.0
+    total_previsto_restante = sum(previsao_por_mes.values())
+    total_projetado_ano = total_ja_produzido + total_mes_corrente_parcial + total_previsto_restante
+
+    meses_detalhe = []
+    for m in range(1, 13):
+        if m in meses_fechados:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo": "produzido", "valor": round(producao_ano_atual.get(m, 0), 2)})
+        elif m == mes_atual and ano == now.year:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo": "parcial", "valor": round(total_mes_corrente_parcial, 2),
+                                   "previsto_mes_completo": previsao_por_mes.get(m)})
+        else:
+            meses_detalhe.append({"mes": m, "label": MESES_PT_ABREV[m-1], "tipo": "previsto", "valor": previsao_por_mes.get(m, 0)})
+
+    indices_detalhe = [{"mes": m, "label": MESES_PT_ABREV[m-1], "indice": indice_sazonal[m],
+                         "efeito": "acima da média" if indice_sazonal[m] > 1.03 else "abaixo da média" if indice_sazonal[m] < 0.97 else "na média"}
+                        for m in range(1, 13)]
+
+    return {
+        "ano": ano,
+        "mes_atual": mes_atual,
+        "meses": meses_detalhe,
+        "indice_sazonal": indices_detalhe,
+        "total_ja_produzido": round(total_ja_produzido + total_mes_corrente_parcial, 2),
+        "total_previsto_restante": round(total_previsto_restante, 2),
+        "total_projetado_ano": round(total_projetado_ano, 2),
+        "anos_historico_usados": anos_historico,
+    }
+
+
+_RECORDES_CACHE = {"dados": None, "calculado_em": 0}
+_RECORDES_CACHE_TTL_S = 3600  # 1 hora — recorde raramente muda, evita recalcular toda hora
+
+@app.get("/api/financeiro/recordes")
+def financeiro_recordes():
+    """
+    Recordes históricos de faturamento (todo o período com dado real —
+    a partir de 2017; datas antes disso são lixo/migração, ex: 1900-01-01):
+    melhor dia, melhor mês e melhor ano. Mesma fórmula de valor líquido de
+    /api/financeiro/producao-mensal.
+
+    Consulta demorada (~30s, ano a ano) — cacheada em memória por 1h, já que
+    um recorde novo só pode ser batido daqui pra frente, não retroativamente.
+
+    Consulta ano a ano (cada uma delimitada por data, ~1s) em vez de um
+    GROUP BY sem limite de data no histórico inteiro — testado e o segundo
+    formato trava (>90s), provavelmente por plano de execução ruim sem
+    intervalo de data pra usar o índice de osm_dthr.
+    """
+    agora_ts = _time.time()
+    if _RECORDES_CACHE["dados"] and (agora_ts - _RECORDES_CACHE["calculado_em"]) < _RECORDES_CACHE_TTL_S:
+        return _RECORDES_CACHE["dados"]
+
+    vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
+    ano_inicio = 2017
+    ano_fim = datetime.now().year
+
+    melhor_dia = None
+    melhor_mes = None
+    totais_ano = {}
+
+    for ano in range(ano_inicio, ano_fim + 1):
+        rows = query(f"""
+            SELECT CAST(osm.osm_dthr AS DATE) AS data, SUM({vliq}) AS total
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            WHERE smm.SMM_SFAT IN ('A', 'F', 'P')
+              AND osm.osm_dthr BETWEEN '{ano}-01-01' AND '{ano}-12-31 23:59:59'
+            GROUP BY CAST(osm.osm_dthr AS DATE)
+        """)
+        totais_mes = {}
+        for r in rows:
+            total = r["total"] or 0
+            data = r["data"]
+            if melhor_dia is None or total > melhor_dia["total"]:
+                melhor_dia = {"data": data, "total": total}
+            chave_mes = (ano, data.month)
+            totais_mes[chave_mes] = totais_mes.get(chave_mes, 0) + total
+        totais_ano[ano] = sum(totais_mes.values())
+        for (a, m), total in totais_mes.items():
+            if melhor_mes is None or total > melhor_mes["total"]:
+                melhor_mes = {"ano": a, "mes": m, "total": total}
+
+    melhor_ano = None
+    for ano, total in totais_ano.items():
+        if melhor_ano is None or total > melhor_ano["total"]:
+            melhor_ano = {"ano": ano, "total": total}
+
+    def _por_recepcao(ini: str, fim: str) -> dict:
+        """Total líquido no período, aberto por recepção (RDI/ROC/RCN/RCI) —
+        mesmo agrupamento usado na mensagem de fechamento do WhatsApp."""
+        rows = query(f"""
+            SELECT RTRIM(osm.osm_str) AS recepcao, SUM({vliq}) AS total
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            WHERE smm.SMM_SFAT IN ('A', 'F', 'P')
+              AND osm.osm_dthr BETWEEN '{ini}' AND '{fim}'
+              AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI')
+            GROUP BY RTRIM(osm.osm_str)
+        """)
+        return {RECEPCOES.get(r["recepcao"], r["recepcao"]): r["total"] or 0 for r in rows if (r["total"] or 0) > 0}
+
+    if melhor_dia:
+        d = melhor_dia["data"]
+        melhor_dia["por_recepcao"] = _por_recepcao(f"{d} 00:00:00", f"{d} 23:59:59")
+        melhor_dia["data"] = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else d
+    if melhor_mes:
+        import calendar as _calendar
+        ultimo = _calendar.monthrange(melhor_mes["ano"], melhor_mes["mes"])[1]
+        melhor_mes["por_recepcao"] = _por_recepcao(
+            f'{melhor_mes["ano"]}-{melhor_mes["mes"]:02d}-01 00:00:00',
+            f'{melhor_mes["ano"]}-{melhor_mes["mes"]:02d}-{ultimo} 23:59:59',
+        )
+    if melhor_ano:
+        melhor_ano["por_recepcao"] = _por_recepcao(f'{melhor_ano["ano"]}-01-01 00:00:00', f'{melhor_ano["ano"]}-12-31 23:59:59')
+
+    resultado = {
+        "melhor_dia": melhor_dia,
+        "melhor_mes": melhor_mes,
+        "melhor_ano": melhor_ano,
+    }
+    _RECORDES_CACHE["dados"] = resultado
+    _RECORDES_CACHE["calculado_em"] = agora_ts
+    return resultado
+
+@app.get("/api/financeiro/producao-diaria-recepcao")
+def producao_diaria_recepcao(ano: int = None, mes: int = None):
+    """
+    Produção líquida diária, aberta por ponto de recepção (osm_str), pro
+    gráfico de Home/Produção Mensal. Mesma fórmula de valor líquido e o
+    mesmo mapeamento RDI/ROC/RCN/RCI usado no módulo Recepção — PSI soma
+    dentro de RCN (mesmo critério do Painel de Senhas).
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    if not mes: mes = now.month
+
+    import calendar
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    inicio = f"{ano}-{mes:02d}-01"
+    fim    = f"{ano}-{mes:02d}-{ultimo_dia}"
+
+    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI"]
+
+    rows = query(f"""
+        SELECT
+            CAST(osm.osm_dthr AS DATE) AS data,
+            CASE WHEN RTRIM(osm.osm_str) = 'PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END AS recepcao,
+            SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) AS valor
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE
+                AND osm.osm_num   = smm.SMM_OSM
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND smm.SMM_SFAT IN ('A', 'F', 'P')
+          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI')
+        GROUP BY CAST(osm.osm_dthr AS DATE),
+                 CASE WHEN RTRIM(osm.osm_str) = 'PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END
+        ORDER BY data
+    """)
+
+    por_dia = {}
+    for r in rows:
+        d = r["data"].strftime("%Y-%m-%d") if hasattr(r["data"], "strftime") else str(r["data"])
+        if d not in por_dia:
+            por_dia[d] = {"data": d, **{c: 0 for c in RECEPCOES_COD}, "total": 0}
+        cod = r["recepcao"]
+        if cod in RECEPCOES_COD:
+            valor = float(r["valor"] or 0)
+            por_dia[d][cod] += valor
+            por_dia[d]["total"] += valor
+
+    dias = sorted(por_dia.values(), key=lambda x: x["data"])
+    totais = {c: sum(d[c] for d in dias) for c in RECEPCOES_COD}
+    totais["total"] = sum(d["total"] for d in dias)
+
+    return {
+        "ano": ano, "mes": mes,
+        "recepcoes": [{"cod": c, "nome": RECEPCOES.get(c, c)} for c in RECEPCOES_COD],
+        "dias": dias,
+        "totais": totais,
+    }
 
 @app.get("/api/financeiro/producao-mensal/profissionais")
 def producao_mensal_profissionais(ano: int = None, mes: int = None):
@@ -2042,6 +4577,242 @@ def lista_medicos():
     return rows
 
 
+def buscar_disponibilidade_especialidade(especialidade: str, dias: int = 30, limite_datas: int = 5):
+    """
+    Horários disponíveis (view EX_HORARIOS, SITUACAO='DISPONIVEL') para
+    médicos de uma especialidade, buscada por nome (LIKE).
+
+    IMPORTANTE: psv.psv_esp_cod está sempre NULL neste banco (não é
+    preenchido pelo Smart) — a especialidade real do médico só existe na
+    view V_ESP_MEDICO(medico, especialidade), então é ela que usamos aqui
+    (não o join psv->esp usado em outros endpoints de agenda, que na
+    prática nunca resolve especialidade nenhuma).
+    """
+    termo = (especialidade or "").strip().upper()
+    if not termo:
+        return {"especialidade_buscada": especialidade, "encontrada": False, "medicos": []}
+
+    fim = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
+    rows = query("""
+        SELECT
+            eh.HOR_MED                             AS medico_cod,
+            RTRIM(psv.psv_nome)                    AS medico_nome,
+            RTRIM(v.especialidade)                 AS especialidade,
+            CONVERT(VARCHAR(10), eh.HOR_DATA, 120)  AS data,
+            eh.HORARIO_INICIO                       AS horario
+        FROM EX_HORARIOS eh
+        JOIN psv ON psv.psv_cod = eh.HOR_MED
+        JOIN V_ESP_MEDICO v ON v.medico = eh.HOR_MED
+        WHERE eh.HOR_DATA >= CAST(GETDATE() AS DATE)
+          AND eh.HOR_DATA < CAST(? AS DATE)
+          AND UPPER(v.especialidade) LIKE ?
+        ORDER BY eh.HOR_DATA, eh.HORARIO_INICIO
+    """, (fim, f"%{termo}%"))
+
+    if not rows:
+        return {"especialidade_buscada": especialidade, "encontrada": False, "medicos": []}
+
+    especialidade_real = rows[0]["especialidade"]
+    por_medico = {}
+    for r in rows:
+        chave = (r["medico_cod"], r["medico_nome"])
+        por_medico.setdefault(chave, {})
+        por_medico[chave].setdefault(r["data"], []).append(r["horario"])
+
+    medicos = []
+    for (cod, nome), datas in por_medico.items():
+        datas_lista = []
+        for data in sorted(datas.keys())[:limite_datas]:
+            datas_lista.append({"data": data, "horarios": sorted(datas[data])})
+        medicos.append({
+            "medico_cod": cod,
+            "medico_nome": nome,
+            "proximas_datas": datas_lista,
+            "total_horarios_no_periodo": sum(len(h) for h in datas.values()),
+        })
+    medicos.sort(key=lambda m: -m["total_horarios_no_periodo"])
+
+    return {
+        "especialidade_buscada": especialidade,
+        "especialidade_encontrada": especialidade_real,
+        "encontrada": True,
+        "medicos": medicos,
+    }
+
+
+def buscar_disponibilidade_medico(nome_busca: str, dias: int = 30, limite_datas: int = 5):
+    """
+    Busca médico(s) por nome/apelido (ex: "Malcher", "Dra. Fernanda") e
+    retorna, pra cada um: especialidade (via V_ESP_MEDICO), se teve
+    atendimento nos últimos 90 dias (agm) e a agenda aberta nos próximos
+    `dias` (EX_HORARIOS) — cobre tanto "esse médico existe/atende aqui?"
+    quanto "quando ele tem vaga?" na mesma resposta.
+    """
+    termo = (nome_busca or "").strip().upper()
+    if not termo:
+        return {"medico_buscado": nome_busca, "encontrado": False, "medicos": []}
+
+    candidatos = query("""
+        SELECT DISTINCT psv.psv_cod AS medico_cod, RTRIM(psv.psv_nome) AS medico_nome
+        FROM psv
+        WHERE UPPER(psv.psv_nome) LIKE ? OR UPPER(ISNULL(psv.psv_apel,'')) LIKE ?
+    """, (f"%{termo}%", f"%{termo}%"))
+
+    if not candidatos:
+        return {"medico_buscado": nome_busca, "encontrado": False, "medicos": []}
+
+    fim = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
+    medicos = []
+    for cand in candidatos[:5]:
+        cod = cand["medico_cod"]
+        slots = query("""
+            SELECT CONVERT(VARCHAR(10), eh.HOR_DATA, 120) AS data, eh.HORARIO_INICIO AS horario
+            FROM EX_HORARIOS eh
+            WHERE eh.HOR_MED = ? AND eh.HOR_DATA >= CAST(GETDATE() AS DATE) AND eh.HOR_DATA < CAST(? AS DATE)
+            ORDER BY eh.HOR_DATA, eh.HORARIO_INICIO
+        """, (cod, fim))
+
+        esp_rows = query("SELECT RTRIM(especialidade) AS especialidade FROM V_ESP_MEDICO WHERE medico = ?", (cod,))
+        especialidade = esp_rows[0]["especialidade"] if esp_rows else None
+
+        atividade = query(
+            "SELECT TOP 1 1 AS ok FROM agm WHERE agm_med = ? AND agm_hini >= DATEADD(day,-90,GETDATE())",
+            (cod,),
+        )
+
+        datas = {}
+        for s in slots:
+            datas.setdefault(s["data"], []).append(s["horario"])
+        datas_lista = [{"data": d, "horarios": sorted(datas[d])} for d in sorted(datas.keys())[:limite_datas]]
+
+        medicos.append({
+            "medico_cod": cod,
+            "medico_nome": cand["medico_nome"],
+            "especialidade": especialidade,
+            "atende_recentemente": bool(atividade),
+            "tem_agenda_aberta": len(slots) > 0,
+            "proximas_datas": datas_lista,
+            "total_horarios_no_periodo": len(slots),
+        })
+
+    return {"medico_buscado": nome_busca, "encontrado": True, "medicos": medicos}
+
+
+@app.get("/api/agenda/disponibilidade-especialidade")
+def disponibilidade_por_especialidade(especialidade: str, dias: int = 30, limite_datas: int = 5):
+    """Endpoint HTTP fino sobre buscar_disponibilidade_especialidade — usado
+    tanto pelo frontend quanto pelo bot de WhatsApp (agenda_bot.py)."""
+    return buscar_disponibilidade_especialidade(especialidade, dias, limite_datas)
+
+
+def buscar_medicos_agenda_hoje():
+    """
+    Lista todos os médicos com pelo menos 1 horário disponível hoje
+    (EX_HORARIOS, SITUACAO='DISPONIVEL') — cobre a pergunta genérica "quais
+    médicos têm agenda aberta hoje?", sem especialidade nem nome de médico
+    específico. Retorna no mesmo formato de buscar_disponibilidade_medico/
+    especialidade (proximas_datas com 1 entrada = hoje) pra reaproveitar o
+    mesmo card no frontend.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query("""
+        SELECT
+            eh.HOR_MED               AS medico_cod,
+            RTRIM(psv.psv_nome)      AS medico_nome,
+            RTRIM(v.especialidade)   AS especialidade,
+            eh.HORARIO_INICIO        AS horario
+        FROM EX_HORARIOS eh
+        JOIN psv ON psv.psv_cod = eh.HOR_MED
+        LEFT JOIN V_ESP_MEDICO v ON v.medico = eh.HOR_MED
+        WHERE eh.HOR_DATA = CAST(GETDATE() AS DATE)
+        ORDER BY v.especialidade, psv.psv_nome, eh.HORARIO_INICIO
+    """)
+
+    por_medico = {}
+    for r in rows:
+        chave = (r["medico_cod"], r["medico_nome"], r["especialidade"])
+        por_medico.setdefault(chave, []).append(r["horario"])
+
+    medicos = []
+    for (cod, nome, esp), horarios in por_medico.items():
+        medicos.append({
+            "medico_cod": cod,
+            "medico_nome": nome,
+            "especialidade": esp,
+            "proximas_datas": [{"data": hoje, "horarios": sorted(horarios)}],
+            "total_horarios_no_periodo": len(horarios),
+        })
+    medicos.sort(key=lambda m: (m["especialidade"] or "", m["medico_nome"]))
+
+    return {
+        "data": hoje,
+        "encontrada": len(medicos) > 0,
+        "medicos": medicos,
+    }
+
+
+@app.get("/api/agenda/disponibilidade-hoje")
+def disponibilidade_hoje():
+    """Endpoint HTTP fino sobre buscar_medicos_agenda_hoje — usado pelo chat interno."""
+    return buscar_medicos_agenda_hoje()
+
+
+class ChatAgendaRequest(BaseModel):
+    mensagem: str
+
+
+@app.post("/api/agenda/chat")
+def chat_agenda(payload: ChatAgendaRequest):
+    """
+    Assistente interno (chat dentro do Dashboard, não WhatsApp): recepção ou
+    qualquer setor pergunta em linguagem natural — sobre uma especialidade
+    ("temos dermatologista?") OU sobre um médico específico ("Dr. Malcher
+    atende aqui?") — e recebe a disponibilidade real de agenda. Reaproveita
+    o classificador via OpenAI do bot de WhatsApp (agenda_bot.py).
+    """
+    from agenda_bot import _extrair_intencao
+
+    tipo_intencao, valor = _extrair_intencao(payload.mensagem)
+
+    if tipo_intencao == "medico":
+        resultado = buscar_disponibilidade_medico(valor)
+        if not resultado["encontrado"]:
+            resultado["mensagem"] = f'Não encontrei nenhum médico chamado "{valor}" no cadastro.'
+        else:
+            partes_sem_agenda = []
+            for m in resultado["medicos"]:
+                if not m["tem_agenda_aberta"]:
+                    status = "atendeu recentemente" if m["atende_recentemente"] else "sem atendimento recente registrado"
+                    esp = f" ({m['especialidade']})" if m["especialidade"] else ""
+                    partes_sem_agenda.append(f"Dr(a). {m['medico_nome']}{esp} — {status}, mas sem agenda aberta nos próximos 30 dias.")
+            if partes_sem_agenda:
+                resultado["mensagem"] = " ".join(partes_sem_agenda)
+        resultado["tipo"] = "disponibilidade_medico"
+        return resultado
+
+    if tipo_intencao == "especialidade":
+        resultado = buscar_disponibilidade_especialidade(valor)
+        if not resultado["encontrada"]:
+            resultado["mensagem"] = (
+                f'Não encontrei horários disponíveis para "{valor}" nos próximos 30 dias. Pode ser que não '
+                f"tenhamos essa especialidade ativa agora, ou a agenda ainda não foi liberada."
+            )
+        resultado["tipo"] = "disponibilidade_especialidade"
+        return resultado
+
+    if tipo_intencao == "hoje":
+        resultado = buscar_medicos_agenda_hoje()
+        if not resultado["encontrada"]:
+            resultado["mensagem"] = "Não encontrei nenhum médico com agenda aberta hoje."
+        resultado["tipo"] = "disponibilidade_hoje"
+        return resultado
+
+    return {
+        "tipo": "nao_entendido",
+        "mensagem": 'Não entendi sua pergunta. Pode perguntar sobre uma especialidade ("temos dermatologista?"), um médico específico ("Dr. Malcher atende aqui?") ou pedir a lista geral de hoje ("quais médicos têm agenda aberta hoje?").',
+    }
+
+
 @app.get("/api/agenda/dia")
 def agenda_medico_dia(cod_medico: int, data: str = None):
     """
@@ -2066,10 +4837,11 @@ def agenda_medico_dia(cod_medico: int, data: str = None):
         LEFT JOIN loc ON loc.loc_cod   = agm.agm_loc
         LEFT JOIN cnv ON cnv.cnv_cod   = agm.agm_cnv_cod
         WHERE agm.agm_med  = ?
+          AND agm.agm_stat <> 'B'
           AND CAST(agm.agm_hini AS DATE) = ?
         ORDER BY agm.agm_hini
     """, (cod_medico, data))
-    STATUS  = {"A":"Aberto","E":"Executado","C":"Cancelado","B":"Bloqueado"}
+    STATUS  = {"A":"Aberto","E":"Executado","C":"Cancelado"}
     CONFIRM = {"A":"Em aberto","C":"Confirmado","N":"Não confirmado"}
     for r in rows:
         r["status_label"]      = STATUS.get(r["status"], r["status"] or "—")
@@ -2102,6 +4874,7 @@ def agenda_medico_mensal(cod_medico: int, ano: int = None, mes: int = None):
             ISNULL(SUM(agm.agm_valor), 0)                                   AS valor_total
         FROM agm
         WHERE agm.agm_med = ?
+          AND agm.agm_stat <> 'B'
           AND CAST(agm.agm_hini AS DATE) BETWEEN ? AND ?
         GROUP BY CAST(agm.agm_hini AS DATE)
         ORDER BY data
@@ -2109,6 +4882,399 @@ def agenda_medico_mensal(cod_medico: int, ano: int = None, mes: int = None):
     for r in rows:
         if hasattr(r.get("data"), "strftime"):
             r["data"] = r["data"].strftime("%Y-%m-%d")
+    return rows
+
+
+DIAS_SEMANA_COD = ["seg", "ter", "qua", "qui", "sex", "sab"]
+DIAS_SEMANA_LABEL = {"seg": "Segunda", "ter": "Terça", "qua": "Quarta", "qui": "Quinta", "sex": "Sexta", "sab": "Sábado"}
+
+@app.get("/api/agenda/semanal-por-medico")
+def agenda_semanal_por_medico(inicio: str = None):
+    """
+    Quantidade de agendamentos por médico, aberta por dia da semana
+    (segunda a sábado) -- base do relatório enviado toda segunda-feira.
+    inicio: YYYY-MM-DD (uma segunda-feira). Padrão = a segunda desta semana.
+    """
+    if inicio:
+        seg = datetime.strptime(inicio, "%Y-%m-%d")
+    else:
+        hoje = datetime.now()
+        seg = hoje - timedelta(days=hoje.weekday())
+    seg = seg.replace(hour=0, minute=0, second=0, microsecond=0)
+    sab = seg + timedelta(days=5)
+
+    rows = query("""
+        SELECT RTRIM(psv.psv_apel) AS medico,
+               CAST(agm.agm_hini AS DATE) AS dia,
+               DATEPART(HOUR, agm.agm_hini) AS hora,
+               COUNT(*) AS qtd
+        FROM agm
+        JOIN psv ON psv.psv_cod = agm.agm_med
+        WHERE agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C', 'B')
+          AND CAST(agm.agm_hini AS DATE) BETWEEN ? AND ?
+        GROUP BY RTRIM(psv.psv_apel), CAST(agm.agm_hini AS DATE), DATEPART(HOUR, agm.agm_hini)
+        ORDER BY medico, dia
+    """, (seg.strftime("%Y-%m-%d"), sab.strftime("%Y-%m-%d")))
+
+    por_medico = {}
+    for r in rows:
+        dia_idx = (r["dia"] - seg.date()).days if hasattr(r["dia"], "year") else None
+        if dia_idx is None or not (0 <= dia_idx <= 5):
+            continue
+        cod_dia = DIAS_SEMANA_COD[dia_idx]
+        medico = r["medico"]
+        turno = "manha" if r["hora"] < 12 else "tarde"
+
+        por_medico.setdefault(medico, {c: {"manha": 0, "tarde": 0} for c in DIAS_SEMANA_COD})
+        por_medico[medico][cod_dia][turno] += r["qtd"]
+
+    resultado = []
+    for medico, dias_dict in por_medico.items():
+        total_semana = sum(d["manha"] + d["tarde"] for d in dias_dict.values())
+        resultado.append({"medico": medico, "dias": dias_dict, "total": total_semana})
+    resultado.sort(key=lambda x: -x["total"])
+
+    return {
+        "inicio": seg.strftime("%Y-%m-%d"), "fim": sab.strftime("%Y-%m-%d"),
+        "dias": [{"cod": c, "label": DIAS_SEMANA_LABEL[c], "data": (seg + timedelta(days=i)).strftime("%Y-%m-%d")}
+                 for i, c in enumerate(DIAS_SEMANA_COD)],
+        "medicos": resultado,
+    }
+
+
+def _producao_prevista_semana(seg: datetime, sab: datetime):
+    """
+    Previsão de produção da semana SE TODOS os agendamentos comparecerem
+    (soma de agm_valor, sem filtrar por status de comparecimento) — aberta
+    por turno (manhã/tarde), no mesmo espírito do resumo de produção por
+    recepção já enviado no fechamento diário via WhatsApp.
+    """
+    rows = query("""
+        SELECT CAST(agm.agm_hini AS DATE) AS dia,
+               DATEPART(HOUR, agm.agm_hini) AS hora,
+               ISNULL(SUM(agm.agm_valor), 0) AS valor
+        FROM agm
+        WHERE agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C', 'B')
+          AND CAST(agm.agm_hini AS DATE) BETWEEN ? AND ?
+        GROUP BY CAST(agm.agm_hini AS DATE), DATEPART(HOUR, agm.agm_hini)
+        ORDER BY dia, hora
+    """, (seg.strftime("%Y-%m-%d"), sab.strftime("%Y-%m-%d")))
+
+    por_dia_turno = {c: {"manha": 0.0, "tarde": 0.0} for c in DIAS_SEMANA_COD}
+    total = 0.0
+    for r in rows:
+        dia_idx = (r["dia"] - seg.date()).days if hasattr(r["dia"], "year") else None
+        if dia_idx is None or not (0 <= dia_idx <= 5):
+            continue
+        cod_dia = DIAS_SEMANA_COD[dia_idx]
+        turno = "manha" if r["hora"] < 12 else "tarde"
+        valor = float(r["valor"] or 0)
+        por_dia_turno[cod_dia][turno] += valor
+        total += valor
+
+    return {
+        "total_previsto": round(total, 2),
+        "por_dia_turno": {c: {t: round(v, 2) for t, v in turnos.items()} for c, turnos in por_dia_turno.items()},
+    }
+
+
+def _media_producao_semanal_historica(seg: datetime, n_semanas: int = 4):
+    """
+    Média de produção semanal (segunda a sábado) vinda SÓ da agenda (agm_valor),
+    com base nas últimas `n_semanas` semanas COMPLETAS anteriores à semana do
+    relatório — mesma fonte/fórmula usada em _producao_prevista_semana, só que
+    aplicada a semanas já passadas, pra ficar comparável com a previsão da
+    semana atual.
+    """
+    ini = (seg - timedelta(days=7 * n_semanas)).strftime("%Y-%m-%d")
+    fim = (seg - timedelta(days=1)).strftime("%Y-%m-%d")  # sábado da semana anterior
+
+    rows = query("""
+        SELECT ISNULL(SUM(agm.agm_valor), 0) AS producao
+        FROM agm
+        WHERE agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C', 'B')
+          AND CAST(agm.agm_hini AS DATE) BETWEEN ? AND ?
+    """, (ini, fim))
+
+    total = float(rows[0]["producao"] or 0) if rows else 0.0
+    media = total / n_semanas if n_semanas else 0.0
+    return {"media_semanal": round(media, 2), "n_semanas": n_semanas}
+
+
+def gerar_pdf_agenda_semanal(inicio: str = None) -> str:
+    """
+    Gera o PDF visual do relatório semanal de agenda por médico e retorna o
+    caminho do arquivo (quem chama é responsável por apagar depois). Usado
+    tanto pelo endpoint HTTP quanto pelo envio automático (scheduler).
+    """
+    import subprocess, tempfile, base64 as _b64, uuid
+
+    dados = agenda_semanal_por_medico(inicio=inicio)
+    dias = dados["dias"]
+    medicos = dados["medicos"]
+
+    seg_dt = datetime.strptime(dados["inicio"], "%Y-%m-%d")
+    sab_dt = datetime.strptime(dados["fim"], "%Y-%m-%d")
+    producao = _producao_prevista_semana(seg_dt, sab_dt)
+    media_hist = _media_producao_semanal_historica(seg_dt, n_semanas=4)
+
+    def brl(v):
+        return f"R$ {v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".") if v is not None else "—"
+
+    logo_path = os.path.join(DIST, "..", "public", "icds_logo.png")
+    logo_b64 = ""
+    try:
+        with open(logo_path, "rb") as f:
+            logo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+    logo_censo_path = os.path.join(DIST, "..", "public", "logo_clinica_censo.png")
+    logo_censo_b64 = ""
+    try:
+        with open(logo_censo_path, "rb") as f:
+            logo_censo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+
+    maximo = max((m["total"] for m in medicos), default=0) or 1
+
+    def cor_celula(total_dia):
+        if total_dia <= 0:
+            return "#F8FAFC", "#CBD5E1", "#CBD5E1"
+        intensidade = min(1.0, total_dia / max(1, maximo / len(dias) * 1.6))
+        r1, g1, b1 = 0xD1, 0xFA, 0xE5  # verde bem claro
+        r2, g2, b2 = 0x05, 0x96, 0x69  # verde escuro (mesmo tom do Faturamento)
+        r = round(r1 + (r2 - r1) * intensidade)
+        g = round(g1 + (g2 - g1) * intensidade)
+        b = round(b1 + (b2 - b1) * intensidade)
+        texto_total = "#fff" if intensidade > 0.55 else "#065F46"
+        texto_sub = "rgba(255,255,255,0.8)" if intensidade > 0.55 else "#64748B"
+        return f"rgb({r},{g},{b})", texto_total, texto_sub
+
+    linhas_html = ""
+    for m in medicos:
+        celulas = ""
+        for d in dias:
+            manha, tarde = m["dias"][d["cod"]]["manha"], m["dias"][d["cod"]]["tarde"]
+            total_dia = manha + tarde
+            bg, cor_total, cor_sub = cor_celula(total_dia)
+            if total_dia:
+                conteudo = (f'<div class="cel-total-dia">{total_dia}</div>'
+                            f'<div class="cel-turnos" style="color:{cor_sub};">{manha}m / {tarde}t</div>')
+            else:
+                conteudo = '—'
+            celulas += f'<td style="background:{bg}; color:{cor_total};">{conteudo}</td>'
+        linhas_html += f"""
+        <tr>
+          <td class="col-medico">{m['medico']}</td>
+          {celulas}
+          <td class="col-total">{m['total']}</td>
+        </tr>"""
+
+    cabecalho_dias = "".join(
+        f'<th>{d["label"]}<br><span class="sub-data">{d["data"][8:10]}/{d["data"][5:7]}</span></th>'
+        for d in dias
+    )
+
+    total_geral = sum(m["total"] for m in medicos)
+    periodo_txt = f"{dados['inicio'][8:10]}/{dados['inicio'][5:7]} a {dados['fim'][8:10]}/{dados['fim'][5:7]}/{dados['fim'][0:4]}"
+
+    # ── Previsão de produção por turno (Manhã/Tarde) — mesma grade de dias da tabela por médico ──
+    linhas_turno_html = ""
+    for turno, label in (("manha", "Manhã"), ("tarde", "Tarde")):
+        celulas_turno = "".join(
+            f'<td>{brl(producao["por_dia_turno"][d["cod"]][turno])}</td>' for d in dias
+        )
+        total_turno = sum(producao["por_dia_turno"][d["cod"]][turno] for d in dias)
+        linhas_turno_html += f"""
+        <tr>
+          <td class="col-medico">{label}</td>
+          {celulas_turno}
+          <td class="col-total">{brl(total_turno)}</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><style>
+      @page {{ size: A4 landscape; margin: 16mm 14mm; }}
+      * {{ box-sizing: border-box; }}
+      body {{ font-family: 'Segoe UI', Arial, sans-serif; color:#1E293B; margin:0; }}
+      .header {{ display:flex; justify-content:space-between; align-items:center; border-bottom:3px solid #8B1A1A; padding-bottom:14px; margin-bottom:20px; }}
+      .header .logos {{ display:flex; align-items:center; gap:16px; }}
+      .header .logos img:first-child {{ height:40px; }}
+      .header .logos img:last-child {{ height:34px; }}
+      .header .titulo {{ text-align:right; }}
+      .header .titulo h1 {{ font-size:19px; margin:0; color:#8B1A1A; }}
+      .header .titulo p {{ font-size:11.5px; color:#64748B; margin:2px 0 0; }}
+      .info {{ display:flex; gap:14px; margin-bottom:18px; }}
+      .info-card {{ background:#F8FAFC; border-radius:8px; padding:10px 16px; border-left:4px solid #059669; }}
+      .info-card .label {{ font-size:10px; color:#64748B; text-transform:uppercase; font-weight:700; letter-spacing:.04em; }}
+      .info-card .valor {{ font-size:18px; font-weight:800; color:#111827; margin-top:2px; }}
+      table {{ width:100%; border-collapse:collapse; font-size:12.5px; }}
+      th {{ background:#059669; color:#fff; padding:8px 6px; text-align:center; font-size:11px; font-weight:700; }}
+      th .sub-data {{ font-size:9.5px; font-weight:400; opacity:.85; }}
+      td {{ padding:6px; text-align:center; border-bottom:1px solid #E2E8F0; font-weight:700; }}
+      .col-medico {{ text-align:left; font-weight:700; color:#111827; white-space:nowrap; padding-left:10px; }}
+      .col-total {{ font-weight:800; color:#059669; background:#F0FDF4; }}
+      .cel-total-dia {{ font-size:13px; font-weight:800; line-height:1.3; }}
+      .cel-turnos {{ font-size:9px; font-weight:600; margin-top:1px; }}
+      tr:nth-child(even) td:not([style]) {{ background:#FAFAFA; }}
+      tr {{ break-inside:avoid; page-break-inside:avoid; }}
+      .secao-titulo {{ font-size:14px; font-weight:800; color:#111827; margin:22px 0 10px; break-after:avoid; page-break-after:avoid; }}
+      .legenda {{ font-size:10.5px; color:#94A3B8; margin-top:6px; }}
+      .footer {{ margin-top:16px; font-size:10px; color:#94A3B8; border-top:1px solid #E2E8F0; padding-top:8px; }}
+    </style></head><body>
+      <div class="header">
+        <div class="logos">
+          <img src="data:image/png;base64,{logo_censo_b64}" alt="Clínica Censo"/>
+          <img src="data:image/png;base64,{logo_b64}" alt="ICDS"/>
+        </div>
+        <div class="titulo">
+          <h1>Relatório Semanal — Agenda por Médico</h1>
+          <p>Semana de {periodo_txt}</p>
+        </div>
+      </div>
+      <div class="info">
+        <div class="info-card"><div class="label">Médicos com agenda</div><div class="valor">{len(medicos)}</div></div>
+        <div class="info-card"><div class="label">Total de agendamentos</div><div class="valor">{total_geral}</div></div>
+        <div class="info-card" style="border-left-color:#0891B2;"><div class="label">Previsão de produção (se todos vierem)</div><div class="valor">{brl(producao['total_previsto'])}</div></div>
+        <div class="info-card" style="border-left-color:#7C3AED;"><div class="label">Média de produção semanal (últimas {media_hist['n_semanas']} semanas)</div><div class="valor">{brl(media_hist['media_semanal'])}</div></div>
+      </div>
+      <div class="secao-titulo">Agenda por Médico</div>
+      <table><thead><tr>
+        <th style="text-align:left; padding-left:10px;">Médico</th>{cabecalho_dias}<th>Total</th>
+      </tr></thead><tbody>{linhas_html}</tbody></table>
+      <div class="legenda">Em cada dia: total de agendamentos, com a divisão <b>m</b> = manhã / <b>t</b> = tarde logo abaixo.</div>
+
+      <div class="secao-titulo">Previsão de Produção por Turno</div>
+      <table><thead><tr>
+        <th style="text-align:left; padding-left:10px;">Turno</th>{cabecalho_dias}<th>Total</th>
+      </tr></thead><tbody>{linhas_turno_html}</tbody></table>
+
+      <div class="footer">Previsão de produção considera o valor de todos os agendamentos da semana (agm_valor), inclusive os que ainda não ocorreram — ou seja, o total SE TODOS comparecerem. Considera agendamentos com paciente vinculado, exceto cancelados. Relatório gerado automaticamente pelo Dashboard ICDS.</div>
+    </body></html>"""
+
+    tmp_dir = tempfile.gettempdir()
+    uid = uuid.uuid4().hex
+    html_path = os.path.join(tmp_dir, f"agenda_semanal_{uid}.html")
+    pdf_path = os.path.join(tmp_dir, f"agenda_semanal_{uid}.pdf")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    try:
+        subprocess.run([
+            chrome_path, "--headless", "--disable-gpu", "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}", f"file:///{html_path}",
+        ], timeout=30, capture_output=True)
+    finally:
+        try: os.remove(html_path)
+        except OSError: pass
+
+    if not os.path.exists(pdf_path):
+        raise RuntimeError("Falha ao gerar PDF do relatório semanal")
+    return pdf_path
+
+
+@app.get("/api/agenda/semanal-por-medico/pdf")
+def agenda_semanal_por_medico_pdf(inicio: str = None, background_tasks: BackgroundTasks = None):
+    pdf_path = gerar_pdf_agenda_semanal(inicio=inicio)
+    background_tasks.add_task(lambda: os.remove(pdf_path) if os.path.exists(pdf_path) else None)
+    return FileResponse(
+        pdf_path, media_type="application/pdf",
+        filename="Agenda_Semanal_Por_Medico.pdf", background=background_tasks,
+    )
+
+
+@app.get("/api/agenda/consultorios/valor-hora")
+def consultorios_valor_hora(periodo: str = "30d"):
+    """
+    Valor gerado por hora ocupada, por consultório/sala (LOC) — só considera
+    atendimentos EFETIVADOS (agm_stat='E'), já que é o único status em que o
+    horário realmente ocorreu e o valor foi de fato gerado. agm_valor é o
+    valor do agendamento em si (não é o mesmo dado de recebimento real usado
+    em /api/financeiro — é a melhor granularidade disponível por sala, já
+    que smm/fat não guardam local de forma confiável).
+    """
+    inicio, fim = periodo_datas(periodo)
+    rows = query("""
+        SELECT
+            RTRIM(loc.loc_cod)                                              AS cod,
+            RTRIM(loc.loc_nome)                                             AS nome,
+            COUNT(*)                                                        AS qtd_atendimentos,
+            SUM(DATEDIFF(MINUTE, agm.agm_hini, agm.agm_hfim)) / 60.0        AS horas_ocupadas,
+            ISNULL(SUM(agm.agm_valor), 0)                                   AS valor_total
+        FROM agm
+        JOIN loc ON loc.loc_cod = agm.agm_loc
+        WHERE agm.agm_stat = 'E'
+          AND agm.agm_hini BETWEEN ? AND ?
+          AND agm.agm_hfim > agm.agm_hini
+        GROUP BY RTRIM(loc.loc_cod), RTRIM(loc.loc_nome)
+        HAVING SUM(DATEDIFF(MINUTE, agm.agm_hini, agm.agm_hfim)) >= 60  -- pelo menos 1h ocupada no periodo, pra evitar ruido de amostra pequena
+        ORDER BY 5 DESC
+    """, (inicio, fim))
+
+    for r in rows:
+        r["horas_ocupadas"] = round(r["horas_ocupadas"], 1)
+        r["valor_total"] = round(r["valor_total"], 2)
+        r["valor_hora"] = round(r["valor_total"] / r["horas_ocupadas"], 2) if r["horas_ocupadas"] else 0
+
+    rows.sort(key=lambda r: r["valor_hora"], reverse=True)
+    return rows
+
+
+@app.get("/api/agenda/medicos/valor-hora")
+def medicos_valor_hora(periodo: str = "30d"):
+    """
+    Mesmo cálculo de consultorios_valor_hora, mas agrupado por médico —
+    hoje é a visão que realmente compara (a agenda usa praticamente uma
+    sala genérica única, então por sala não rende ranking útil).
+
+    Atribuição por médico EXECUTOR, não pelo dono do horário na agenda: em
+    ~3% dos atendimentos o médico que realmente executou o procedimento
+    (smm.SMM_MED — ex: um exame feito por outro especialista dentro da
+    mesma consulta) é diferente de quem estava agendado (agm.AGM_MED).
+    Resolve por visita: usa o SMM_MED do item de maior valor daquela visita
+    quando existir, senão cai pro médico da agenda. Duração e valor
+    continuam vindo do agendamento (agm) — só o médico creditado muda.
+    """
+    inicio, fim = periodo_datas(periodo)
+    rows = query("""
+        WITH executor_visita AS (
+            SELECT
+                agm.AGM_ID,
+                agm.agm_hini,
+                agm.agm_hfim,
+                agm.agm_valor,
+                COALESCE(
+                    (SELECT TOP 1 smm.SMM_MED
+                     FROM smm
+                     WHERE smm.SMM_OSM_SERIE = agm.AGM_OSM_SERIE AND smm.SMM_OSM = agm.AGM_OSM_NUM
+                       AND smm.SMM_MED IS NOT NULL
+                     ORDER BY smm.SMM_VLR DESC),
+                    agm.AGM_MED
+                ) AS medico_executor
+            FROM agm
+            WHERE agm.agm_stat = 'E'
+              AND agm.agm_hini BETWEEN ? AND ?
+              AND agm.agm_hfim > agm.agm_hini
+        )
+        SELECT
+            psv.psv_cod                                                     AS cod,
+            RTRIM(psv.psv_nome)                                             AS nome,
+            COUNT(*)                                                        AS qtd_atendimentos,
+            SUM(DATEDIFF(MINUTE, ev.agm_hini, ev.agm_hfim)) / 60.0          AS horas_ocupadas,
+            ISNULL(SUM(ev.agm_valor), 0)                                    AS valor_total
+        FROM executor_visita ev
+        JOIN psv ON psv.psv_cod = ev.medico_executor
+        GROUP BY psv.psv_cod, RTRIM(psv.psv_nome)
+        HAVING SUM(DATEDIFF(MINUTE, ev.agm_hini, ev.agm_hfim)) >= 60  -- pelo menos 1h ocupada no periodo, pra evitar ruido de amostra pequena
+    """, (inicio, fim))
+
+    for r in rows:
+        r["horas_ocupadas"] = round(r["horas_ocupadas"], 1)
+        r["valor_total"] = round(r["valor_total"], 2)
+        r["valor_hora"] = round(r["valor_total"] / r["horas_ocupadas"], 2) if r["horas_ocupadas"] else 0
+
+    rows.sort(key=lambda r: r["valor_hora"], reverse=True)
     return rows
 
 
@@ -2452,6 +5618,255 @@ def assistencial_resumo(periodo: str = "30d"):
 # ── MEDICINA OCUPACIONAL ──────────────────────────────────────────────────────
 OCUP_CODES = ["ADM","PER","DEM","RTB","MDF","MOC"]
 
+# Cache simples em memória — a consulta "todo o período" varre décadas de OS
+# e leva ~1min pra rodar; sem cache, cada clique no filtro re-executa isso.
+_CACHE_EMPRESAS_TODO = {"dados": None, "ts": None}
+_CACHE_EMPRESAS_TODO_TTL_MIN = 30
+
+@app.get("/api/modulo/ocupacional/empresas")
+def ocupacional_empresas(modo: str = "mes", ano: int = None, mes: int = None):
+    """
+    Lista de empresas (Top Empresas do módulo Ocupacional) com filtro
+    independente do período global da página — por mês específico
+    (com navegação) ou "todo o período" (histórico completo), pra achar
+    qual empresa mais trouxe produção desde sempre, não só no mês atual.
+    """
+    now = datetime.now()
+    if modo == "todo":
+        if _CACHE_EMPRESAS_TODO["dados"] is not None and _CACHE_EMPRESAS_TODO["ts"] is not None \
+           and (now - _CACHE_EMPRESAS_TODO["ts"]).total_seconds() < _CACHE_EMPRESAS_TODO_TTL_MIN * 60:
+            resultado = dict(_CACHE_EMPRESAS_TODO["dados"])
+            resultado["cache"] = True
+            return resultado
+        inicio, fim = "2000-01-01", now.strftime("%Y-%m-%d")
+    else:
+        if not ano: ano = now.year
+        if not mes: mes = now.month
+        import calendar
+        ultimo_dia = calendar.monthrange(ano, mes)[1]
+        inicio = f"{ano}-{mes:02d}-01"
+        fim = f"{ano}-{mes:02d}-{ultimo_dia}"
+
+    empresas = query(f"""
+        SELECT cnv.cnv_nome AS empresa,
+            COUNT(DISTINCT CASE WHEN osm.osm_atend='ADM' THEN CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num END) AS adm,
+            COUNT(DISTINCT CASE WHEN osm.osm_atend='PER' THEN CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num END) AS per,
+            COUNT(DISTINCT CASE WHEN osm.osm_atend='DEM' THEN CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num END) AS dem,
+            COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num) AS total,
+            SUM((smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))) AS faturamento
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN cnv ON cnv.cnv_cod=osm.osm_cnv
+        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY cnv.cnv_nome ORDER BY total DESC
+    """)
+    resultado = {"modo": modo, "ano": ano, "mes": mes, "inicio": inicio, "fim": fim, "empresas": empresas, "cache": False}
+    if modo == "todo":
+        _CACHE_EMPRESAS_TODO["dados"] = resultado
+        _CACHE_EMPRESAS_TODO["ts"] = now
+    return resultado
+
+
+_SERVICOS_AVALIACAO_PSICOLOGICA = ("AVPSICO", "AVPSICO2", "AVPSICOC", "CONSPSC")
+
+
+@app.get("/api/ocupacional/avaliacao-psicologica-empresas")
+def ocupacional_avaliacao_psicologica_empresas(dias: int = 365):
+    """
+    Empresas que fizeram avaliação psicológica na Recepção Ocupacional (ROC)
+    no período (padrão: últimos 365 dias) — quantidade de OS's e datas
+    primeira/última, ordenado por quantidade.
+    """
+    placeholders = ",".join(f"'{s}'" for s in _SERVICOS_AVALIACAO_PSICOLOGICA)
+    rows = query(f"""
+        SELECT RTRIM(cnv.cnv_nome) AS empresa,
+               COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num) AS qtd,
+               MIN(osm.osm_dthr) AS primeira, MAX(osm.osm_dthr) AS ultima
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+        JOIN cnv ON cnv.cnv_cod=osm.osm_cnv
+        WHERE RTRIM(smm.SMM_COD) IN ({placeholders})
+          AND RTRIM(osm.osm_str) = 'ROC'
+          AND osm.osm_dthr >= DATEADD(day, -?, GETDATE())
+          AND smm.SMM_SFAT IN ('A','F','P')
+        GROUP BY RTRIM(cnv.cnv_nome)
+        ORDER BY qtd DESC
+    """, (dias,))
+    for r in rows:
+        r["primeira"] = r["primeira"].strftime("%Y-%m-%d") if r["primeira"] else None
+        r["ultima"] = r["ultima"].strftime("%Y-%m-%d") if r["ultima"] else None
+    return {"dias": dias, "total_empresas": len(rows), "empresas": rows}
+
+
+@app.get("/api/ocupacional/avaliacao-psicologica-empresas/pdf")
+def ocupacional_avaliacao_psicologica_empresas_pdf(dias: int = 365, background_tasks: BackgroundTasks = None):
+    """PDF da lista de empresas com avaliação psicológica na Recepção Ocupacional no período."""
+    import subprocess, tempfile, base64 as _b64, uuid
+
+    dados = ocupacional_avaliacao_psicologica_empresas(dias=dias)
+    empresas = dados["empresas"]
+
+    logo_path = os.path.join(DIST, "..", "public", "icds_logo.png")
+    logo_b64 = ""
+    try:
+        with open(logo_path, "rb") as f:
+            logo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+    logo_censo_path = os.path.join(DIST, "..", "public", "logo_clinica_censo.png")
+    logo_censo_b64 = ""
+    try:
+        with open(logo_censo_path, "rb") as f:
+            logo_censo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+
+    def fmt_data(d):
+        return f"{d[8:10]}/{d[5:7]}/{d[0:4]}" if d else "—"
+
+    total_avaliacoes = sum(e["qtd"] for e in empresas)
+
+    linhas_html = ""
+    for e in empresas:
+        linhas_html += f"""
+        <tr>
+          <td>{e['empresa']}</td>
+          <td style="text-align:center;">{e['qtd']}</td>
+          <td style="text-align:center;">{fmt_data(e['primeira'])}</td>
+          <td style="text-align:center;">{fmt_data(e['ultima'])}</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><style>
+      @page {{ margin: 18mm 14mm; }}
+      * {{ box-sizing: border-box; }}
+      body {{ font-family: 'Segoe UI', Arial, sans-serif; color:#1E293B; margin:0; }}
+      .header {{ display:flex; justify-content:space-between; align-items:center; border-bottom:3px solid #8B1A1A; padding-bottom:14px; margin-bottom:20px; }}
+      .header .logos {{ display:flex; align-items:center; gap:16px; }}
+      .header .logos img:first-child {{ height:40px; }}
+      .header .logos img:last-child {{ height:34px; }}
+      .header .titulo {{ text-align:right; }}
+      .header .titulo h1 {{ font-size:18px; margin:0; color:#8B1A1A; }}
+      .header .titulo p {{ font-size:11px; color:#64748B; margin:2px 0 0; }}
+      .info {{ display:flex; gap:14px; margin-bottom:18px; flex-wrap:wrap; }}
+      .info-card {{ background:#F8FAFC; border-radius:8px; padding:10px 16px; border-left:4px solid #8B1A1A; flex:1; min-width:140px; }}
+      .info-card .label {{ font-size:10px; color:#64748B; text-transform:uppercase; font-weight:700; letter-spacing:.04em; }}
+      .info-card .valor {{ font-size:18px; font-weight:800; color:#111827; margin-top:2px; }}
+      table {{ width:100%; border-collapse:collapse; font-size:12px; }}
+      th {{ background:#8B1A1A; color:#fff; padding:8px 10px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.03em; }}
+      td {{ padding:7px 10px; border-bottom:1px solid #E2E8F0; }}
+      tr:nth-child(even) {{ background:#FAFAFA; }}
+      .footer {{ margin-top:24px; font-size:10px; color:#94A3B8; border-top:1px solid #E2E8F0; padding-top:8px; }}
+    </style></head><body>
+      <div class="header">
+        <div class="logos">
+          <img src="data:image/png;base64,{logo_censo_b64}" alt="Clínica Censo"/>
+          <img src="data:image/png;base64,{logo_b64}" alt="ICDS"/>
+        </div>
+        <div class="titulo">
+          <h1>Empresas — Avaliação Psicológica (Recepção Ocupacional)</h1>
+          <p>Últimos {dias} dias</p>
+        </div>
+      </div>
+      <div class="info">
+        <div class="info-card"><div class="label">Empresas</div><div class="valor">{len(empresas)}</div></div>
+        <div class="info-card"><div class="label">Total de Avaliações</div><div class="valor">{total_avaliacoes}</div></div>
+      </div>
+      <table><thead><tr>
+        <th>Empresa</th><th style="text-align:center;">Qtd. Avaliações</th><th style="text-align:center;">Primeira</th><th style="text-align:center;">Última</th>
+      </tr></thead><tbody>{linhas_html}</tbody></table>
+      <div class="footer">Considera os serviços: Avaliação Psicológica, Avaliação Psicológica (R1+AC+PALO), Avaliação Psicológica Completa e Consulta Psicologia, na Recepção Ocupacional. Relatório gerado automaticamente pelo Dashboard ICDS.</div>
+    </body></html>"""
+
+    tmp_dir = tempfile.gettempdir()
+    uid = uuid.uuid4().hex
+    html_path = os.path.join(tmp_dir, f"avpsico_{uid}.html")
+    pdf_path = os.path.join(tmp_dir, f"avpsico_{uid}.pdf")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    try:
+        subprocess.run([
+            chrome_path, "--headless", "--disable-gpu", "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}", f"file:///{html_path}",
+        ], timeout=30, capture_output=True)
+    finally:
+        try: os.remove(html_path)
+        except OSError: pass
+
+    if not os.path.exists(pdf_path):
+        raise HTTPException(500, "Falha ao gerar PDF")
+
+    background_tasks.add_task(lambda: os.remove(pdf_path) if os.path.exists(pdf_path) else None)
+    return FileResponse(
+        pdf_path, media_type="application/pdf",
+        filename="Empresas_Avaliacao_Psicologica_Ocupacional.pdf",
+        background=background_tasks,
+    )
+
+
+@app.get("/api/modulo/ocupacional/variacao-empresas")
+def ocupacional_variacao_empresas(ano: int = None, ano_comparacao: int = None):
+    """
+    Compara o faturamento por empresa (convênio) entre dois anos completos —
+    por padrão o ano corrente vs o anterior — pra identificar rápido quais
+    clientes estão em queda ou crescimento, sem precisar cruzar manualmente
+    (foi assim que se achou, em uma investigação pontual, que a queda de
+    faturamento do Ocupacional em 2025 estava concentrada num cliente só).
+    """
+    now = datetime.now()
+    if not ano: ano = now.year
+    if not ano_comparacao: ano_comparacao = ano - 1
+
+    rows = query(f"""
+        SELECT YEAR(osm.osm_dthr) AS ano, RTRIM(cnv.cnv_nome) AS empresa,
+            SUM(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) AS valor,
+            COUNT(DISTINCT CAST(osm.osm_serie AS BIGINT)*1000000+osm.osm_num) AS qtd_os
+        FROM smm
+        JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
+        JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE smm.SMM_SFAT IN ('A','F','P')
+          AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')
+          AND YEAR(osm.osm_dthr) IN (?, ?)
+        GROUP BY YEAR(osm.osm_dthr), RTRIM(cnv.cnv_nome)
+    """, (ano, ano_comparacao))
+
+    por_empresa = {}
+    for r in rows:
+        emp = r["empresa"]
+        if emp not in por_empresa:
+            por_empresa[emp] = {"empresa": emp, "valor_atual": 0, "valor_anterior": 0, "qtd_atual": 0, "qtd_anterior": 0}
+        if r["ano"] == ano:
+            por_empresa[emp]["valor_atual"] = float(r["valor"] or 0)
+            por_empresa[emp]["qtd_atual"] = r["qtd_os"]
+        else:
+            por_empresa[emp]["valor_anterior"] = float(r["valor"] or 0)
+            por_empresa[emp]["qtd_anterior"] = r["qtd_os"]
+
+    empresas = []
+    for e in por_empresa.values():
+        variacao = e["valor_atual"] - e["valor_anterior"]
+        variacao_pct = (variacao / e["valor_anterior"] * 100) if e["valor_anterior"] else None
+        empresas.append({**e, "variacao_valor": round(variacao, 2), "variacao_pct": round(variacao_pct, 1) if variacao_pct is not None else None})
+
+    # só entram empresas com alguma relevância num dos dois anos, pra não poluir com ruído de empresas de valor irrisório
+    empresas = [e for e in empresas if e["valor_atual"] >= 3000 or e["valor_anterior"] >= 3000]
+    empresas.sort(key=lambda e: e["variacao_valor"])
+
+    total_atual = sum(e["valor_atual"] for e in empresas)
+    total_anterior = sum(e["valor_anterior"] for e in empresas)
+
+    return {
+        "ano": ano, "ano_comparacao": ano_comparacao,
+        "total_atual": round(total_atual, 2), "total_anterior": round(total_anterior, 2),
+        "variacao_total": round(total_atual - total_anterior, 2),
+        "quedas": empresas[:15],
+        "altas": sorted(empresas, key=lambda e: -e["variacao_valor"])[:15],
+    }
+
+
 @app.get("/api/modulo/ocupacional/resumo")
 def ocupacional_modulo_resumo(periodo: str = "30d"):
     inicio, fim = periodo_datas(periodo)
@@ -2480,7 +5895,7 @@ def ocupacional_modulo_resumo(periodo: str = "30d"):
           AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')
     """)
     empresas = query(f"""
-        SELECT TOP 10 cnv.cnv_nome AS empresa,
+        SELECT cnv.cnv_nome AS empresa,
             COUNT(DISTINCT CASE WHEN osm.osm_atend='ADM' THEN osm.osm_serie*1000000+osm.osm_num END) AS adm,
             COUNT(DISTINCT CASE WHEN osm.osm_atend='PER' THEN osm.osm_serie*1000000+osm.osm_num END) AS per,
             COUNT(DISTINCT CASE WHEN osm.osm_atend='DEM' THEN osm.osm_serie*1000000+osm.osm_num END) AS dem,
@@ -3208,9 +6623,10 @@ def agendamentos_resumo_hoje():
                      THEN 1 ELSE 0 END)                                     AS faltantes,
             SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat='C'
                      THEN 1 ELSE 0 END)                                     AS cancelados,
-            -- Total de horários (vagas disponíveis + marcações)
+            -- Total de horários (vagas disponíveis + marcações) - exclui cancelados e bloqueios,
+            -- mesmo filtro usado em "marcacoes" acima (bloqueio não é agendamento real)
             ISNULL((SELECT COUNT(*) FROM EX_HORARIOS WHERE HOR_DATA = '{hoje}'), 0)
-            + SUM(CASE WHEN agm.agm_pac > 0 THEN 1 ELSE 0 END)             AS total_horarios,
+            + SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B') THEN 1 ELSE 0 END) AS total_horarios,
             ISNULL((SELECT COUNT(*) FROM EX_HORARIOS WHERE HOR_DATA = '{hoje}'), 0) AS vagas_disp,
             COUNT(DISTINCT agm.agm_med)                                     AS medicos_agenda,
             -- Ticket médio dos últimos 30 dias (base para previsão dos que ainda não vieram)
@@ -3700,6 +7116,13 @@ def metas_salvar(modulo: str, payload: dict):
     _save_metas(metas)
     return metas[modulo]
 
+@app.delete("/api/metas/{modulo}")
+def metas_remover(modulo: str):
+    metas = _load_metas()
+    metas.pop(modulo, None)
+    _save_metas(metas)
+    return {"ok": True}
+
 @app.get("/api/whatsapp/config")
 def wpp_get_config():
     cfg = _load_wpp_config()
@@ -3772,6 +7195,34 @@ def wpp_save_config(
     if cfg.get("numeros_destino"):    os.environ["WHATSAPP_DEST"]       = cfg["numeros_destino"]
 
     return {"ok": True, "config": wpp_get_config()}
+
+@app.get("/api/whatsapp/grupos")
+def wpp_listar_grupos():
+    """Lista os grupos de WhatsApp que a sessão conectada (WPPConnect) já
+    participa — usado pra achar o ID do grupo sem precisar caçar manualmente.
+    Só funciona com provider=wppconnect e sessão já conectada (QR lido)."""
+    cfg = _load_wpp_config()
+    if cfg.get("provider", "wppconnect") != "wppconnect":
+        return {"ok": False, "erro": "Listagem de grupos só é suportada com o provider WPPConnect."}
+    session = cfg.get("wppconnect_session", "myinstance")
+    token   = cfg.get("wppconnect_token", "")
+    base    = cfg.get("wppconnect_url", "http://localhost:21465")
+    try:
+        resp = httpx.get(
+            f"{base}/api/{session}/all-groups",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        grupos = [
+            {"id": g.get("id", {}).get("_serialized") or g.get("id"), "nome": g.get("name") or g.get("formattedTitle") or ""}
+            for g in (data.get("response") or [])
+        ]
+        grupos = [g for g in grupos if g["id"]]
+        return {"ok": True, "total": len(grupos), "grupos": grupos}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)[:250]}
 
 @app.post("/api/whatsapp/send-test")
 def wpp_send_test(turno: str = "manha"):
@@ -4737,9 +8188,20 @@ def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
     # Setores sem FLE_DTHR_ATENDIMENTO (ROC): usa AGM→OSM
     filtro_fle = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
 
-    # Tempo de espera — lógica unificada para todos os setores:
-    # FLE_DTHR_CHEGADA (chegada do paciente) → osm_dthr (abertura da OS = início do atendimento)
-    # Deduplica com TOP 1 para pegar a chegada mais recente antes da OS de cada paciente
+    # Tempo de espera — da senha (FLE_DTHR_CHEGADA) até a RECEPÇÃO CHAMAR a senha.
+    # Prioriza FLE_DTHR_ATENDIMENTO (chamada real, gravada na própria senha).
+    # IMPORTANTE: as filas de senha do Ocupacional (Outras Empresas, Vale, Particular,
+    # Prioridade por Lei etc.) são gravadas com FLE_STR_COD='RPS', não 'ROC' — 'ROC' é
+    # só o setor da OS/faturamento. Confirmado com dado real: correlacionando OS do ROC
+    # com senha RPS (mesmo paciente/dia) a cobertura sobe de ~0% pra ~84%, com tempos
+    # de espera plausíveis (14-119min). Por isso mapeamos ROC→RPS só pra achar a senha;
+    # RCN/RDI/RCI continuam usando o próprio FLE_STR_COD (já bate direto com osm_str).
+    # Só cai pra osm_dthr (abertura da OS) como aproximação quando não há chamada
+    # registrada nem senha correlacionada (ex: RCI, que não usa senha/totem).
+    # OBS: FLE_OSM_SERIE/FLE_OSM_NUM foi testado como possível vínculo direto senha→OS,
+    # mas os dados mostraram que não representa isso de forma confiável (valores repetidos
+    # entre senhas diferentes, diferença de horário quase sempre negativa) — não usar.
+    # Deduplica com TOP 1 para pegar a chegada mais recente antes da OS de cada paciente.
     filtro_str_espera = _filtro_osm_str_painel(setor)
     espera = query(f"""
         SELECT
@@ -4754,17 +8216,20 @@ def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
                 osm.osm_serie,
                 osm.osm_num,
                 DATEDIFF(minute,
-                    (SELECT TOP 1 f2.FLE_DTHR_CHEGADA
-                     FROM fle f2
-                     WHERE f2.FLE_PAC_REG = osm.osm_pac
-                       AND RTRIM(f2.FLE_STR_COD) = RTRIM(osm.osm_str)
-                       AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-                       AND f2.FLE_DTHR_CHEGADA <= osm.osm_dthr
-                       AND f2.FLE_PAC_REG > 0
-                     ORDER BY f2.FLE_DTHR_CHEGADA DESC),
-                    osm.osm_dthr
+                    x.chegada,
+                    COALESCE(x.atendimento, osm.osm_dthr)
                 ) AS espera_min
             FROM osm
+            CROSS APPLY (
+                SELECT TOP 1 f2.FLE_DTHR_CHEGADA AS chegada, f2.FLE_DTHR_ATENDIMENTO AS atendimento
+                FROM fle f2
+                WHERE f2.FLE_PAC_REG = osm.osm_pac
+                  AND RTRIM(f2.FLE_STR_COD) = CASE WHEN RTRIM(osm.osm_str) = 'ROC' THEN 'RPS' ELSE RTRIM(osm.osm_str) END
+                  AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+                  AND f2.FLE_DTHR_CHEGADA <= osm.osm_dthr
+                  AND f2.FLE_PAC_REG > 0
+                ORDER BY f2.FLE_DTHR_CHEGADA DESC
+            ) x
             WHERE CAST(osm.osm_dthr AS DATE) = '{hoje}'
               {filtro_str_espera}
         ) t
@@ -4846,19 +8311,25 @@ def painel_setores():
             b.setor_cod,
             RTRIM(str.str_nome)                                  AS setor_nome,
             COUNT(DISTINCT b.osm_serie*1000000+b.osm_num)        AS atendimentos,
-            -- espera media: FLE chegada → OS abertura, deduplificado por paciente
+            -- espera media: FLE chegada → chamada da senha (FLE_DTHR_ATENDIMENTO).
+            -- Ocupacional (ROC) usa a fila de senha 'RPS' (Outras Empresas, Vale,
+            -- Particular etc.) — 'ROC' é só o setor da OS, não da senha. Só cai para
+            -- a abertura da OS (osm_dthr) quando não há chamada nem senha correlacionada
+            -- (caso do RCI, que não usa senha/totem).
             (SELECT AVG(t.espera_min) FROM (
                 SELECT DISTINCT osm2.osm_serie, osm2.osm_num,
-                    DATEDIFF(minute,
-                        (SELECT TOP 1 f2.FLE_DTHR_CHEGADA FROM fle f2
-                         WHERE f2.FLE_PAC_REG = osm2.osm_pac
-                           AND RTRIM(f2.FLE_STR_COD) = RTRIM(osm2.osm_str)
-                           AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
-                           AND f2.FLE_DTHR_CHEGADA <= osm2.osm_dthr
-                           AND f2.FLE_PAC_REG > 0
-                         ORDER BY f2.FLE_DTHR_CHEGADA DESC),
-                        osm2.osm_dthr) AS espera_min
+                    DATEDIFF(minute, x.chegada, COALESCE(x.atendimento, osm2.osm_dthr)) AS espera_min
                 FROM osm osm2
+                CROSS APPLY (
+                    SELECT TOP 1 f2.FLE_DTHR_CHEGADA AS chegada, f2.FLE_DTHR_ATENDIMENTO AS atendimento
+                    FROM fle f2
+                    WHERE f2.FLE_PAC_REG = osm2.osm_pac
+                      AND RTRIM(f2.FLE_STR_COD) = CASE WHEN RTRIM(osm2.osm_str) = 'ROC' THEN 'RPS' ELSE RTRIM(osm2.osm_str) END
+                      AND CAST(f2.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+                      AND f2.FLE_DTHR_CHEGADA <= osm2.osm_dthr
+                      AND f2.FLE_PAC_REG > 0
+                    ORDER BY f2.FLE_DTHR_CHEGADA DESC
+                ) x
                 WHERE CAST(osm2.osm_dthr AS DATE) = '{hoje}'
                   AND (CASE WHEN RTRIM(osm2.osm_str) = 'PSI' THEN 'RCN' ELSE RTRIM(osm2.osm_str) END) = b.setor_cod
             ) t WHERE t.espera_min BETWEEN 1 AND 120)            AS espera_media_min
@@ -7813,7 +11284,47 @@ def painel_fila_status_pacientes():
     """)
     return rows
 
-# ─── Registro Clínico (RCL) — labels usadas para exibir resultado de exame ────
+@app.get("/api/atendimento/fila")
+def atendimento_fila(medico: int):
+    """
+    Fila de pacientes recepcionados para um médico específico, aguardando atendimento.
+    Mesmo mecanismo do Painel de Senhas: FLE_PSV_COD = médico (psv_cod), FLE_STATUS='A' = aguardando
+    (paciente chegou e ainda não foi chamado — 'X' = já chamado, 'E'/'Z' = outros status).
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query(f"""
+        SELECT
+            fle.FLE_PAC_REG                                    AS pac_reg,
+            RTRIM(pac.pac_nome)                                 AS paciente,
+            CONVERT(varchar, pac.PAC_NASC, 23)                   AS nascimento,
+            fle.FLE_DTHR_CHEGADA                                AS chegada,
+            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA, GETDATE())   AS espera_min,
+            fle.FLE_PREFERENCIAL                                AS preferencial,
+            agmx.AGM_SMK                                        AS servico
+        FROM fle
+        JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        OUTER APPLY (
+            SELECT TOP 1 a.AGM_SMK
+            FROM agm a
+            WHERE a.agm_med = fle.FLE_PSV_COD
+              AND a.agm_pac = fle.FLE_PAC_REG
+              AND CAST(a.agm_hini AS DATE) = CAST(fle.FLE_DTHR_CHEGADA AS DATE)
+            ORDER BY a.agm_hini DESC
+        ) agmx
+        WHERE fle.FLE_PSV_COD = {medico}
+          AND CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_STATUS = 'A'
+        ORDER BY fle.FLE_PREFERENCIAL DESC, fle.FLE_DTHR_CHEGADA ASC
+    """)
+    for r in rows:
+        if r.get("servico") is not None:
+            r["servico"] = str(r["servico"]).strip()
+    return {"medico": medico, "data": hoje, "total": len(rows), "fila": rows}
+
+# ─── Registro Clínico (RCL) — labels e templates de formulário ────────────────
+# Ver "Pixeon Smart - Mapeamento Registro Clinico.txt" (Desktop) para o
+# levantamento completo. Campos e tipos confirmados com exemplos reais de
+# produção (não confiar cegamente no tipo declarado no RTF do DSC).
 _CAMPOS_COMPARTILHADOS_3319 = {
     "2": "Outros (antecedentes)", "3": "Queixa Principal", "4": "Exame Físico",
     "6": "Hipótese Diagnóstica", "7": "Conduta (resumo)",
@@ -7848,6 +11359,66 @@ CAMPO_LABELS = {
     },
 }
 
+# Templates de formulário para ESCRITA — só os 4 serviços validados ponta a
+# ponta (insert testado em smart_hml + conferido visualmente no Smart).
+FORM_TEMPLATES = {
+    "CONSCLIN": {"modelo": 3654, "nome": "Consulta Clínica", "campos": [
+        {"campo":"3","tipo":"O","rotulo":"Queixa Principal","input":"textarea"},
+        {"campo":"4","tipo":"O","rotulo":"Exame Físico","input":"textarea"},
+        {"campo":"6","tipo":"O","rotulo":"Hipótese Diagnóstica","input":"textarea"},
+        {"campo":"7","tipo":"O","rotulo":"Conduta (resumo)","input":"textarea"},
+        {"campo":"2","tipo":"O","rotulo":"Outros (Antecedentes)","input":"textarea"},
+        {"campo":"20","tipo":"C","rotulo":"CID / Diagnóstico","input":"cid"},
+        {"campo":"29","tipo":"O","rotulo":"Exames Solicitados","input":"textarea"},
+        {"campo":"30","tipo":"O","rotulo":"Medicamento Prescrito","input":"textarea"},
+        {"campo":"31","tipo":"O","rotulo":"Conduta / Planejamento","input":"textarea"},
+        {"campo":"32","tipo":"O","rotulo":"Encaminhamento","input":"text"},
+        {"campo":"33","tipo":"&","rotulo":"Retorno Para (mês/ano, ex: 08/2026)","input":"text"},
+    ]},
+    "CONSPED": {"modelo": 3319, "nome": "Consulta Pediátrica", "campos": [
+        {"campo":"1","tipo":"&","rotulo":"Peso (kg)","input":"text"},
+        {"campo":"26","tipo":"O","rotulo":"Estatura (cm)","input":"text"},
+        {"campo":"28","tipo":"O","rotulo":"PC (cm)","input":"text"},
+        {"campo":"3","tipo":"O","rotulo":"Queixa Principal","input":"textarea"},
+        {"campo":"7","tipo":"O","rotulo":"Conduta","input":"textarea"},
+        {"campo":"2","tipo":"O","rotulo":"Outros (Antecedentes)","input":"textarea"},
+        {"campo":"20","tipo":"C","rotulo":"CID / Diagnóstico","input":"cid"},
+        {"campo":"30","tipo":"O","rotulo":"Medicamento Prescrito","input":"textarea"},
+        {"campo":"31","tipo":"O","rotulo":"Conduta / Planejamento","input":"textarea"},
+        {"campo":"32","tipo":"O","rotulo":"Encaminhamento","input":"text"},
+    ]},
+    "AVOFTAL": {"modelo": 1850, "nome": "Avaliação Oftalmológica", "campos": [
+        {"campo":"1","tipo":"&","rotulo":"OD Longe Sem Correção","input":"text"},
+        {"campo":"2","tipo":"&","rotulo":"OD Longe Com Correção","input":"text"},
+        {"campo":"3","tipo":"&","rotulo":"OE Longe Sem Correção","input":"text"},
+        {"campo":"4","tipo":"&","rotulo":"OE Longe Com Correção","input":"text"},
+        {"campo":"5","tipo":"&","rotulo":"OD Perto Sem Correção","input":"text"},
+        {"campo":"6","tipo":"&","rotulo":"OD Perto Com Correção","input":"text"},
+        {"campo":"7","tipo":"&","rotulo":"OE Perto Sem Correção","input":"text"},
+        {"campo":"8","tipo":"&","rotulo":"OE Perto Com Correção","input":"text"},
+        {"campo":"9","tipo":"&","rotulo":"Biomicroscopia OD","input":"textarea"},
+        {"campo":"13","tipo":"&","rotulo":"Biomicroscopia OE","input":"textarea"},
+        {"campo":"17","tipo":"%","rotulo":"Tonometria OD","input":"text"},
+        {"campo":"18","tipo":"%","rotulo":"Tonometria OE","input":"text"},
+        {"campo":"19","tipo":"&","rotulo":"Fundoscopia OD","input":"textarea"},
+        {"campo":"23","tipo":"&","rotulo":"Fundoscopia OE","input":"textarea"},
+        {"campo":"27","tipo":"&","rotulo":"Motilidade","input":"text"},
+        {"campo":"31","tipo":"&","rotulo":"Senso Cromático","input":"select","opcoes":["Sem Alterações"]},
+        {"campo":"32","tipo":"&","rotulo":"Visão Estereoscópica","input":"select","opcoes":["Sem Alterações"]},
+        {"campo":"41","tipo":"&","rotulo":"Visão Noturna","input":"select","opcoes":["Sem Alterações"]},
+        {"campo":"42","tipo":"&","rotulo":"Teste de Ofuscamento","input":"select","opcoes":["Sem Alterações"]},
+        {"campo":"43","tipo":"&","rotulo":"Campimetria","input":"text"},
+        {"campo":"45","tipo":"&","rotulo":"Ishihara Verde","input":"select","opcoes":["Sim","Não"]},
+        {"campo":"46","tipo":"&","rotulo":"Ishihara Vermelho","input":"select","opcoes":["Sim","Não"]},
+        {"campo":"47","tipo":"&","rotulo":"Ishihara Amarelo","input":"select","opcoes":["Sim","Não"]},
+        {"campo":"33","tipo":"O","rotulo":"Conclusão","input":"textarea"},
+        {"campo":"40","tipo":"O","rotulo":"Observação","input":"textarea"},
+    ]},
+    "RETORNO": {"modelo": 8224, "nome": "Consulta de Retorno", "campos": [
+        {"campo":"1","tipo":"O","rotulo":"Evolução","input":"textarea"},
+    ]},
+}
+
 def _parse_rcl_txt(txt: str):
     """Extrai [{campo, tipo, valor}] de um RCL_TXT no formato @#modelo@campoTIPOvalor..."""
     if not txt:
@@ -7862,6 +11433,180 @@ def _parse_rcl_txt(txt: str):
             if valor:
                 resultado.append({"campo": campo, "tipo": tipo, "valor": valor})
     return resultado
+
+@app.get("/api/atendimento/buscar-cid")
+def atendimento_buscar_cid(q: str, limite: int = 15):
+    """Busca na tabela CID (catálogo CID-10, ~23.6k linhas) por código ou nome —
+    usado no campo CID/Diagnóstico do formulário de atendimento."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "resultados": []}
+    rows = query(f"""
+        SELECT TOP {limite} RTRIM(CID_COD) AS codigo, RTRIM(ISNULL(CID_NOME,'')) AS nome
+        FROM CID
+        WHERE (CID_DEL_LOGICA IS NULL OR CID_DEL_LOGICA <> 'S')
+          AND (RTRIM(CID_COD) LIKE ? OR CID_NOME LIKE ?)
+        ORDER BY LEN(RTRIM(CID_COD)), RTRIM(CID_COD)
+    """, (f"{termo}%", f"%{termo}%"))
+    for r in rows:
+        r["nome"] = r["nome"].split("|")[0].strip()[:120]
+    return {"total": len(rows), "resultados": rows}
+
+@app.get("/api/atendimento/buscar-paciente")
+def atendimento_buscar_paciente(q: str, limite: int = 15):
+    """Busca no cadastro (produção) por nome, nº de registro ou CPF — usado
+    quando o paciente não está na fila (ex: sem check-in hoje, atendimento
+    avulso)."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "pacientes": []}
+
+    so_digitos = _re.sub(r"\D", "", termo)
+    if so_digitos and len(so_digitos) >= 5:
+        pac_reg_val = int(so_digitos) if int(so_digitos) <= 2147483647 else -1
+        rows = query(f"""
+            SELECT TOP {limite}
+                pac_reg                              AS pac_reg,
+                RTRIM(pac_nome)                       AS nome,
+                CONVERT(varchar, PAC_NASC, 23)         AS nascimento,
+                RTRIM(ISNULL(PAC_NUMCPF,''))          AS cpf
+            FROM pac
+            WHERE pac_reg = ?
+               OR REPLACE(REPLACE(ISNULL(PAC_NUMCPF,''),'.',''),'-','') LIKE ?
+            ORDER BY pac_nome
+        """, (pac_reg_val, f"%{so_digitos}%"))
+    else:
+        rows = query(f"""
+            SELECT TOP {limite}
+                pac_reg                              AS pac_reg,
+                RTRIM(pac_nome)                       AS nome,
+                CONVERT(varchar, PAC_NASC, 23)         AS nascimento,
+                RTRIM(ISNULL(PAC_NUMCPF,''))          AS cpf
+            FROM pac
+            WHERE pac_nome LIKE ?
+            ORDER BY pac_nome
+        """, (f"%{termo}%",))
+    return {"total": len(rows), "pacientes": rows}
+
+@app.get("/api/atendimento/paciente/{pac_reg}")
+def atendimento_paciente(pac_reg: int):
+    rows = query("""
+        SELECT
+            pac.pac_reg                                    AS pac_reg,
+            RTRIM(pac.pac_nome)                             AS nome,
+            CONVERT(varchar, pac.PAC_NASC, 23)               AS nascimento,
+            RTRIM(ISNULL(pac.PAC_SEXO,''))                  AS sexo,
+            RTRIM(ISNULL(pac.PAC_CELULAR, pac.PAC_FONE))     AS telefone,
+            RTRIM(ISNULL(pac.PAC_CNV,''))                   AS convenio_cod,
+            RTRIM(ISNULL(cnv.CNV_NOME,''))                  AS convenio_nome,
+            RTRIM(ISNULL(cnv.CNV_REG_ANS,''))               AS convenio_reg_ans,
+            RTRIM(ISNULL(pac.PAC_MCNV,''))                  AS carteirinha
+        FROM pac
+        LEFT JOIN cnv ON RTRIM(cnv.cnv_cod) = RTRIM(pac.PAC_CNV)
+        WHERE pac.pac_reg = ?
+    """, (pac_reg,))
+    if not rows:
+        raise HTTPException(404, "Paciente não encontrado")
+    return rows[0]
+
+@app.get("/api/atendimento/clinica")
+def atendimento_clinica():
+    """Dados da clínica (CNES/CNPJ) para o cabeçalho da guia SP/SADT."""
+    rows = query("""
+        SELECT TOP 1
+            RTRIM(ISNULL(EMP_NOME_FANTASIA,''))  AS nome,
+            RTRIM(ISNULL(EMP_CNES,''))           AS cnes,
+            RTRIM(ISNULL(EMP_CGC,''))            AS cnpj
+        FROM EMP WHERE EMP_COD = 1
+    """)
+    return rows[0] if rows else {"nome": "", "cnes": "", "cnpj": ""}
+
+@app.get("/api/atendimento/buscar-convenio")
+def atendimento_buscar_convenio(q: str, limite: int = 15):
+    """Busca convênios ativos por nome ou código — usado pra trocar o
+    convênio usado na guia SP/SADT sem alterar o cadastro do paciente."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "resultados": []}
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(cnv_cod)                    AS codigo,
+            RTRIM(cnv_nome)                    AS nome,
+            RTRIM(ISNULL(CNV_REG_ANS,''))      AS reg_ans,
+            CNV_IND_TISS                       AS tiss
+        FROM cnv
+        WHERE cnv_stat = 'A' AND (cnv_nome LIKE ? OR RTRIM(cnv_cod) LIKE ?)
+        ORDER BY CASE WHEN CNV_IND_TISS = 'S' THEN 0 ELSE 1 END, cnv_nome
+    """, (f"%{termo}%", f"{termo}%"))
+    return {"total": len(rows), "resultados": rows}
+
+@app.get("/api/atendimento/buscar-procedimento")
+def atendimento_buscar_procedimento(q: str, limite: int = 15):
+    """Busca no catálogo de serviços (SMK) por nome ou código TUSS —
+    usado para montar a lista de procedimentos da guia SP/SADT."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "resultados": []}
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(SMK_COD)                        AS codigo,
+            RTRIM(ISNULL(SMK_COD_TUSS,''))         AS tuss,
+            RTRIM(ISNULL(SMK_NOME,''))             AS nome
+        FROM SMK
+        WHERE SMK_COD_TUSS IS NOT NULL AND RTRIM(SMK_COD_TUSS) <> ''
+          AND (SMK_NOME LIKE ? OR RTRIM(SMK_COD_TUSS) LIKE ? OR RTRIM(SMK_COD) LIKE ?)
+        ORDER BY LEN(SMK_NOME)
+    """, (f"%{termo}%", f"{termo}%", f"{termo}%"))
+    return {"total": len(rows), "resultados": rows}
+
+@app.get("/api/atendimento/medico/{psv_cod}")
+def atendimento_medico(psv_cod: int):
+    """Dados do médico para cabeçalho de documentos (atestado/declaração)."""
+    rows = query("""
+        SELECT
+            psv_cod                                     AS psv_cod,
+            RTRIM(ISNULL(PSV_TRAT,''))                  AS tratamento,
+            RTRIM(psv_nome)                              AS nome,
+            PSV_CRM                                     AS crm,
+            RTRIM(ISNULL(PSV_CONSELHO,'CRM'))           AS conselho,
+            RTRIM(ISNULL(PSV_UF,''))                    AS uf
+        FROM psv WHERE psv_cod = ?
+    """, (psv_cod,))
+    if not rows:
+        raise HTTPException(404, "Médico não encontrado")
+    return rows[0]
+
+@app.get("/api/atendimento/historico")
+def atendimento_historico(paciente: int, limite: int = 20):
+    """Últimos registros clínicos (RCL) do paciente, lidos da PRODUÇÃO (só leitura)."""
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(RCL.RCL_COD)      AS servico,
+            RCL.RCL_DTHR            AS data,
+            RTRIM(ISNULL(psv.psv_apel,'')) AS medico,
+            RTRIM(RCL.RCL_USR_LOGIN) AS lancado_por,
+            CAST(RCL.RCL_TXT AS VARCHAR(MAX)) AS txt
+        FROM RCL
+        LEFT JOIN psv ON psv.psv_cod = RCL.RCL_MED
+        WHERE RCL.RCL_PAC = ? AND RCL.RCL_STAT = 'L'
+        ORDER BY RCL.RCL_DTHR DESC
+    """, (paciente,))
+    historico = []
+    for r in rows:
+        servico = (r["servico"] or "").strip()
+        labels = CAMPO_LABELS.get(servico, {})
+        campos = []
+        for c in _parse_rcl_txt(r["txt"]):
+            campos.append({
+                "campo":  c["campo"],
+                "rotulo": labels.get(c["campo"], f'Campo {c["campo"]}'),
+                "valor":  c["valor"],
+            })
+        historico.append({
+            "servico": servico, "data": r["data"], "medico": r["medico"],
+            "lancado_por": r["lancado_por"], "campos": campos,
+        })
+    return {"paciente": paciente, "total": len(historico), "historico": historico}
 
 class PublicoResultadosRequest(BaseModel):
     cpf: str
@@ -7884,7 +11629,7 @@ def publico_resultados(req: PublicoResultadosRequest, request: Request):
         raise HTTPException(400, "Informe CPF e data de nascimento válidos.")
 
     rows = query("""
-        SELECT TOP 1 pac_reg AS pac_reg, RTRIM(pac_nome) AS nome
+        SELECT pac_reg AS pac_reg, RTRIM(pac_nome) AS nome
         FROM pac
         WHERE REPLACE(REPLACE(ISNULL(PAC_NUMCPF,''),'.',''),'-','') = ?
           AND CONVERT(varchar, PAC_NASC, 23) = ?
@@ -7896,13 +11641,18 @@ def publico_resultados(req: PublicoResultadosRequest, request: Request):
         raise HTTPException(404, "CPF ou data de nascimento não conferem.")
 
     _rate_limit_register(ip, success=True)
-    paciente = rows[0]
+    # CPF+nascimento pode bater com mais de um cadastro (cadastro duplicado,
+    # comum na base) — busca o exame em TODOS os pac_reg encontrados, não só
+    # no primeiro, senão o resultado pode estar "escondido" no outro cadastro.
+    pac_regs = [r["pac_reg"] for r in rows]
+    nome = rows[0]["nome"]
 
     # Só exames de LABORATÓRIO (código presente na tabela SBN, que vincula
     # exame -> bancada) — exclui consultas clínicas (CONSCLIN/CONSPED/
     # AVOFTAL/RETORNO) e documentos ocupacionais (ASO/ECG/EXAMED), que também
     # ficam na RCL mas não são "resultado de exame".
-    rcl_rows = query("""
+    placeholders = ",".join("?" for _ in pac_regs)
+    rcl_rows = query(f"""
         SELECT TOP 50
             RTRIM(RCL.RCL_COD)       AS codigo,
             RTRIM(ISNULL(smk.SMK_NOME, RCL.RCL_COD)) AS servico,
@@ -7915,19 +11665,29 @@ def publico_resultados(req: PublicoResultadosRequest, request: Request):
             ON lab.cod = RTRIM(RCL.RCL_COD)
         LEFT JOIN SMK smk ON RTRIM(smk.SMK_COD) = RTRIM(RCL.RCL_COD)
         LEFT JOIN psv ON psv.psv_cod = RCL.RCL_MED
-        WHERE RCL.RCL_PAC = ? AND RCL.RCL_STAT = 'L'
+        WHERE RCL.RCL_PAC IN ({placeholders}) AND RCL.RCL_DTHR_LIB IS NOT NULL
         ORDER BY RCL.RCL_DTHR DESC
-    """, (paciente["pac_reg"],))
+    """, tuple(pac_regs))
 
     resultados = []
     for r in rcl_rows:
         codigo = (r["codigo"] or "").strip()
-        labels = CAMPO_LABELS.get(codigo, {})
-        campos = [
-            {"rotulo": labels.get(c["campo"], f'Campo {c["campo"]}'), "valor": c["valor"]}
-            for c in _parse_rcl_txt(r["txt"])
-        ]
         valor = (r["valor"] or "").strip()
+        # O número de "campo" só é único dentro de formulários de consulta
+        # (CAMPO_LABELS); em exames de painel (ex: rotina de urina) o mesmo
+        # número se repete em seções diferentes do exame, então nesses casos
+        # numeramos pela posição sequencial em vez do número de campo bruto
+        # — senão vira vários "Campo 1" empilhados, parecendo duplicado/erro.
+        labels = CAMPO_LABELS.get(codigo)
+        campos = [
+            {
+                "rotulo": labels.get(c["campo"], f'Campo {c["campo"]}') if labels else f'Resultado {i}',
+                # Remove sufixo interno de método/equipamento do laboratório
+                # (ex: "29000@MET;0001" -> "29000") — não faz sentido pro paciente.
+                "valor": _re.sub(r'@[A-Za-z]+;?\d*$', '', c["valor"]),
+            }
+            for i, c in enumerate(_parse_rcl_txt(r["txt"]), 1)
+        ]
         if campos or valor:
             resultados.append({
                 "servico": r["servico"], "data": r["data"], "medico": r["medico"],
@@ -7935,7 +11695,7 @@ def publico_resultados(req: PublicoResultadosRequest, request: Request):
             })
 
     return {
-        "nome": paciente["nome"].split()[0],
+        "nome": nome.split()[0],
         "total": len(resultados),
         "resultados": resultados,
     }
@@ -7955,6 +11715,75 @@ def db_diagnosticos_status(osm_serie: int, osm_num: int):
         return consultar_status(numero)
     except Exception as e:
         raise HTTPException(502, f"Erro ao consultar DB Diagnósticos: {e}")
+
+@app.get("/api/atendimento/template")
+def atendimento_template(servico: str = None):
+    """Templates de formulário disponíveis para atendimento pela plataforma."""
+    if servico:
+        t = FORM_TEMPLATES.get(servico.strip().upper())
+        if not t:
+            raise HTTPException(404, f"Serviço '{servico}' ainda não tem formulário mapeado.")
+        return {"servico": servico.strip().upper(), **t}
+    return {k: {"modelo": v["modelo"], "nome": v["nome"]} for k, v in FORM_TEMPLATES.items()}
+
+class AtendimentoSalvarRequest(BaseModel):
+    paciente: int
+    medico:   int
+    servico:  str
+    login:    str
+    campos:   dict
+
+@app.post("/api/atendimento/salvar")
+def atendimento_salvar(req: AtendimentoSalvarRequest):
+    """
+    Grava um novo Registro Clínico (RCL) — SOMENTE em smart_hml (homologação),
+    nunca em produção, até validação/aprovação extensa (ver seção 7 do arquivo
+    de mapeamento). Formato de RCL_TXT e requisitos de FK documentados lá.
+    """
+    servico = req.servico.strip().upper()
+    template = FORM_TEMPLATES.get(servico)
+    if not template:
+        raise HTTPException(400, f"Serviço '{servico}' ainda não mapeado para atendimento pela plataforma.")
+
+    modelo = template["modelo"]
+    campos_validos = {c["campo"]: c for c in template["campos"]}
+    partes = []
+    for campo_id, valor in req.campos.items():
+        campo_id = str(campo_id).strip()
+        valor = str(valor or "").strip()
+        campo_def = campos_validos.get(campo_id)
+        if not campo_def or not valor:
+            continue
+        partes.append(f"@#{modelo}@{campo_id}{campo_def['tipo']}{valor}")
+
+    if not partes:
+        raise HTTPException(400, "Nenhum campo preenchido.")
+
+    rcl_txt = "".join(partes)
+    agora = datetime.now()
+
+    try:
+        conn = get_conn_hml()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO RCL (
+                RCL_PAC, RCL_TPCOD, RCL_COD, RCL_DTHR, RCL_MED,
+                RCL_STAT, RCL_TXT, RCL_USR_LOGIN, RCL_RESULT,
+                RCL_USR_LOGIN_LIB, RCL_DTHR_LIB, RCL_USR_LOGIN_DIGIT,
+                RCL_DTHR_DIGIT, RCL_CONCLUSAO, RCL_VLR_RESULT
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            req.paciente, "S", servico, agora, req.medico,
+            "L", rcl_txt, req.login, "N",
+            req.login, agora, req.login,
+            agora, "?", "Inconclusivo",
+        ))
+        conn.commit()
+        conn.close()
+    except pyodbc.Error as e:
+        raise HTTPException(400, f"Erro ao gravar em smart_hml: {e}")
+
+    return {"ok": True, "ambiente": "smart_hml", "servico": servico, "rcl_txt": rcl_txt}
 
 @app.get("/api/debug/scheduler-status")
 def debug_scheduler_status():
@@ -8446,6 +12275,790 @@ def pacientes_servicos_comparativo(
     return rows
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MÓDULO FATURAMENTO — Gestão de Guias Pendentes (SQLite próprio, fora do Smart)
+# ══════════════════════════════════════════════════════════════════════════════
+
+STATUS_GUIAS_VALIDOS = {"Pendente", "Entregue", "Cancelada"}
+
+class GuiaCreate(BaseModel):
+    data: str
+    paciente: str
+    os_serie: int | None = None
+    os_num: int | None = None
+    tipo_exame: str | None = None
+    valor: float | None = None
+    setor: str | None = None
+    convenio: str | None = None
+    observacao: str | None = None
+    criado_por: str | None = None
+
+class GuiaUpdate(BaseModel):
+    data: str | None = None
+    paciente: str | None = None
+    os_serie: int | None = None
+    os_num: int | None = None
+    tipo_exame: str | None = None
+    valor: float | None = None
+    setor: str | None = None
+    convenio: str | None = None
+    status: str | None = None
+    data_entrega: str | None = None
+    data_faturamento: str | None = None
+    observacao: str | None = None
+    atualizado_por: str | None = None
+
+@app.get("/api/faturamento/buscar-os")
+def faturamento_buscar_os(q: str, limite: int = 10):
+    """Busca uma OS na produção do Smart (osm/smm) pelo número (ou
+    'serie-numero') pra autopreencher paciente, valor, setor e convênio
+    ao lançar uma guia pendente."""
+    termo = q.strip()
+    so_digitos = _re.sub(r"\D", "", termo)
+
+    if "-" in termo:
+        partes = termo.split("-", 1)
+        serie_digitos = _re.sub(r"\D", "", partes[0])
+        num_digitos = _re.sub(r"\D", "", partes[1])
+    else:
+        serie_digitos = None
+        num_digitos = so_digitos
+
+    if not num_digitos or len(num_digitos) < 3:
+        return {"total": 0, "resultados": []}
+
+    if serie_digitos:
+        where = "osm.osm_serie = ? AND osm.osm_num = ?"
+        params = (int(serie_digitos), int(num_digitos))
+    else:
+        where = "osm.osm_num = ?"
+        params = (int(num_digitos),)
+
+    rows = query(f"""
+        SELECT TOP {limite}
+            osm.osm_serie                         AS os_serie,
+            osm.osm_num                            AS os_num,
+            CONVERT(varchar, osm.osm_dthr, 23)     AS data,
+            RTRIM(pac.pac_nome)                    AS paciente,
+            RTRIM(osm.osm_str)                     AS setor_cod,
+            RTRIM(ISNULL(cnv.cnv_nome,''))         AS convenio
+        FROM osm
+        JOIN pac ON pac.pac_reg = osm.osm_pac
+        LEFT JOIN cnv ON cnv.cnv_cod = osm.osm_cnv
+        WHERE {where}
+        ORDER BY osm.osm_dthr DESC
+    """, params)
+
+    resultados = []
+    for r in rows:
+        itens = query("""
+            SELECT RTRIM(sk.SMK_NOME) AS nome,
+                (smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0)) AS vliq
+            FROM smm
+            JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+            WHERE smm.SMM_OSM_SERIE = ? AND smm.SMM_OSM = ?
+        """, (r["os_serie"], r["os_num"]))
+        setor_cod = (r["setor_cod"] or "").strip()
+        if setor_cod == "PSI":
+            setor_cod = "RCN"
+        resultados.append({
+            "os_serie": r["os_serie"],
+            "os_num": r["os_num"],
+            "os_label": f"{r['os_serie']}-{r['os_num']}",
+            "data": r["data"],
+            "paciente": r["paciente"],
+            "setor": setor_cod,
+            "setor_nome": RECEPCOES.get(setor_cod, setor_cod),
+            "convenio": r["convenio"],
+            "tipo_exame": ", ".join(sorted(set(i["nome"] for i in itens if i["nome"]))),
+            "valor": round(sum(i["vliq"] or 0 for i in itens), 2),
+            # itens individuais da OS — pra permitir escolher só os serviços
+            # ainda pendentes quando a OS tem vários (alguns já faturados).
+            "itens": [{"nome": i["nome"], "valor": round(i["vliq"] or 0, 2)} for i in itens],
+        })
+    return {"total": len(resultados), "resultados": resultados}
+
+@app.get("/api/faturamento/guias")
+def faturamento_listar_guias(status: str = None, setor: str = None, q: str = None,
+                              ano: int = None, mes: int = None):
+    conn = get_conn_guias()
+    sql = "SELECT * FROM guias_pendentes WHERE 1=1"
+    params = []
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    if setor:
+        sql += " AND setor = ?"
+        params.append(setor)
+    if q:
+        sql += " AND (paciente LIKE ? OR tipo_exame LIKE ?)"
+        params += [f"%{q}%", f"%{q}%"]
+    if ano and mes:
+        sql += " AND strftime('%Y-%m', data) = ?"
+        params.append(f"{ano:04d}-{mes:02d}")
+    sql += " ORDER BY data DESC, id DESC"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return {"total": len(rows), "guias": [dict(r) for r in rows]}
+
+
+@app.get("/api/faturamento/guias/pdf")
+def faturamento_guias_pdf(status: str = None, setor: str = None, q: str = None,
+                           ano: int = None, mes: int = None, background_tasks: BackgroundTasks = None):
+    """PDF das guias filtradas pelos mesmos critérios da tela (status/setor/busca/mês)
+    — pra imprimir a relação de guias de um status específico (ex: só Pendentes)."""
+    import subprocess, tempfile, base64 as _b64, uuid
+
+    resultado = faturamento_listar_guias(status=status, setor=setor, q=q, ano=ano, mes=mes)
+    guias = resultado["guias"]
+
+    logo_path = os.path.join(DIST, "..", "public", "icds_logo.png")
+    logo_b64 = ""
+    try:
+        with open(logo_path, "rb") as f:
+            logo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+
+    logo_censo_path = os.path.join(DIST, "..", "public", "logo_clinica_censo.png")
+    logo_censo_b64 = ""
+    try:
+        with open(logo_censo_path, "rb") as f:
+            logo_censo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+
+    STATUS_CORES = {"Pendente": "#D97706", "Entregue": "#2563EB", "Cancelada": "#DC2626"}
+    valor_total = sum(g["valor"] or 0 for g in guias)
+
+    def fmt_data(d):
+        return f"{d[8:10]}/{d[5:7]}/{d[0:4]}" if d else "—"
+
+    def brl(v):
+        return f"R$ {v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".") if v is not None else "—"
+
+    linhas_html = ""
+    for g in guias:
+        cor = STATUS_CORES.get(g["status"], "#64748B")
+        os_label = f"{g['os_serie']}-{g['os_num']}" if g.get("os_serie") else "—"
+        linhas_html += f"""
+        <tr>
+          <td>{fmt_data(g['data'])}</td>
+          <td>{g['paciente'] or '—'}</td>
+          <td>{os_label}</td>
+          <td>{g['tipo_exame'] or '—'}</td>
+          <td>{RECEPCOES.get(g['setor'], g['setor']) if g.get('setor') else '—'}</td>
+          <td>{g['convenio'] or '—'}</td>
+          <td style="text-align:right;">{brl(g['valor'])}</td>
+          <td><span style="color:{cor};font-weight:800;">{g['status']}</span></td>
+        </tr>"""
+
+    titulo_status = f" — {status}" if status else ""
+    periodo_txt = f"{mes:02d}/{ano}" if (ano and mes) else "Todo o período"
+
+    html = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><style>
+      @page {{ margin: 18mm 14mm; }}
+      * {{ box-sizing: border-box; }}
+      body {{ font-family: 'Segoe UI', Arial, sans-serif; color:#1E293B; margin:0; }}
+      .header {{ display:flex; justify-content:space-between; align-items:center; border-bottom:3px solid #8B1A1A; padding-bottom:14px; margin-bottom:20px; }}
+      .header img {{ height:42px; }}
+      .header .titulo {{ text-align:right; }}
+      .header .titulo h1 {{ font-size:18px; margin:0; color:#8B1A1A; }}
+      .header .titulo p {{ font-size:11px; color:#64748B; margin:2px 0 0; }}
+      .info {{ display:flex; gap:14px; margin-bottom:18px; flex-wrap:wrap; }}
+      .info-card {{ background:#F8FAFC; border-radius:8px; padding:10px 16px; border-left:4px solid #8B1A1A; flex:1; min-width:140px; }}
+      .info-card .label {{ font-size:10px; color:#64748B; text-transform:uppercase; font-weight:700; letter-spacing:.04em; }}
+      .info-card .valor {{ font-size:18px; font-weight:800; color:#111827; margin-top:2px; }}
+      table {{ width:100%; border-collapse:collapse; font-size:11.5px; }}
+      th {{ background:#8B1A1A; color:#fff; padding:8px 10px; text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:.03em; }}
+      td {{ padding:6px 10px; border-bottom:1px solid #E2E8F0; }}
+      tr:nth-child(even) {{ background:#FAFAFA; }}
+      .footer {{ margin-top:24px; font-size:10px; color:#94A3B8; border-top:1px solid #E2E8F0; padding-top:8px; }}
+    </style></head><body>
+      <div class="header">
+        <div style="display:flex; align-items:center; gap:16px;">
+          <img src="data:image/png;base64,{logo_censo_b64}" alt="Clínica Censo" style="height:40px;"/>
+          <img src="data:image/png;base64,{logo_b64}" alt="ICDS" style="height:34px;"/>
+        </div>
+        <div class="titulo">
+          <h1>Relatório de Guias{titulo_status}</h1>
+          <p>Período: {periodo_txt}{f" · Setor: {RECEPCOES.get(setor, setor)}" if setor else ""}</p>
+        </div>
+      </div>
+      <div class="info">
+        <div class="info-card"><div class="label">Guias</div><div class="valor">{len(guias)}</div></div>
+        <div class="info-card"><div class="label">Valor Total</div><div class="valor">{brl(valor_total)}</div></div>
+      </div>
+      <table><thead><tr>
+        <th>Data</th><th>Paciente</th><th>OS</th><th>Tipo de Exame</th><th>Setor</th><th>Convênio</th><th style="text-align:right;">Valor</th><th>Status</th>
+      </tr></thead><tbody>{linhas_html}</tbody></table>
+      <div class="footer">Relatório gerado automaticamente pelo Dashboard ICDS.</div>
+    </body></html>"""
+
+    tmp_dir = tempfile.gettempdir()
+    uid = uuid.uuid4().hex
+    html_path = os.path.join(tmp_dir, f"guias_{uid}.html")
+    pdf_path = os.path.join(tmp_dir, f"guias_{uid}.pdf")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    try:
+        subprocess.run([
+            chrome_path, "--headless", "--disable-gpu", "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}", f"file:///{html_path}",
+        ], timeout=30, capture_output=True)
+    finally:
+        try: os.remove(html_path)
+        except OSError: pass
+
+    if not os.path.exists(pdf_path):
+        raise HTTPException(500, "Falha ao gerar PDF")
+
+    background_tasks.add_task(lambda: os.remove(pdf_path) if os.path.exists(pdf_path) else None)
+    return FileResponse(
+        pdf_path, media_type="application/pdf",
+        filename=f"Guias_{status or 'Todas'}.pdf",
+        background=background_tasks,
+    )
+
+
+@app.get("/api/faturamento/resumo")
+def faturamento_resumo(ano: int = None, mes: int = None):
+    conn = get_conn_guias()
+    filtro_mes = ""
+    params = []
+    if ano and mes:
+        filtro_mes = " AND strftime('%Y-%m', data) = ?"
+        params.append(f"{ano:04d}-{mes:02d}")
+    rows = conn.execute(f"""
+        SELECT status, COUNT(*) AS total, COALESCE(SUM(valor),0) AS valor_total
+        FROM guias_pendentes WHERE 1=1{filtro_mes} GROUP BY status
+    """, params).fetchall()
+    atrasadas = conn.execute(f"""
+        SELECT COUNT(*) AS total FROM guias_pendentes
+        WHERE status = 'Pendente' AND julianday('now','localtime') - julianday(data) > 30{filtro_mes}
+    """, params).fetchone()
+    conn.close()
+    por_status = {r["status"]: {"total": r["total"], "valor_total": r["valor_total"]} for r in rows}
+    for s in STATUS_GUIAS_VALIDOS:
+        por_status.setdefault(s, {"total": 0, "valor_total": 0})
+    return {"por_status": por_status, "pendentes_30dias": atrasadas["total"]}
+
+@app.get("/api/faturamento/dashboard")
+def faturamento_dashboard():
+    """Dados agregados pros gráficos do módulo: pendências por mês (últimos
+    12 meses, por status) e por convênio/setor (só guias Pendentes)."""
+    conn = get_conn_guias()
+
+    por_mes = conn.execute("""
+        SELECT strftime('%Y-%m', data) AS mes,
+               status,
+               COUNT(*) AS total,
+               COALESCE(SUM(valor),0) AS valor_total
+        FROM guias_pendentes
+        WHERE data >= date('now', '-11 months', 'start of month')
+        GROUP BY mes, status
+        ORDER BY mes
+    """).fetchall()
+
+    por_convenio = conn.execute("""
+        SELECT COALESCE(NULLIF(TRIM(convenio),''),'Não informado') AS convenio,
+               COUNT(*) AS total,
+               COALESCE(SUM(valor),0) AS valor_total
+        FROM guias_pendentes
+        WHERE status = 'Pendente'
+        GROUP BY convenio
+        ORDER BY valor_total DESC
+        LIMIT 10
+    """).fetchall()
+
+    por_setor = conn.execute("""
+        SELECT COALESCE(NULLIF(TRIM(setor),''),'Não informado') AS setor,
+               COUNT(*) AS total,
+               COALESCE(SUM(valor),0) AS valor_total
+        FROM guias_pendentes
+        WHERE status = 'Pendente'
+        GROUP BY setor
+        ORDER BY valor_total DESC
+    """).fetchall()
+
+    conn.close()
+
+    # Reestrutura por_mes: uma linha por mês, com valor por status lado a
+    # lado (formato que o BarChart empilhado do recharts espera).
+    meses = {}
+    for r in por_mes:
+        m = meses.setdefault(r["mes"], {"mes": r["mes"]})
+        m[r["status"]] = r["valor_total"]
+        m[f'{r["status"]}_qtd'] = r["total"]
+
+    return {
+        "por_mes": sorted(meses.values(), key=lambda x: x["mes"]),
+        "por_convenio": [dict(r) for r in por_convenio],
+        "por_setor": [dict(r) for r in por_setor],
+    }
+
+@app.post("/api/faturamento/guias")
+def faturamento_criar_guia(g: GuiaCreate):
+    conn = get_conn_guias()
+    cur = conn.execute("""
+        INSERT INTO guias_pendentes
+            (data, paciente, os_serie, os_num, tipo_exame, valor, setor, convenio, status, observacao, criado_por)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pendente', ?, ?)
+    """, (g.data, g.paciente, g.os_serie, g.os_num, g.tipo_exame, g.valor, g.setor, g.convenio, g.observacao, g.criado_por))
+    conn.commit()
+    novo_id = cur.lastrowid
+    row = conn.execute("SELECT * FROM guias_pendentes WHERE id = ?", (novo_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+@app.put("/api/faturamento/guias/{guia_id}")
+def faturamento_atualizar_guia(guia_id: int, g: GuiaUpdate):
+    conn = get_conn_guias()
+    existente = conn.execute("SELECT * FROM guias_pendentes WHERE id = ?", (guia_id,)).fetchone()
+    if not existente:
+        conn.close()
+        raise HTTPException(404, "Guia não encontrada")
+
+    campos = g.model_dump(exclude_unset=True)
+    if "status" in campos and campos["status"] not in STATUS_GUIAS_VALIDOS:
+        conn.close()
+        raise HTTPException(400, f"Status inválido: {campos['status']}")
+
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    if campos.get("status") == "Entregue" and not campos.get("data_entrega") and not existente["data_entrega"]:
+        campos["data_entrega"] = hoje
+
+    if not campos:
+        conn.close()
+        return dict(existente)
+
+    campos["atualizado_em"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sets = ", ".join(f"{k} = ?" for k in campos)
+    params = list(campos.values()) + [guia_id]
+    conn.execute(f"UPDATE guias_pendentes SET {sets} WHERE id = ?", params)
+    conn.commit()
+    row = conn.execute("SELECT * FROM guias_pendentes WHERE id = ?", (guia_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+@app.delete("/api/faturamento/guias/{guia_id}")
+def faturamento_deletar_guia(guia_id: int):
+    conn = get_conn_guias()
+    cur = conn.execute("DELETE FROM guias_pendentes WHERE id = ?", (guia_id,))
+    conn.commit()
+    afetado = cur.rowcount
+    conn.close()
+    if not afetado:
+        raise HTTPException(404, "Guia não encontrada")
+    return {"ok": True}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MÓDULO GESTÃO — Organograma
+# Banco próprio (organograma.db, SQLite) — estrutura organizacional não existe
+# no Smart/Pixeon, é dado interno de gestão do Dashboard.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class OrgNoCreate(BaseModel):
+    nome: str
+    cargo: str | None = None
+    setor: str | None = None
+    pai_id: int | None = None
+    pos_x: float = 0
+    pos_y: float = 0
+    largura: float = 190
+    altura: float = 78
+    cor: str | None = None
+
+class OrgNoUpdate(BaseModel):
+    nome: str | None = None
+    cargo: str | None = None
+    setor: str | None = None
+    pai_id: int | None = None
+    pos_x: float | None = None
+    pos_y: float | None = None
+    largura: float | None = None
+    altura: float | None = None
+    cor: str | None = None
+
+@app.get("/api/organograma/nos")
+def organograma_listar():
+    conn = get_conn_organograma()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM org_nos ORDER BY id").fetchall()]
+    conn.close()
+    return rows
+
+@app.post("/api/organograma/nos")
+def organograma_criar(no: OrgNoCreate):
+    conn = get_conn_organograma()
+    cur = conn.execute(
+        "INSERT INTO org_nos (nome, cargo, setor, pai_id, pos_x, pos_y, largura, altura, cor) VALUES (?,?,?,?,?,?,?,?,?)",
+        (no.nome, no.cargo, no.setor, no.pai_id, no.pos_x, no.pos_y, no.largura, no.altura, no.cor),
+    )
+    novo_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": novo_id}
+
+@app.put("/api/organograma/nos/{no_id}")
+def organograma_atualizar(no_id: int, no: OrgNoUpdate):
+    campos = no.model_dump(exclude_unset=True)
+    if not campos:
+        return {"ok": True}
+    if "pai_id" in campos and campos["pai_id"] == no_id:
+        raise HTTPException(400, "Um cargo não pode ser superior de si mesmo")
+    campos["atualizado_em"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    set_sql = ", ".join(f"{k} = ?" for k in campos)
+    conn = get_conn_organograma()
+    cur = conn.execute(f"UPDATE org_nos SET {set_sql} WHERE id = ?", (*campos.values(), no_id))
+    conn.commit()
+    afetado = cur.rowcount
+    conn.close()
+    if not afetado:
+        raise HTTPException(404, "Nó não encontrado")
+    return {"ok": True}
+
+@app.delete("/api/organograma/nos/{no_id}")
+def organograma_deletar(no_id: int):
+    conn = get_conn_organograma()
+    # Filhos ficam órfãos (pai_id = NULL) em vez de serem apagados em cascata —
+    # evita perder um ramo inteiro do organograma por engano.
+    conn.execute("UPDATE org_nos SET pai_id = NULL WHERE pai_id = ?", (no_id,))
+    cur = conn.execute("DELETE FROM org_nos WHERE id = ?", (no_id,))
+    conn.commit()
+    afetado = cur.rowcount
+    conn.close()
+    if not afetado:
+        raise HTTPException(404, "Nó não encontrado")
+    return {"ok": True}
+
+
+def _layout_compacto_organograma(nos):
+    """
+    Recalcula posições (x,y) do organograma pra impressão, independente de como
+    o usuário arrastou os cartões na tela. Empilha grupos de irmãos largos em
+    várias linhas (wrap) em vez de deixar tudo numa fileira só — isso evita que
+    uma diretoria com 5-6 cargos abaixo estique o organograma inteiro na
+    horizontal, o que forçava uma escala minúscula (ou várias folhas) na
+    impressão. Resultado: árvore mais estreita e mais alta, que cabe numa
+    folha padrão (A3/A2) com texto legível.
+    """
+    LARG_PADRAO, ALT_PADRAO = 190, 78
+    GAP_X, GAP_Y = 34, 55
+    MAX_LARGURA_GRUPO = 999999
+
+    def pxv(n, campo, default):
+        return n[campo] if n.get(campo) else default
+
+    by_id = {n["id"]: n for n in nos}
+    filhos_de = {}
+    for n in nos:
+        pai_id = n["pai_id"] if n["pai_id"] in by_id else None
+        filhos_de.setdefault(pai_id, []).append(n)
+
+    pos = {}
+    subtree_ids = {}
+
+    def empacotar(itens):
+        # itens: [(id, w, h)] -> quebra em linhas sem passar de MAX_LARGURA_GRUPO
+        linhas, linha_atual, largura_atual = [], [], 0
+        for iid, w, h in itens:
+            acrescimo = w if not linha_atual else GAP_X + w
+            if linha_atual and (largura_atual + acrescimo) > MAX_LARGURA_GRUPO:
+                linhas.append(linha_atual)
+                linha_atual, largura_atual, acrescimo = [], 0, w
+            linha_atual.append((iid, w, h))
+            largura_atual += acrescimo
+        if linha_atual:
+            linhas.append(linha_atual)
+        largura_total = max((sum(w for _, w, _ in l) + GAP_X * (len(l) - 1) for l in linhas), default=0)
+        return linhas, largura_total
+
+    def posicionar_linhas(linhas, largura_total, y_inicial):
+        y_cursor = y_inicial
+        for linha in linhas:
+            largura_linha = sum(w for _, w, _ in linha) + GAP_X * (len(linha) - 1)
+            altura_linha = max(h for _, _, h in linha)
+            x_cursor = (largura_total - largura_linha) / 2
+            for fid, w, h in linha:
+                for did in subtree_ids[fid]:
+                    pos[did]["x"] += x_cursor
+                    pos[did]["y"] += y_cursor
+                x_cursor += w + GAP_X
+            y_cursor += altura_linha + GAP_Y
+        return y_cursor - GAP_Y
+
+    def calc(n):
+        nid = n["id"]
+        largura_no, altura_no = pxv(n, "largura", LARG_PADRAO), pxv(n, "altura", ALT_PADRAO)
+        filhos = filhos_de.get(nid, [])
+        ids_subtree = [nid]
+
+        if not filhos:
+            pos[nid] = {"x": 0, "y": 0}
+            subtree_ids[nid] = ids_subtree
+            return largura_no, altura_no
+
+        tamanhos = []
+        for f in filhos:
+            w, h = calc(f)
+            tamanhos.append((f["id"], w, h))
+            ids_subtree.extend(subtree_ids[f["id"]])
+
+        linhas, largura_filhos = empacotar(tamanhos)
+        altura_filhos = posicionar_linhas(linhas, largura_filhos, altura_no + GAP_Y) - (altura_no + GAP_Y)
+
+        largura_grupo = max(largura_no, largura_filhos)
+        altura_grupo = altura_no + GAP_Y + altura_filhos
+
+        pos[nid] = {"x": largura_grupo / 2 - largura_no / 2, "y": 0}
+        subtree_ids[nid] = ids_subtree
+        return largura_grupo, altura_grupo
+
+    raizes = filhos_de.get(None, [])
+    tamanhos_raizes = []
+    for r in raizes:
+        w, h = calc(r)
+        tamanhos_raizes.append((r["id"], w, h))
+
+    linhas, largura_total = empacotar(tamanhos_raizes)
+    altura_total = posicionar_linhas(linhas, largura_total, 0)
+
+    return pos, largura_total, altura_total
+
+
+# Tamanhos de papel padrão (mm), do menor pro maior — usados pra escolher a
+# menor folha "de verdade" (impressora comum ou plotter de gráfica) em que o
+# organograma cabe numa escala legível, ao invés de forçar sempre A4.
+_PAPEIS_PADRAO_MM = [
+    ("A4 retrato", 210, 297), ("A4 paisagem", 297, 210),
+    ("A3 retrato", 297, 420), ("A3 paisagem", 420, 297),
+    ("A2 retrato", 420, 594), ("A2 paisagem", 594, 420),
+    ("A1 retrato", 594, 841), ("A1 paisagem", 841, 594),
+]
+_MM_PARA_PX = 96 / 25.4
+
+
+def _montar_filhos_de(nos):
+    by_id = {n["id"]: n for n in nos}
+    filhos_de = {}
+    for n in nos:
+        pai_id = n["pai_id"] if n["pai_id"] in by_id else None
+        filhos_de.setdefault(pai_id, []).append(n)
+    return by_id, filhos_de
+
+
+def _coletar_subarvore(raiz, filhos_de):
+    resultado = [raiz]
+    for f in filhos_de.get(raiz["id"], []):
+        resultado.extend(_coletar_subarvore(f, filhos_de))
+    return resultado
+
+
+def _renderizar_pagina_html(nos_pagina, titulo, logo_b64, largura_mm_padrao_disponiveis, min_escala, nota_rodape=""):
+    """Monta o HTML de UMA página (um card por nó em nos_pagina), escolhendo a
+    menor largura de papel padrão em que ela cabe numa escala legível, com a
+    altura ajustada exatamente ao conteúdo (sem sobra de espaço em branco)."""
+    margem_x, margem_y = 40, 40
+    pos, largura_conteudo, altura_conteudo = _layout_compacto_organograma(nos_pagina)
+    by_id = {n["id"]: n for n in nos_pagina}
+
+    def px(n, campo, default):
+        return n[campo] if n.get(campo) else default
+
+    largura = int(largura_conteudo + margem_x * 2)
+    altura = int(altura_conteudo + margem_y * 2)
+
+    linhas_svg = ""
+    for n in nos_pagina:
+        pai = by_id.get(n["pai_id"])
+        if pai:
+            lp, ap = px(pai, "largura", 190), px(pai, "altura", 78)
+            ln, an = px(n, "largura", 190), px(n, "altura", 78)
+            x1 = pos[pai["id"]]["x"] + margem_x + lp / 2
+            y1 = pos[pai["id"]]["y"] + margem_y + ap
+            x2 = pos[n["id"]]["x"] + margem_x + ln / 2
+            y2 = pos[n["id"]]["y"] + margem_y
+            mid_y = (y1 + y2) / 2
+            linhas_svg += (
+                f'<path d="M {x1} {y1} L {x1} {mid_y} L {x2} {mid_y} L {x2} {y2}" '
+                f'stroke="#94A3B8" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>\n'
+            )
+
+    caixas_html = ""
+    for n in nos_pagina:
+        cor = n["cor"] or "#8B1A1A"
+        larg, alt = px(n, "largura", 190), px(n, "altura", 78)
+        x, y = pos[n["id"]]["x"] + margem_x, pos[n["id"]]["y"] + margem_y
+        caixas_html += f"""
+        <div style="position:absolute; left:{x}px; top:{y}px; width:{larg}px; min-height:{alt}px;
+            background:#fff; border-radius:10px; border-left:5px solid {cor};
+            box-shadow:0 2px 6px rgba(0,0,0,0.12); padding:10px 12px;">
+          <div style="font-size:13px; font-weight:700; color:#111827;">{n['nome']}</div>
+          <div style="font-size:11.5px; color:#64748B;">{n['cargo'] or ''}</div>
+          {f'<div style="font-size:9.5px; color:#94A3B8; text-transform:uppercase; margin-top:3px;">{n["setor"]}</div>' if n['setor'] else ''}
+        </div>"""
+
+    header_h = 74
+    rodape_h = 30 if nota_rodape else 0
+    altura_total_conteudo = altura + header_h + rodape_h
+
+    fator = None
+    largura_mm = None
+    for larg_mm in largura_mm_padrao_disponiveis:
+        escala = min(1.0, larg_mm * _MM_PARA_PX / largura)
+        if escala >= min_escala:
+            fator, largura_mm = escala, larg_mm
+            break
+    if fator is None:
+        largura_mm = largura_mm_padrao_disponiveis[-1]
+        fator = min(1.0, largura_mm * _MM_PARA_PX / largura)
+
+    altura_mm = round((altura_total_conteudo * fator) / _MM_PARA_PX, 1)
+    cabe_bem = fator >= min_escala
+
+    html = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><style>
+      @page {{ size: {largura_mm}mm {altura_mm}mm; margin: 0; }}
+      * {{ box-sizing: border-box; }}
+      html, body {{ height: 100%; }}
+      body {{ font-family: 'Segoe UI', Arial, sans-serif; margin:0; display:flex; flex-direction:column; }}
+      .header {{ display:flex; justify-content:space-between; align-items:center; border-bottom:3px solid #8B1A1A; padding:16px 24px 12px; height:{header_h}px; flex-shrink:0; box-sizing:border-box; }}
+      .header img {{ height:36px; }}
+      .header .titulo {{ text-align:right; font-size:13px; color:#8B1A1A; font-weight:800; }}
+      .canvas-wrap {{ flex:1; display:flex; justify-content:center; align-items:center; overflow:hidden; }}
+      .canvas {{ position:relative; width:{largura}px; height:{altura}px; transform: scale({fator:.4f}); transform-origin: center center; flex-shrink:0; }}
+      .rodape {{ text-align:center; font-size:10.5px; color:#94A3B8; flex-shrink:0; padding:6px 0 10px; }}
+    </style></head><body>
+      <div class="header">
+        <img src="data:image/png;base64,{logo_b64}" alt="ICDS"/>
+        <div class="titulo">{titulo}</div>
+      </div>
+      <div class="canvas-wrap">
+        <div class="canvas">
+          <svg width="{largura}" height="{altura}" style="position:absolute; left:0; top:0;">{linhas_svg}</svg>
+          {caixas_html}
+        </div>
+      </div>
+      {f'<div class="rodape">{nota_rodape}</div>' if nota_rodape else ''}
+    </body></html>"""
+    return html, cabe_bem, fator
+
+
+@app.get("/api/organograma/pdf")
+def organograma_pdf(background_tasks: BackgroundTasks):
+    """
+    Gera o PDF do organograma dividido por RAMO (departamento), não em pedaços
+    arbitrários — cada diretoria/gerência principal vira sua própria página,
+    em escala quase real (>=90%) numa folha A4/A3 comum de impressora de
+    escritório, mais uma página de visão geral no início. Isso evita tanto o
+    texto minúsculo (que dava numa página só com tudo) quanto o corte de
+    cartões no meio (que dava no recorte em pôster).
+    """
+    import subprocess, tempfile, base64 as _b64, uuid
+    from pypdf import PdfWriter
+
+    conn = get_conn_organograma()
+    nos = [dict(r) for r in conn.execute("SELECT * FROM org_nos ORDER BY id").fetchall()]
+    conn.close()
+
+    if not nos:
+        raise HTTPException(400, "Organograma vazio — nada para exportar")
+
+    logo_path = os.path.join(DIST, "..", "public", "icds_logo.png")
+    logo_b64 = ""
+    try:
+        with open(logo_path, "rb") as f:
+            logo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+
+    by_id, filhos_de = _montar_filhos_de(nos)
+
+    # Desce pela cadeia enquanto só houver 1 nó por nível (ex: Instituto -> Diretor
+    # Executivo) — o primeiro ponto com mais de 1 filho é onde a árvore realmente
+    # se ramifica em departamentos, e cada ramo daí vira uma página própria.
+    cadeia = []
+    atual = filhos_de.get(None, [])
+    while len(atual) == 1:
+        cadeia.append(atual[0])
+        atual = filhos_de.get(atual[0]["id"], [])
+    ramos = atual
+
+    # Nunca passa de A3 — é o maior papel que uma impressora/copiadora comum
+    # de escritório imprime. Ir pra A2/A1 exige plotter de gráfica, que nem
+    # todo mundo tem à mão, e só trocava "texto minúsculo" por "página que
+    # ninguém consegue imprimir". Se nem A3 bastar numa escala boa, prefere
+    # quebrar o ramo em sub-páginas a forçar um papel fora do padrão.
+    LARGURAS_PAGINA_MM = [210, 297, 420]  # A4 retrato / A4-A3 paisagem / A3 paisagem
+    MIN_ESCALA_PAGINA = 0.9
+    MIN_ESCALA_ACEITAVEL = 0.6  # ainda bem legível, só não é 90%+
+
+    paginas_html = []
+
+    def montar_paginas_do_ramo(raiz, titulo):
+        subarvore = _coletar_subarvore(raiz, filhos_de)
+        html, cabe, fator = _renderizar_pagina_html(subarvore, titulo, logo_b64, LARGURAS_PAGINA_MM, MIN_ESCALA_PAGINA)
+        if cabe or not filhos_de.get(raiz["id"]) or fator >= MIN_ESCALA_ACEITAVEL:
+            paginas_html.append(html)
+        else:
+            # nem a 60% de escala em A3 — quebra o próprio ramo em sub-páginas
+            # por filho direto (mesma lógica, recursiva) em vez de forçar texto
+            # ilegível ou papel fora do padrão.
+            for filho in filhos_de.get(raiz["id"], []):
+                montar_paginas_do_ramo(filho, f"{titulo} — {filho['nome']}")
+
+    if len(ramos) <= 1:
+        # organograma pequeno / ainda sem ramificação real — cabe tudo numa página só
+        html, _, _ = _renderizar_pagina_html(nos, "Organograma", logo_b64, LARGURAS_PAGINA_MM, MIN_ESCALA_ACEITAVEL)
+        paginas_html.append(html)
+    else:
+        overview_nos = cadeia + ramos
+        nota = "Cada diretoria/gerência está detalhada nas páginas seguintes."
+        html_overview, _, _ = _renderizar_pagina_html(
+            overview_nos, "Organograma — Visão Geral", logo_b64, LARGURAS_PAGINA_MM, 0.7, nota_rodape=nota)
+        paginas_html.append(html_overview)
+        for ramo in ramos:
+            montar_paginas_do_ramo(ramo, f"Organograma — {ramo['nome']}")
+
+    tmp_dir = tempfile.gettempdir()
+    uid = uuid.uuid4().hex
+    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    pdfs_paginas = []
+    htmls_temp = []
+    try:
+        for i, html in enumerate(paginas_html):
+            html_path = os.path.join(tmp_dir, f"organograma_{uid}_{i}.html")
+            pdf_path_pagina = os.path.join(tmp_dir, f"organograma_{uid}_{i}.pdf")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html)
+            htmls_temp.append(html_path)
+            subprocess.run([
+                chrome_path, "--headless", "--disable-gpu", "--no-pdf-header-footer",
+                f"--print-to-pdf={pdf_path_pagina}", f"file:///{html_path}",
+            ], timeout=30, capture_output=True)
+            if not os.path.exists(pdf_path_pagina):
+                raise HTTPException(500, "Falha ao gerar PDF")
+            pdfs_paginas.append(pdf_path_pagina)
+
+        pdf_path = os.path.join(tmp_dir, f"organograma_{uid}_final.pdf")
+        writer = PdfWriter()
+        for p in pdfs_paginas:
+            writer.append(p)
+        with open(pdf_path, "wb") as f:
+            writer.write(f)
+    finally:
+        for p in htmls_temp + pdfs_paginas:
+            try: os.remove(p)
+            except OSError: pass
+
+    if not os.path.exists(pdf_path):
+        raise HTTPException(500, "Falha ao gerar PDF")
+
+    background_tasks.add_task(lambda: os.remove(pdf_path) if os.path.exists(pdf_path) else None)
+    return FileResponse(pdf_path, media_type="application/pdf", filename="Organograma.pdf", background=background_tasks)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MÓDULO RECEPÇÃO — Métricas por recepcionista
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -8456,6 +13069,56 @@ RECEPCOES = {
     "RCI": "Recepção Censo Imagem",
 }
 
+@app.get("/api/recepcao/media-por-horario")
+def recepcao_media_por_horario(periodo: str = "30d", setor: str = ""):
+    """
+    Quantidade total de pacientes recepcionados (chegada) por horário do dia,
+    aberta por ponto de recepção (RDI/ROC/RCN/RCI) — pra comparar o horário
+    de pico de cada uma. Inclui totem (é volume real de paciente, diferente
+    da atribuição por recepcionista). O filtro `setor` do módulo é ignorado
+    de propósito aqui — o gráfico sempre mostra todas as recepções lado a lado.
+    """
+    inicio, fim = periodo_datas(periodo)
+    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI"]
+
+    dias_row = query(f"""
+        SELECT COUNT(DISTINCT CAST(fle.FLE_DTHR_CHEGADA AS DATE)) AS dias
+        FROM fle
+        WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND fle.FLE_PAC_REG > 0
+    """)
+    dias = (dias_row[0]["dias"] if dias_row else 0) or 1
+
+    rows = query(f"""
+        SELECT
+            DATEPART(hour, fle.FLE_DTHR_CHEGADA) AS hora,
+            RTRIM(fle.FLE_STR_COD)               AS recepcao,
+            COUNT(*)                             AS total
+        FROM fle
+        WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
+          AND fle.FLE_PAC_REG > 0
+          AND RTRIM(fle.FLE_STR_COD) IN ('RDI','ROC','RCN','RCI')
+        GROUP BY DATEPART(hour, fle.FLE_DTHR_CHEGADA), RTRIM(fle.FLE_STR_COD)
+        ORDER BY hora
+    """)
+    por_hora = {}
+    for r in rows:
+        por_hora.setdefault(r["hora"], {})[r["recepcao"]] = r["total"]
+
+    dados = []
+    for h in range(6, 21):  # 06h às 20h — janela de funcionamento da clínica
+        linha = {"hora": f"{h:02d}h"}
+        for cod in RECEPCOES_COD:
+            linha[cod] = por_hora.get(h, {}).get(cod, 0)
+        dados.append(linha)
+
+    return {
+        "periodo": periodo,
+        "dias_considerados": dias,
+        "recepcoes": [{"cod": c, "nome": RECEPCOES.get(c, c)} for c in RECEPCOES_COD],
+        "dados": dados,
+    }
+
 @app.get("/api/recepcao/metas")
 def recepcao_metas(periodo: str = "30d", setor: str = ""):
     """
@@ -8464,9 +13127,10 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
     - producao_por_recepcao: meta mensal de produção financeira por recepção
       (média histórica), comparada com o total do período selecionado
     - meta_tempo_atendimento_min: meta única de tempo médio de atendimento
-      (chegada → abertura da OS), calculada como a média histórica geral
-      entre todas as recepcionistas/recepções — a comparação por
-      recepcionista no período atual já vem de /api/recepcao/ranking
+      (chegada até a chamada real da senha, ou abertura da OS quando não há
+      chamada registrada), calculada como a média histórica geral entre todas
+      as recepcionistas/recepções — a comparação por recepcionista no período
+      atual já vem de /api/recepcao/ranking
     """
     inicio, fim = periodo_datas(periodo)
     filtro_setor_fle = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
@@ -8537,6 +13201,7 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
         WITH chegadas AS (
             SELECT RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login_recep,
                 RTRIM(fle.FLE_STR_COD) AS setor_cod, fle.FLE_PAC_REG, fle.FLE_DTHR_CHEGADA,
+                fle.FLE_DTHR_ATENDIMENTO,
                 CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg
             FROM fle
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{hist_inicio}' AND '{hist_fim} 23:59:59'
@@ -8552,11 +13217,12 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
             FROM chegadas c
             OUTER APPLY (
                 SELECT DATEDIFF(minute, c.FLE_DTHR_CHEGADA,
-                    (SELECT TOP 1 o.osm_dthr FROM osm o
-                     WHERE o.osm_pac = c.FLE_PAC_REG
-                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
-                       AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
-                     ORDER BY o.osm_dthr ASC)) AS espera_min
+                    COALESCE(c.FLE_DTHR_ATENDIMENTO,
+                        (SELECT TOP 1 o.osm_dthr FROM osm o
+                         WHERE o.osm_pac = c.FLE_PAC_REG
+                           AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+                           AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
+                         ORDER BY o.osm_dthr ASC))) AS espera_min
             ) e
             GROUP BY c.login_recep, c.setor_cod
         )
@@ -8586,6 +13252,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                 RTRIM(fle.FLE_STR_COD)                                     AS setor_cod,
                 fle.FLE_PAC_REG,
                 fle.FLE_DTHR_CHEGADA,
+                fle.FLE_DTHR_ATENDIMENTO,
                 CAST(fle.FLE_DTHR_CHEGADA AS DATE)                         AS data_cheg
             FROM fle
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
@@ -8622,6 +13289,9 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             -- Pré-agregado por (recepcionista, setor): evita reunir de volta com `chegadas`
             -- sem a data (bug que multiplicava linhas p/ pacientes com +1 visita no período
             -- e também deixava a query ~40s mais lenta por causa do plano gerado).
+            -- Tempo de espera: da senha (FLE_DTHR_CHEGADA) até a chamada real
+            -- (FLE_DTHR_ATENDIMENTO, já na própria linha) — só cai pra abertura
+            -- da OS (osm_dthr) quando não há chamada registrada.
             SELECT
                 c.login_recep,
                 c.setor_cod,
@@ -8632,11 +13302,12 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             FROM chegadas c
             OUTER APPLY (
                 SELECT DATEDIFF(minute, c.FLE_DTHR_CHEGADA,
-                    (SELECT TOP 1 o.osm_dthr FROM osm o
-                     WHERE o.osm_pac = c.FLE_PAC_REG
-                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
-                       AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
-                     ORDER BY o.osm_dthr ASC)) AS espera_min
+                    COALESCE(c.FLE_DTHR_ATENDIMENTO,
+                        (SELECT TOP 1 o.osm_dthr FROM osm o
+                         WHERE o.osm_pac = c.FLE_PAC_REG
+                           AND CAST(o.osm_dthr AS DATE) = c.data_cheg
+                           AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
+                         ORDER BY o.osm_dthr ASC))) AS espera_min
             ) e
             GROUP BY c.login_recep, c.setor_cod
         ),
@@ -8713,8 +13384,9 @@ def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str 
 @app.get("/api/recepcao/por-convenio")
 def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
     """
-    Pacientes atendidos e tempo médio de recepção (chegada até abertura da 1ª OS
-    do dia), agrupados por convênio — agregado de todas as recepcionistas.
+    Pacientes atendidos e tempo médio de recepção (chegada até a chamada real da
+    senha, ou abertura da 1ª OS do dia quando não há chamada registrada),
+    agrupados por convênio — agregado de todas as recepcionistas.
     """
     inicio, fim = periodo_datas(periodo)
     filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
@@ -8724,6 +13396,7 @@ def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
             SELECT
                 fle.FLE_PAC_REG                    AS pac,
                 fle.FLE_DTHR_CHEGADA                AS dthr_cheg,
+                fle.FLE_DTHR_ATENDIMENTO             AS dthr_atend,
                 CAST(fle.FLE_DTHR_CHEGADA AS DATE)  AS data_cheg
             FROM fle
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
@@ -8735,7 +13408,7 @@ def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
         ),
         os_do_dia AS (
             SELECT
-                c.pac, c.dthr_cheg, c.data_cheg, o.osm_dthr, o.osm_cnv,
+                c.pac, c.dthr_cheg, c.dthr_atend, c.data_cheg, o.osm_dthr, o.osm_cnv,
                 ROW_NUMBER() OVER (PARTITION BY c.pac, c.data_cheg ORDER BY o.osm_dthr ASC) AS rn
             FROM chegadas c
             JOIN osm o ON o.osm_pac = c.pac
@@ -8743,8 +13416,10 @@ def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
                       AND o.osm_dthr >= c.dthr_cheg
         ),
         primeira AS (
+            -- Tempo de espera: da senha até a chamada real (dthr_atend) quando existe,
+            -- senão até a abertura da 1ª OS do dia (osm_dthr).
             SELECT pac, osm_cnv,
-                   DATEDIFF(minute, dthr_cheg, osm_dthr) AS espera_min
+                   DATEDIFF(minute, dthr_cheg, COALESCE(dthr_atend, osm_dthr)) AS espera_min
             FROM os_do_dia WHERE rn = 1
         )
         SELECT
@@ -8796,6 +13471,207 @@ def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str
     return rows or []
 
 
+# ── Pontualidade: login x início real de atendimento ─────────────────────────
+@app.get("/api/recepcao/usuarios")
+def recepcao_usuarios():
+    """Lista de recepcionistas (login+nome) com atendimento nos últimos 180 dias — pro seletor da tela de Pontualidade."""
+    rows = query("""
+        SELECT DISTINCT
+            RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login,
+            RTRIM(ISNULL(u.USR_NOME, ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) AS nome
+        FROM fle
+        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) = RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))
+        WHERE fle.FLE_DTHR_CHEGADA >= DATEADD(day, -180, GETDATE())
+          AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
+          AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
+          AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
+        ORDER BY nome
+    """)
+    return rows or []
+
+
+def _pontualidade_dados(login: str, inicio: str, fim: str):
+    """
+    Login (GR_SES) x início real de atendimento por dia, pro usuário/período.
+    Início de atendimento = criação da primeira OS do dia (OSM_DTHR via
+    OSM_USR_LOGIN_CAD) — não a chamada na fila (FLE_DTHR_ATENDIMENTO). FLE
+    pode ser lançado fora de ordem (comparação real mostrou um "atraso" de
+    112min que sumia ao olhar a OS, que bateu quase exato com o login), então
+    OSM é o timestamp de transação mais confiável disponível.
+    """
+    rows = query("""
+        SELECT
+            d.dia,
+            l.login_mais_cedo,
+            o.primeira_os,
+            o.qtd_os
+        FROM (
+            SELECT CAST(GR_SES_DTHR_INI AS DATE) AS dia, MIN(GR_SES_DTHR_INI) AS login_mais_cedo
+            FROM GR_SES WHERE GR_USR_LOGIN = ? AND GR_SES_DTHR_INI BETWEEN ? AND ?
+            GROUP BY CAST(GR_SES_DTHR_INI AS DATE)
+        ) l
+        FULL OUTER JOIN (
+            SELECT CAST(OSM_DTHR AS DATE) AS dia, MIN(OSM_DTHR) AS primeira_os, COUNT(*) AS qtd_os
+            FROM OSM WHERE RTRIM(OSM_USR_LOGIN_CAD) = ? AND OSM_DTHR BETWEEN ? AND ?
+            GROUP BY CAST(OSM_DTHR AS DATE)
+        ) o ON o.dia = l.dia
+        CROSS APPLY (SELECT COALESCE(l.dia, o.dia) AS dia) d
+        ORDER BY d.dia
+    """, (login, inicio, f"{fim} 23:59:59", login, inicio, f"{fim} 23:59:59"))
+
+    DIAS_PT = {0:"Segunda",1:"Terça",2:"Quarta",3:"Quinta",4:"Sexta",5:"Sábado",6:"Domingo"}
+    linhas = []
+    for r in rows:
+        login_dt = r["login_mais_cedo"]
+        atend_dt = r["primeira_os"]
+        gap = round((atend_dt - login_dt).total_seconds() / 60) if login_dt and atend_dt else None
+        linhas.append({
+            "dia": r["dia"].strftime("%d/%m/%Y"),
+            "dia_semana": DIAS_PT[r["dia"].weekday()],
+            "login": login_dt.strftime("%H:%M:%S") if login_dt else None,
+            "atendimento": atend_dt.strftime("%H:%M:%S") if atend_dt else None,
+            "gap_min": gap,
+            "qtd": r["qtd_os"] or 0,
+        })
+    return linhas
+
+
+@app.get("/api/recepcao/pontualidade")
+def recepcao_pontualidade(login: str, inicio: str, fim: str):
+    """Relatório de pontualidade (login x início de atendimento) em JSON."""
+    login = login.strip().upper()
+    linhas = _pontualidade_dados(login, inicio, fim)
+    usr = query("SELECT RTRIM(ISNULL(USR_NOME, ?)) AS nome FROM USR WHERE RTRIM(USR_LOGIN) = ?", (login, login))
+    nome = usr[0]["nome"] if usr else login
+
+    gaps = [l["gap_min"] for l in linhas if l["gap_min"] is not None]
+    qtds = [l["qtd"] for l in linhas if l["qtd"]]
+    resumo = {
+        "login": login,
+        "nome": nome,
+        "inicio": inicio,
+        "fim": fim,
+        "dias": len(linhas),
+        "intervalo_medio_min": round(sum(gaps) / len(gaps), 1) if gaps else None,
+        "total_atendimentos": sum(qtds),
+        "media_atendimentos_dia": round(sum(qtds) / len(qtds), 1) if qtds else 0,
+    }
+    return {"resumo": resumo, "linhas": linhas}
+
+
+@app.get("/api/recepcao/pontualidade/pdf")
+def recepcao_pontualidade_pdf(login: str, inicio: str, fim: str, background_tasks: BackgroundTasks):
+    """Mesmo relatório de pontualidade, mas devolvido como PDF pronto pra baixar/enviar."""
+    import subprocess, tempfile, base64 as _b64, uuid
+
+    login = login.strip().upper()
+    linhas = _pontualidade_dados(login, inicio, fim)
+    usr = query("SELECT RTRIM(ISNULL(USR_NOME, ?)) AS nome FROM USR WHERE RTRIM(USR_LOGIN) = ?", (login, login))
+    nome = usr[0]["nome"] if usr else login
+
+    gaps = [l["gap_min"] for l in linhas if l["gap_min"] is not None]
+    qtds = [l["qtd"] for l in linhas if l["qtd"]]
+    intervalo_medio = round(sum(gaps) / len(gaps), 1) if gaps else 0
+    total_atend = sum(qtds)
+    media_atend = round(sum(qtds) / len(qtds), 1) if qtds else 0
+
+    logo_path = os.path.join(DIST, "..", "public", "icds_logo.png")
+    logo_b64 = ""
+    try:
+        with open(logo_path, "rb") as f:
+            logo_b64 = _b64.b64encode(f.read()).decode()
+    except FileNotFoundError:
+        pass
+
+    linhas_html = ""
+    for l in linhas:
+        destaque = ' style="background:#FEF2F2;"' if (l["gap_min"] or 0) >= 30 else ""
+        gap_txt = f'{l["gap_min"]} min' if l["gap_min"] is not None else "—"
+        gap_cor = "#DC2626" if (l["gap_min"] or 0) >= 30 else ("#D97706" if (l["gap_min"] or 0) >= 10 else "#059669")
+        linhas_html += f"""
+        <tr{destaque}>
+          <td>{l['dia']}</td><td>{l['dia_semana']}</td>
+          <td>{l['login'] or '—'}</td><td>{l['atendimento'] or '—'}</td>
+          <td style="color:{gap_cor};font-weight:700;">{gap_txt}</td>
+          <td style="text-align:center;">{l['qtd']}</td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><style>
+      @page {{ margin: 18mm 14mm; }}
+      * {{ box-sizing: border-box; }}
+      body {{ font-family: 'Segoe UI', Arial, sans-serif; color:#1E293B; margin:0; }}
+      .header {{ display:flex; justify-content:space-between; align-items:center; border-bottom:3px solid #8B1A1A; padding-bottom:14px; margin-bottom:20px; }}
+      .header img {{ height:42px; }}
+      .header .titulo {{ text-align:right; }}
+      .header .titulo h1 {{ font-size:18px; margin:0; color:#8B1A1A; }}
+      .header .titulo p {{ font-size:11px; color:#64748B; margin:2px 0 0; }}
+      .info {{ display:flex; gap:14px; margin-bottom:18px; flex-wrap:wrap; }}
+      .info-card {{ background:#F8FAFC; border-radius:8px; padding:10px 16px; border-left:4px solid #8B1A1A; flex:1; min-width:140px; }}
+      .info-card .label {{ font-size:10px; color:#64748B; text-transform:uppercase; font-weight:700; letter-spacing:.04em; }}
+      .info-card .valor {{ font-size:18px; font-weight:800; color:#111827; margin-top:2px; }}
+      table {{ width:100%; border-collapse:collapse; font-size:12px; }}
+      th {{ background:#8B1A1A; color:#fff; padding:8px 10px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.03em; }}
+      td {{ padding:7px 10px; border-bottom:1px solid #E2E8F0; }}
+      tr:nth-child(even) {{ background:#FAFAFA; }}
+      .legenda {{ margin-top:14px; font-size:10.5px; color:#64748B; }}
+      .legenda span {{ display:inline-block; margin-right:16px; }}
+      .footer {{ margin-top:24px; font-size:10px; color:#94A3B8; border-top:1px solid #E2E8F0; padding-top:8px; }}
+    </style></head><body>
+      <div class="header">
+        <img src="data:image/png;base64,{logo_b64}" alt="ICDS"/>
+        <div class="titulo">
+          <h1>Relatório de Pontualidade — Login x Início de Atendimento</h1>
+          <p>Usuário: <b>{login}</b> ({nome}) &nbsp;·&nbsp; Período: {inicio[8:10]}/{inicio[5:7]}/{inicio[0:4]} a {fim[8:10]}/{fim[5:7]}/{fim[0:4]}</p>
+        </div>
+      </div>
+      <div class="info">
+        <div class="info-card"><div class="label">Dias no período</div><div class="valor">{len(linhas)}</div></div>
+        <div class="info-card"><div class="label">Intervalo médio login → atendimento</div><div class="valor">{intervalo_medio} min</div></div>
+        <div class="info-card"><div class="label">Total de atendimentos</div><div class="valor">{total_atend}</div></div>
+        <div class="info-card"><div class="label">Média de atendimentos/dia</div><div class="valor">{media_atend}</div></div>
+      </div>
+      <table><thead><tr>
+        <th>Data</th><th>Dia</th><th>Login</th><th>Início Atendimento</th><th>Intervalo</th><th>Atendimentos</th>
+      </tr></thead><tbody>{linhas_html}</tbody></table>
+      <div class="legenda">
+        <span><b style="color:#059669;">&#9679;</b> até 10min = normal</span>
+        <span><b style="color:#D97706;">&#9679;</b> 10-30min = atenção</span>
+        <span><b style="color:#DC2626;">&#9679;</b> 30min+ = fora do padrão</span>
+      </div>
+      <div class="footer">
+        Login = horário de abertura de sessão no sistema (GR_SES). Início de atendimento = criação da primeira OS do dia pelo usuário (OSM).
+        Dias sem expediente não aparecem na tabela. Relatório gerado automaticamente pelo Dashboard ICDS.
+      </div>
+    </body></html>"""
+
+    tmp_dir = tempfile.gettempdir()
+    uid = uuid.uuid4().hex
+    html_path = os.path.join(tmp_dir, f"pontualidade_{uid}.html")
+    pdf_path = os.path.join(tmp_dir, f"pontualidade_{uid}.pdf")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    try:
+        subprocess.run([
+            chrome_path, "--headless", "--disable-gpu", "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}", f"file:///{html_path}",
+        ], timeout=30, capture_output=True)
+    finally:
+        try: os.remove(html_path)
+        except OSError: pass
+
+    if not os.path.exists(pdf_path):
+        raise HTTPException(500, "Falha ao gerar PDF")
+
+    background_tasks.add_task(lambda: os.remove(pdf_path) if os.path.exists(pdf_path) else None)
+    return FileResponse(
+        pdf_path, media_type="application/pdf",
+        filename=f"Pontualidade_{login}_{inicio}_a_{fim}.pdf",
+        background=background_tasks,
+    )
+
+
 @app.get("/api/health")
 def health():
     try:
@@ -8804,7 +13680,180 @@ def health():
         return {"status": "ok", "db": "conectado", "ts": datetime.now().isoformat()}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
-    
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTEGRAÇÃO CLINIA — plataforma de agendamento via WhatsApp
+#
+# Em vez de pagar a API oficial da Pixeon, expomos aqui só o necessário para a
+# Clinia consultar (leitura), direto no banco Smart via a mesma conexão que o
+# resto do dashboard já usa. Autenticado por API key própria (header
+# X-API-Key, valor em CLINIA_API_KEY no .env) — NÃO é a mesma coisa que login
+# de usuário (censo_permissoes), é uma chave única para o servidor da Clinia.
+#
+# Fase 1 (implementada): busca de paciente + consulta de disponibilidade.
+# Fase 2 (NÃO implementada de propósito): criar agendamento. A tabela AGM tem
+# 145 colunas e claramente embute regras de negócio do app da Pixeon (cálculo
+# de valor por convênio, workflow de confirmação, etc.) — INSERT direto ali
+# tem risco real de duplicar horário ou gravar dado inconsistente. Antes de
+# escrever, mapear com precisão os campos obrigatórios comparando com
+# agendamentos reais e validar em smart_hml.
+# ══════════════════════════════════════════════════════════════════════════════
+
+from fastapi import Depends, Security
+from fastapi.security.api_key import APIKeyHeader
+
+_clinia_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def _clinia_ips_permitidos():
+    bruto = os.environ.get("CLINIA_ALLOWED_IPS", "")
+    return {ip.strip() for ip in bruto.split(",") if ip.strip()}
+
+def verificar_clinia_key(request: Request, api_key: str = Security(_clinia_api_key_header)):
+    # Falha fechado: sem lista de IPs configurada, ninguém passa — mesmo com a key certa.
+    permitidos = _clinia_ips_permitidos()
+    if not permitidos:
+        raise HTTPException(503, "Integração Clinia não configurada: defina CLINIA_ALLOWED_IPS no .env")
+
+    ip_origem = request.client.host if request.client else None
+    if ip_origem not in permitidos:
+        raise HTTPException(403, "IP não autorizado para esta integração")
+
+    esperado = os.environ.get("CLINIA_API_KEY", "")
+    if not esperado or not api_key or not hmac.compare_digest(api_key, esperado):
+        raise HTTPException(401, "API key inválida ou ausente (header X-API-Key)")
+    return True
+
+
+def _clinia_so_digitos(s):
+    return _re.sub(r"\D", "", s or "")
+
+
+@app.get("/api/clinia/paciente/buscar")
+def clinia_buscar_paciente(
+    telefone: str = None,
+    cpf: str = None,
+    nome: str = None,
+    _auth: bool = Depends(verificar_clinia_key),
+):
+    """
+    Busca paciente por telefone/celular, CPF ou nome — para a Clinia confirmar
+    identidade do paciente antes de mostrar/oferecer agendamento.
+    Informe exatamente um dos filtros (prioridade: telefone > cpf > nome).
+    """
+    if not telefone and not cpf and not nome:
+        raise HTTPException(400, "Informe ao menos um filtro: telefone, cpf ou nome")
+
+    campos = """
+            pac.pac_reg                             AS reg,
+            LTRIM(RTRIM(pac.pac_nome))               AS nome,
+            RTRIM(ISNULL(pac.PAC_FONE,''))           AS fone,
+            RTRIM(ISNULL(pac.PAC_CELULAR,''))        AS celular,
+            RTRIM(ISNULL(pac.PAC_NUMCPF,''))          AS cpf,
+            CONVERT(VARCHAR(10), pac.pac_nasc, 120)  AS nascimento,
+            RTRIM(ISNULL(pac.pac_sexo,''))            AS sexo,
+            RTRIM(ISNULL(pac.PAC_EMAIL,''))          AS email,
+            RTRIM(ISNULL(pac.pac_ind_whatsapp,''))   AS whatsapp
+    """
+
+    if telefone:
+        alvo = _clinia_so_digitos(telefone)
+        sufixo = alvo[-8:] if len(alvo) >= 8 else alvo
+        if len(sufixo) < 6:
+            raise HTTPException(400, "Telefone precisa ter ao menos 6 dígitos")
+        candidatos = query(f"""
+            SELECT TOP 30 {campos}
+            FROM pac
+            WHERE (pac.PAC_FONE LIKE ? OR pac.PAC_CELULAR LIKE ?)
+              AND (pac.pac_dt_obito IS NULL OR pac.pac_dt_obito = '')
+            ORDER BY pac.pac_reg DESC
+        """, (f"%{sufixo}%", f"%{sufixo}%"))
+        rows = [c for c in candidatos
+                if _clinia_so_digitos(c["fone"]).endswith(sufixo)
+                or _clinia_so_digitos(c["celular"]).endswith(sufixo)]
+    elif cpf:
+        alvo = _clinia_so_digitos(cpf)
+        rows = query(f"""
+            SELECT TOP 10 {campos}
+            FROM pac
+            WHERE RTRIM(ISNULL(pac.PAC_NUMCPF,'')) = ?
+              AND (pac.pac_dt_obito IS NULL OR pac.pac_dt_obito = '')
+        """, (alvo,))
+    else:
+        rows = query(f"""
+            SELECT TOP 20 {campos}
+            FROM pac
+            WHERE UPPER(RTRIM(pac.pac_nome)) LIKE ?
+              AND (pac.pac_dt_obito IS NULL OR pac.pac_dt_obito = '')
+            ORDER BY pac.pac_nome
+        """, (f"%{nome.upper()}%",))
+
+    return {"total": len(rows), "pacientes": rows}
+
+
+@app.get("/api/clinia/agenda/disponibilidade")
+def clinia_disponibilidade(
+    medico: int = None,
+    servico: str = None,
+    data_ini: str = None,
+    data_fim: str = None,
+    _auth: bool = Depends(verificar_clinia_key),
+):
+    """
+    Lista horários disponíveis para agendamento (vagas reabertas por
+    cancelamento — AGM_STAT='C').
+
+    LIMITAÇÃO CONHECIDA: a grade completa de horários de cada médico é
+    definida na tabela AGD através de um template codificado em bitmask
+    (campos AGD_MAT/AGD_VESP), que não é decodificado aqui. Esta consulta
+    só enxerga horários que já existiram como linha na AGM e foram
+    cancelados (ficando livres de novo) — não é a grade inteira de
+    disponibilidade em aberto. Suficiente para reaproveitar cancelamentos;
+    para a grade completa seria necessário decodificar o AGD.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    if not data_ini:
+        data_ini = hoje
+    if not data_fim:
+        data_fim = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+
+    condicoes = ["agm.agm_hini >= ?", "agm.agm_hini < DATEADD(day,1,CAST(? AS DATE))", "RTRIM(agm.agm_stat) = 'C'"]
+    params = [data_ini, data_fim]
+    if medico:
+        condicoes.append("agm.agm_med = ?")
+        params.append(medico)
+    if servico:
+        condicoes.append("RTRIM(agm.agm_smk) = ?")
+        params.append(servico.upper())
+
+    where = " AND ".join(condicoes)
+    rows = query(f"""
+        SELECT
+            agm.agm_med                        AS medico_cod,
+            LTRIM(RTRIM(psv.psv_nome))         AS medico_nome,
+            LTRIM(RTRIM(esp.esp_nome))         AS especialidade,
+            RTRIM(agm.agm_smk)                 AS servico_cod,
+            LTRIM(RTRIM(smk.SMK_NOME))         AS servico_nome,
+            agm.agm_hini                       AS inicio,
+            agm.agm_hfim                       AS fim,
+            LTRIM(RTRIM(loc.loc_nome))         AS local
+        FROM agm
+        JOIN psv  ON psv.psv_cod   = agm.agm_med
+        LEFT JOIN esp ON esp.esp_cod  = agm.AGM_ESP_COD
+        LEFT JOIN loc ON loc.loc_cod  = agm.agm_loc
+        LEFT JOIN SMK ON RTRIM(SMK.SMK_COD) = RTRIM(agm.agm_smk)
+        WHERE {where}
+        ORDER BY agm.agm_hini
+    """, tuple(params))
+
+    for r in rows:
+        if hasattr(r.get("inicio"), "strftime"):
+            r["inicio"] = r["inicio"].strftime("%Y-%m-%d %H:%M")
+        if hasattr(r.get("fim"), "strftime"):
+            r["fim"] = r["fim"].strftime("%Y-%m-%d %H:%M")
+
+    return {"total": len(rows), "horarios": rows}
+
+
 # ── PAINEL DE SENHAS (TV das recepções) ──────────────────────────────────────
 # Serve direto da pasta onde o painel é editado — as estações só precisam
 # abrir a URL (ex: http://192.168.1.40:31000/painel-tv/painel_recepcao.html),
@@ -8812,6 +13861,12 @@ def health():
 _PAINEL_TV_DIR = r"C:\Users\administrator.CENSO\Desktop\painel_recepcao"
 if os.path.exists(_PAINEL_TV_DIR):
     app.mount("/painel-tv", StaticFiles(directory=_PAINEL_TV_DIR, html=True), name="painel_tv")
+
+# Logos dos convênios (usadas na Guia SP/SADT) — mesmas imagens que o Smart usa
+# nativamente, arquivo "c-<CNV_COD>.bmp".
+_TISS_LOGOS_DIR = r"C:\Smart\tiss"
+if os.path.exists(_TISS_LOGOS_DIR):
+    app.mount("/tiss-logos", StaticFiles(directory=_TISS_LOGOS_DIR), name="tiss_logos")
 
 # ── SERVE FRONTEND — FINAL DO ARQUIVO ────────────────────────────────────────
 if os.path.exists(DIST):

@@ -279,6 +279,9 @@ export function AdminPermissoes() {
   const [selMods,  setSelMods]  = useState([]);
   const [salvando, setSalvando] = useState(false);
   const [msg,      setMsg]      = useState(null);
+  const [marcados, setMarcados] = useState([]); // logins marcados p/ ação em massa
+  const [aplicandoLote, setAplicandoLote] = useState(false);
+  const [carregandoGrupo, setCarregandoGrupo] = useState(false);
 
   useEffect(() => { fetch(`${API}/api/auth/modulos`).then(r=>r.json()).then(setModulos).catch(()=>{}); }, []);
 
@@ -291,6 +294,35 @@ export function AdminPermissoes() {
 
   const selUser = (u) => { setSel(u); setSelMods(u.modulos||[]); setMsg(null); };
   const toggle  = (id) => setSelMods(p=>p.includes(id)?p.filter(m=>m!==id):[...p,id]);
+
+  const toggleMarcado = (login) => setMarcados(p => p.includes(login) ? p.filter(l=>l!==login) : [...p, login]);
+
+  const selecionarPerfilRecepcao = async () => {
+    setCarregandoGrupo(true);
+    try {
+      const res = await fetch(`${API}/api/auth/usuarios-por-grupo?grp=REC`);
+      const d = await res.json();
+      setMarcados((d.usuarios||[]).map(u=>u.login));
+    } catch {}
+    setCarregandoGrupo(false);
+  };
+
+  const aplicarLoteFaturamento = async () => {
+    if (!marcados.length) return;
+    setAplicandoLote(true);
+    for (const login of marcados) {
+      try {
+        await fetch(`${API}/api/auth/permissoes`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ login, modulos: ["faturamento"], login_admin: user?.login || "" }),
+        });
+      } catch {}
+    }
+    setUsuarios(p => p.map(u => marcados.includes(u.login) ? { ...u, modulos: ["faturamento"] } : u));
+    if (sel && marcados.includes(sel.login)) setSelMods(["faturamento"]);
+    setMarcados([]);
+    setAplicandoLote(false);
+  };
 
   const salvar = async () => {
     if(!sel)return; setSalvando(true); setMsg(null);
@@ -329,28 +361,61 @@ export function AdminPermissoes() {
             <input placeholder="Buscar nome ou login..." value={busca}
               onChange={e=>{setBusca(e.target.value);carregar(e.target.value);}}
               style={{width:"100%",padding:"8px 12px",borderRadius:8,border:"1px solid #E2E8F0",
-                background:"#F8FAFC",fontSize:12,outline:"none",boxSizing:"border-box"}}/>
+                background:"#F8FAFC",fontSize:12,outline:"none",boxSizing:"border-box",marginBottom:8}}/>
+            <button onClick={selecionarPerfilRecepcao} disabled={carregandoGrupo} style={{
+              width:"100%",padding:"7px 12px",borderRadius:8,fontSize:11.5,fontWeight:700,
+              border:`1.5px solid ${G}`,background:"#fff",color:G,
+              cursor:carregandoGrupo?"wait":"pointer"}}>
+              {carregandoGrupo?"Buscando...":"🏷️ Selecionar todos do perfil Recepção"}
+            </button>
           </div>
+          {marcados.length>0 && (
+            <div style={{padding:"10px 18px",background:"#ECFDF5",borderBottom:`1px solid ${B}`,
+              display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:12,fontWeight:700,color:G}}>{marcados.length} selecionado{marcados.length!==1?"s":""}</span>
+              <div style={{display:"flex",gap:6}}>
+                <button onClick={aplicarLoteFaturamento} disabled={aplicandoLote} style={{
+                  padding:"6px 12px",borderRadius:8,fontSize:11.5,fontWeight:700,border:"none",
+                  background:aplicandoLote?"#A7F3D0":G,color:"#fff",cursor:aplicandoLote?"wait":"pointer"}}>
+                  {aplicandoLote?"Aplicando...":"💰 Aplicar: somente Faturamento"}
+                </button>
+                <button onClick={()=>setMarcados([])} style={{
+                  padding:"6px 12px",borderRadius:8,fontSize:11.5,fontWeight:700,
+                  border:"1px solid #E2E8F0",background:"#fff",color:"#64748B",cursor:"pointer"}}>
+                  Limpar
+                </button>
+              </div>
+            </div>
+          )}
           <div style={{overflowY:"auto",maxHeight:540}}>
             {loading?<div style={{padding:32,textAlign:"center",color:"#94A3B8"}}>Carregando...</div>
             :usuarios.map((u,i)=>{
               const at=sel?.login===u.login;
+              const marcado=marcados.includes(u.login);
               return(
                 <div key={i} onClick={()=>selUser(u)} style={{
                   padding:"11px 18px",cursor:"pointer",borderBottom:`1px solid ${B}`,
-                  background:at?"#FEF2F2":"transparent",
+                  background:at?"#FEF2F2":marcado?"#F0FDF4":"transparent",
                   borderLeft:at?`3px solid ${R}`:"3px solid transparent",transition:"all .1s",
+                  display:"flex",alignItems:"center",gap:10,
                 }}
-                  onMouseEnter={e=>{if(!at)e.currentTarget.style.background="#F8FAFC";}}
-                  onMouseLeave={e=>{if(!at)e.currentTarget.style.background="transparent";}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  onMouseEnter={e=>{if(!at)e.currentTarget.style.background=marcado?"#F0FDF4":"#F8FAFC";}}
+                  onMouseLeave={e=>{if(!at)e.currentTarget.style.background=marcado?"#F0FDF4":"transparent";}}>
+                  {!u.admin && (
+                    <input type="checkbox" checked={marcado} onClick={e=>e.stopPropagation()}
+                      onChange={()=>toggleMarcado(u.login)}
+                      style={{width:15,height:15,accentColor:G,cursor:"pointer",flexShrink:0}}/>
+                  )}
+                  <div style={{flex:1,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <div>
                       <div style={{fontSize:13,fontWeight:600,color:"#0F172A"}}>
                         {(u.nome_completo||u.nome||u.login).trim()}
                         {u.admin&&<span style={{marginLeft:6,fontSize:10,fontWeight:700,
                           background:"#FEF2F2",color:R,padding:"1px 6px",borderRadius:8}}>ADMIN</span>}
                       </div>
-                      <div style={{fontSize:11,color:"#94A3B8",marginTop:1}}>{u.login}</div>
+                      <div style={{fontSize:11,color:"#94A3B8",marginTop:1}}>
+                        {u.login}{u.grupo_nome&&` · ${u.grupo_nome}`}
+                      </div>
                     </div>
                     <div style={{fontSize:11,fontWeight:700,color:u.modulos?.length>0?G:"#CBD5E1"}}>
                       {u.admin?"Todos":`${u.modulos?.length||0} módulos`}

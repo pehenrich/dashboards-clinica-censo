@@ -3,6 +3,38 @@ import { LOGO } from "./Login";
 
 const API = `${window.location.protocol}//${window.location.host}`;
 
+function imprimirResultados(dados) {
+  const linhasExames = dados.resultados.map(ex => `
+    <div style="margin-bottom:22px;page-break-inside:avoid;">
+      <div style="display:flex;justify-content:space-between;border-bottom:1px solid #ccc;padding-bottom:4px;margin-bottom:8px;">
+        <strong>${ex.servico}</strong>
+        <span>${ex.data ? new Date(ex.data).toLocaleDateString("pt-BR") : ""}</span>
+      </div>
+      ${ex.medico ? `<div style="font-size:12px;color:#555;margin-bottom:6px;">Dr(a). ${ex.medico}</div>` : ""}
+      ${ex.valor ? `<div style="font-size:15px;font-weight:700;margin-bottom:6px;">${ex.valor}</div>` : ""}
+      ${ex.campos.map(c => `<div style="font-size:13px;">${c.rotulo}: <strong>${c.valor}</strong></div>`).join("")}
+    </div>
+  `).join("");
+
+  const html = `
+    <html><head><title>Resultados - ${dados.nome}</title>
+    <style>
+      body{font-family:Arial,sans-serif;padding:32px;color:#111;}
+      h1{font-size:18px;border-bottom:2px solid #8B1A1A;padding-bottom:8px;}
+    </style></head>
+    <body>
+      <h1>Resultados de Exames — ${dados.nome}</h1>
+      <p style="color:#666;font-size:12px;">Emitido em ${new Date().toLocaleString("pt-BR")}</p>
+      ${linhasExames}
+    </body></html>`;
+
+  const janela = window.open("", "_blank", "width=900,height=1000");
+  janela.document.write(html);
+  janela.document.close();
+  janela.focus();
+  setTimeout(() => janela.print(), 300);
+}
+
 export default function MeusResultados() {
   const [cpf, setCpf]                 = useState("");
   const [nascimento, setNascimento]   = useState("");
@@ -119,7 +151,7 @@ export default function MeusResultados() {
               </form>
             ) : (
               <div>
-                <div style={{ marginBottom:20 }}>
+                <div style={{ textAlign:"center", marginBottom:24 }}>
                   <div style={{ fontSize:17, fontWeight:800, color:"#0F172A" }}>
                     Olá, {dados.nome}
                   </div>
@@ -133,41 +165,13 @@ export default function MeusResultados() {
                     Nenhum exame interno liberado até o momento.
                   </div>
                 ) : (
-                  <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-                    {dados.resultados.map((ex, i) => (
-                      <div key={i} style={{
-                        border:"1px solid #E2E8F0", borderRadius:12, padding:"14px 16px",
-                        borderLeft:`3px solid ${R}`,
-                      }}>
-                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
-                          <span style={{ fontSize:14, fontWeight:700, color:"#0F172A" }}>{ex.servico}</span>
-                          <span style={{ fontSize:12, color:"#94A3B8" }}>
-                            {ex.data ? new Date(ex.data).toLocaleDateString("pt-BR") : ""}
-                          </span>
-                        </div>
-                        {ex.medico && (
-                          <div style={{ fontSize:12, color:"#64748B", marginBottom:8 }}>Dr(a). {ex.medico}</div>
-                        )}
-                        {ex.valor && (
-                          <div style={{ fontSize:15, fontWeight:700, color:R, marginBottom:8 }}>
-                            {ex.valor}
-                          </div>
-                        )}
-                        <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-                          {ex.campos.map((c, j) => (
-                            <div key={j} style={{ fontSize:13, display:"flex", gap:6 }}>
-                              <span style={{ color:"#64748B", minWidth:120 }}>{c.rotulo}:</span>
-                              <span style={{ color:"#111827", fontWeight:500 }}>{c.valor}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <button onClick={() => imprimirResultados(dados)} className="mr-btn">
+                    Imprimir / Baixar PDF
+                  </button>
                 )}
 
                 <button onClick={() => { setDados(null); setCpf(""); setNascimento(""); }} style={{
-                  width:"100%", marginTop:20, padding:12, borderRadius:10,
+                  width:"100%", marginTop:12, padding:12, borderRadius:10,
                   border:"1px solid #E2E8F0", background:"#fff", color:"#64748B",
                   fontSize:13, fontWeight:600, cursor:"pointer",
                 }}>

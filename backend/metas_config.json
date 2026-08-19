@@ -7,10 +7,5 @@
     "meta_mensal": 1200000.0,
     "meta_diaria": 48000.0,
     "meta_sabado": 30000.0
-  },
-  "painel_recepcao_RCN": {
-    "meta_mensal": null,
-    "meta_diaria": 25000.0,
-    "meta_sabado": null
   }
 }

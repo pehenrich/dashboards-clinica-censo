@@ -3,6 +3,7 @@ import {
   AreaChart, Area, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid, ReferenceLine,
 } from "recharts";
+import GraficoProducaoRecepcao from "./GraficoProducaoRecepcao";
 
 const API = `${window.location.protocol}//${window.location.host}`;
 
@@ -374,6 +375,8 @@ export default function Home({ periodoGlobal }) {
               </AreaChart>
             </ResponsiveContainer>
           </div>
+
+          <GraficoProducaoRecepcao />
 
           {/* Rankings */}
           <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 14 }}>

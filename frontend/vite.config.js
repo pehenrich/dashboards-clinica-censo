@@ -11,6 +11,10 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:31000",
         changeOrigin: true
+      },
+      "/tiss-logos": {
+        target: "http://127.0.0.1:31000",
+        changeOrigin: true
       }
     }
   }
