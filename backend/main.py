@@ -11,7 +11,7 @@ Tabelas validadas contra dicionário oficial Pixeon:
           cnv_reg_ans, cnv_cgc, cnv_caixa_fatura
 """
 
-from fastapi import FastAPI, UploadFile, File, Request, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 # WhatsApp / Scheduler (importação opcional — não quebra se arquivos não existem)
@@ -113,6 +113,8 @@ TODOS_MODULOS = [
     {"id": "painel_tv",     "label": "Painel TV"},
     {"id": "contratos",     "label": "Contratos"},
     {"id": "faturamento",   "label": "Faturamento (Guias)"},
+    {"id": "financeiro_orcamento", "label": "Financeiro - Orçamento Diário (app separado)"},
+    {"id": "editor_pdf",    "label": "Editor de PDF (trocar palavra em documento)"},
 ]
 
 # ── Cria tabela de permissões se não existir ──────────────────────────────────
@@ -915,91 +917,59 @@ def auth_diagnostico(login: str):
     mods  = get_modulos_usuario(login.strip())
     return JSONResponse({"login": login, "nivel_pixeon": nivel, "admin": admin, "modulos": mods})
 
-[{
-	"resource": "/c:/Dashboard/backend/main.py",
-	"owner": "Pylance4",
-	"code": {
-		"value": "reportUndefinedVariable",
-		"target": {
-			"$mid": 1,
-			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
-			"scheme": "https",
-			"authority": "github.com"
-		}
-	},
-	"severity": 4,
-	"message": "\"app\" is not defined",
-	"source": "Pylance",
-	"startLineNumber": 126,
-	"startColumn": 2,
-	"endLineNumber": 126,
-	"endColumn": 5,
-	"modelVersionId": 194,
-	"origin": "extHost1"
-},{
-	"resource": "/c:/Dashboard/backend/main.py",
-	"owner": "Pylance4",
-	"code": {
-		"value": "reportUndefinedVariable",
-		"target": {
-			"$mid": 1,
-			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
-			"scheme": "https",
-			"authority": "github.com"
-		}
-	},
-	"severity": 4,
-	"message": "\"app\" is not defined",
-	"source": "Pylance",
-	"startLineNumber": 197,
-	"startColumn": 2,
-	"endLineNumber": 197,
-	"endColumn": 5,
-	"modelVersionId": 194,
-	"origin": "extHost1"
-},{
-	"resource": "/c:/Dashboard/backend/main.py",
-	"owner": "Pylance4",
-	"code": {
-		"value": "reportUndefinedVariable",
-		"target": {
-			"$mid": 1,
-			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
-			"scheme": "https",
-			"authority": "github.com"
-		}
-	},
-	"severity": 4,
-	"message": "\"app\" is not defined",
-	"source": "Pylance",
-	"startLineNumber": 239,
-	"startColumn": 2,
-	"endLineNumber": 239,
-	"endColumn": 5,
-	"modelVersionId": 194,
-	"origin": "extHost1"
-},{
-	"resource": "/c:/Dashboard/backend/main.py",
-	"owner": "Pylance4",
-	"code": {
-		"value": "reportUndefinedVariable",
-		"target": {
-			"$mid": 1,
-			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
-			"scheme": "https",
-			"authority": "github.com"
-		}
-	},
-	"severity": 4,
-	"message": "\"app\" is not defined",
-	"source": "Pylance",
-	"startLineNumber": 279,
-	"startColumn": 2,
-	"endLineNumber": 279,
-	"endColumn": 5,
-	"modelVersionId": 194,
-	"origin": "extHost1"
-}]
+
+# ── Editor de PDF — troca pontual de uma palavra (ex.: corrigir um ASO) ──────
+@app.post("/api/pdf/buscar-palavra")
+async def pdf_buscar_palavra(
+    arquivo: UploadFile = File(...),
+    palavra: str = Form(...),
+    case_sensitive: bool = Form(False),
+):
+    """Pré-visualização: mostra onde a palavra aparece no PDF, sem alterar nada."""
+    from pdf_editor import buscar_ocorrencias
+    if (arquivo.content_type or "") != "application/pdf" and not (arquivo.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(400, "Envie um arquivo PDF.")
+    conteudo = await arquivo.read()
+    try:
+        resultado = buscar_ocorrencias(conteudo, palavra, case_sensitive)
+    except Exception as e:
+        raise HTTPException(400, f"Erro ao ler o PDF: {e}")
+    return resultado
+
+
+@app.post("/api/pdf/substituir-palavra")
+async def pdf_substituir_palavra(
+    background_tasks: BackgroundTasks,
+    arquivo: UploadFile = File(...),
+    palavra_antiga: str = Form(...),
+    palavra_nova: str = Form(...),
+    case_sensitive: bool = Form(False),
+):
+    """Troca a palavra no PDF e devolve o arquivo já editado para download."""
+    import tempfile, uuid
+    from pdf_editor import substituir_palavra
+    if (arquivo.content_type or "") != "application/pdf" and not (arquivo.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(400, "Envie um arquivo PDF.")
+    conteudo = await arquivo.read()
+    try:
+        pdf_editado = substituir_palavra(conteudo, palavra_antiga, palavra_nova, case_sensitive)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao editar o PDF: {e}")
+
+    tmp_dir = tempfile.gettempdir()
+    uid = uuid.uuid4().hex
+    pdf_path = os.path.join(tmp_dir, f"pdf_editado_{uid}.pdf")
+    with open(pdf_path, "wb") as f:
+        f.write(pdf_editado)
+    background_tasks.add_task(lambda: os.remove(pdf_path) if os.path.exists(pdf_path) else None)
+
+    nome_original = os.path.splitext(os.path.basename(arquivo.filename or "documento.pdf"))[0]
+    return FileResponse(
+        pdf_path, media_type="application/pdf",
+        filename=f"{nome_original}_editado.pdf", background=background_tasks,
+    )
 
 @app.on_event("startup")
 async def startup_event():
@@ -11785,6 +11755,367 @@ def atendimento_salvar(req: AtendimentoSalvarRequest):
 
     return {"ok": True, "ambiente": "smart_hml", "servico": servico, "rcl_txt": rcl_txt}
 
+
+# ── LANÇAMENTO DE OS (PROVA DE CONCEITO) — SOMENTE smart_hml ─────────────────
+# Investigação (não documentada em docs/ ainda): osm/smm não têm stored
+# procedures nem triggers — toda numeração/preço é feita pelo app desktop
+# (PowerBuilder). Validado por amostragem (500 itens Hapvida, últimos 30 dias:
+# 99,8% de acerto em itens com valor não-zero) que o valor cobrado é sempre um
+# lookup em PRE/V_TAB_PRECOS pela tabela de preço do PRÓPRIO convênio
+# (cnv.CNV_TAB) — vale tanto pra particular quanto pra convênio de saúde real
+# quanto pra empresa/ocupacional (cada empresa é seu próprio "convênio" com
+# tabela própria). Itens com valor R$0,00 na amostra real eram regra de
+# pacote/duplicidade, não erro de tabela.
+# Numeração: osm_serie/osm_num não tem IDENTITY, só PK (osm_serie+osm_num) —
+# por isso o retry-on-duplicate-key abaixo (colisão vira erro, nunca duplicata
+# silenciosa). FKs reais descobertas: smm.SMM_MED -> PSV (médico executante),
+# smm.SMM_REP -> USR (login), smm.SMM_STR -> STR (setor de EXECUÇÃO do item,
+# ex. "LAB"/"RAD" — diferente do setor de recepção da OS, osm_str).
+# Setor de execução não é adivinhado aqui de propósito (mapear isso corretamente
+# por tipo de exame é o próximo passo, não coberto por esta prova de conceito).
+class ItemLancarOS(BaseModel):
+    tipo: str            # SMM_TPCOD (ex: "S")
+    cod: str             # código do procedimento/exame (smk)
+    qt: float = 1
+    setor_execucao: str  # SMM_STR — setor real de execução (ex: "LAB", "RAD")
+
+class LancarOSTesteRequest(BaseModel):
+    paciente: int             # pac_reg
+    convenio: str             # osm_cnv
+    setor: str                # osm_str — setor de recepção (RDI/ROC/RCN/RCI)
+    medico_requisitante: int  # osm_mreq (psv_cod)
+    medico_executante: int    # smm_med (psv_cod)
+    login: str                # quem lança — precisa existir em USR
+    itens: list[ItemLancarOS]
+    tipo_atendimento: str = "ASS"  # osm_atend — Ocupacional usa ADM/PER/DEM/MDF/RTB
+    urgente: bool = False
+    dias_previsao_resultado: int = 7
+    observacao: str | None = None
+    # TISS — mapeados por amostragem, não são uniformes o bastante pra ter um
+    # default único confiável (ver comentário abaixo). Ficam None até serem
+    # informados por quem chama; None gera aviso, não erro.
+    tiss_tipo_saida: str = "5"          # osm_tiss_tipo_saida — dominante em RDI/RCN/RCI (>90%); raro em ROC
+    tiss_tipo_atende: str | None = None # osm_tiss_tipo_atende — varia bastante (05/23/04/14/16...), sem moda clara
+    regime_atend: str | None = None     # osm_regime_atend — só ~18% das OS preenchem; concentrado em Hapvida/AMS
+    adicionar_fila: bool = True    # grava também em fle (fila do médico executante), igual o desktop faz
+
+@app.post("/api/faturamento/lancar-os-teste")
+def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
+    """
+    Prova de conceito de lançamento de OS pelo Dashboard — grava OSM+SMM
+    SOMENTE em smart_hml, nunca em produção. Ver comentário acima com o
+    resumo da investigação. Itens sem preço cadastrado na tabela do convênio
+    voltam com valor R$0,00 e aviso pra conferência manual, em vez de um
+    valor chutado.
+    """
+    if req.setor not in RECEPCOES:
+        raise HTTPException(400, f"Setor inválido: {req.setor}. Use um de {list(RECEPCOES)}.")
+    if not req.itens:
+        raise HTTPException(400, "Informe ao menos um item.")
+
+    conn = get_conn_hml()
+    cur = conn.cursor()
+
+    convenio = req.convenio.strip().upper()
+    cur.execute("SELECT RTRIM(ISNULL(CNV_TAB,'')), RTRIM(ISNULL(CNV_IND_TISS,'')) FROM cnv WHERE RTRIM(cnv_cod)=?", (convenio,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        conn.close()
+        raise HTTPException(400, f"Convênio '{convenio}' não encontrado ou sem tabela de preço (CNV_TAB) cadastrada.")
+    tabela, exige_tiss = row[0], (row[1] == 'S')
+
+    # Médico requisitante/executante são buscados em produção (/buscar-medico),
+    # mas a gravação é sempre em smart_hml — como é só um snapshot, pode não ter
+    # o mesmo prestador (aconteceu na prática: Jessica Oliveira Ferreira, usada
+    # no autofill de exame de sangue, existe em produção mas não em smart_hml).
+    # Confere antes de tentar o INSERT pra dar um erro claro em vez de um erro
+    # de FK OSM/SMM que não diz o que realmente falhou.
+    for label, cod in (("requisitante", req.medico_requisitante), ("executante", req.medico_executante)):
+        cur.execute("SELECT 1 FROM psv WHERE psv_cod=?", (cod,))
+        if cur.fetchone() is None:
+            conn.close()
+            raise HTTPException(400, f"Médico {label} (código {cod}) existe em produção mas não em smart_hml — "
+                                      "essa tela só grava em homologação. Escolha outro médico pra testar.")
+
+    agora = datetime.now()
+    avisos = []
+    itens_computados = []
+    vistos = set()
+    for it in req.itens:
+        cod = it.cod.strip().upper()
+        tipo = it.tipo.strip().upper()
+        chave = (tipo, cod)
+        cur.execute(
+            "SELECT preco1 FROM V_TAB_PRECOS WHERE tabela=? AND RTRIM(tipo)=? AND RTRIM(codigo)=?",
+            (tabela, tipo, cod),
+        )
+        preco_row = cur.fetchone()
+        if chave in vistos:
+            valor = 0.0
+            avisos.append(f"{cod}: item duplicado na mesma OS — lançado com R$0,00 (regra de pacote).")
+        elif preco_row is None:
+            valor = 0.0
+            avisos.append(f"{cod}: não encontrado na tabela '{tabela}' do convênio — lançado com R$0,00, confira manualmente.")
+        else:
+            valor = float(preco_row[0])
+        vistos.add(chave)
+        itens_computados.append({"tipo": tipo, "cod": cod, "qt": it.qt,
+                                  "setor_execucao": it.setor_execucao.strip().upper(), "valor": valor})
+
+    if exige_tiss:
+        if not req.tiss_tipo_atende:
+            avisos.append(f"Convênio '{convenio}' exige TISS (CNV_IND_TISS=S) e osm_tiss_tipo_atende não foi "
+                           "informado — não há valor dominante confiável pra chutar, preencha manualmente.")
+        if not req.regime_atend:
+            avisos.append(f"Convênio '{convenio}' exige TISS (CNV_IND_TISS=S) e osm_regime_atend não foi "
+                           "informado — confira se a guia desse tipo de atendimento exige esse campo.")
+
+    serie = 126
+    num = None
+    for _tentativa in range(5):
+        cur.execute("SELECT ISNULL(MAX(osm_num),0)+1 FROM osm WHERE osm_serie=?", (serie,))
+        candidato = cur.fetchone()[0]
+        try:
+            cur.execute("""
+                INSERT INTO osm (OSM_SERIE, OSM_NUM, OSM_PAC, OSM_DTHR, OSM_CNV, OSM_PROC,
+                                  OSM_MREQ, OSM_STR, OSM_IND_URG, OSM_DT_RESULT, OSM_ATEND,
+                                  OSM_USR_LOGIN_CAD, OSM_MREQ_IND_SLINE, osm_ind_gestante,
+                                  osm_ind_lactante, OSM_OBS, OSM_TISS_TIPO_SAIDA,
+                                  OSM_TISS_TIPO_ATENDE, osm_regime_atend, osm_sus_ind_prog_transp)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                serie, candidato, req.paciente, agora, convenio, 'A',
+                req.medico_requisitante, req.setor, 'S' if req.urgente else 'N',
+                agora + timedelta(days=req.dias_previsao_resultado), req.tipo_atendimento,
+                req.login, 'S', 'N', 'N',
+                req.observacao or "Lançado via Dashboard (teste smart_hml)",
+                req.tiss_tipo_saida, req.tiss_tipo_atende, req.regime_atend, 'N',
+            ))
+            num = candidato
+            break
+        except pyodbc.IntegrityError as e:
+            conn.rollback()
+            # Só vale re-tentar em conflito real de PK (osm_serie+osm_num já usado
+            # nesse instante por outra requisição concorrente) — qualquer outra
+            # violação de integridade (FK: login/convênio/médico/paciente
+            # inexistente em smart_hml) não se resolve tentando de novo e só
+            # mascarava o erro real atrás de "número de OS livre" (bug real,
+            # descoberto testando com um login que não existe em smart_hml).
+            if "FOREIGN KEY constraint" in str(e):
+                conn.close()
+                raise HTTPException(400, f"Erro ao gravar OS em smart_hml (dado referenciado não existe nessa base): {e}")
+            continue
+    if num is None:
+        conn.close()
+        raise HTTPException(409, "Não foi possível obter um número de OS livre após 5 tentativas.")
+
+    try:
+        for i, item in enumerate(itens_computados, start=1):
+            cur.execute("""
+                INSERT INTO smm (SMM_OSM_SERIE, SMM_OSM, SMM_NUM, SMM_TPCOD, SMM_COD, SMM_QT,
+                                  SMM_EXEC, SMM_SFAT, SMM_REP, SMM_STR, SMM_MED, SMM_VLCH, SMM_VLR,
+                                  SMM_TAB_COD, SMM_USR_LOGIN_LANC, SMM_DTHR_LANC, SMM_DTHR_EXEC,
+                                  SMM_DTHR_ALTER, SMM_MREQ_1, SMM_MREQ_2, SMM_MREQ_3, SMM_PAC_REG,
+                                  SMM_TIPO_FATURA, SMM_IND_RESULT_PARCIAL, SMM_IND_URG)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                serie, num, i, item["tipo"], item["cod"], item["qt"],
+                'A', 'F', req.login, item["setor_execucao"], req.medico_executante,
+                item["valor"], item["valor"],
+                tabela, req.login, agora, agora,
+                agora, 'S', 'S', 'S', req.paciente,
+                'E', 'N', 'S' if req.urgente else 'N',
+            ))
+        conn.commit()
+    except pyodbc.Error as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(400, f"Erro ao gravar itens em smart_hml: {e}")
+
+    # Adiciona o paciente à fila do médico executante em `fle` — mesma tabela que
+    # o Painel de Senhas e /api/atendimento/fila leem. Confirmado com dado real
+    # (produção, 05/09/26): quando uma OS é aberta pelo Smart desktop, ele grava
+    # em `fle` uma linha com FLE_PROCED='OS ', FLE_STATUS='A' (aguardando),
+    # FLE_PSV_COD/FLE_PSV_RESP = médico executante (smm_med), FLE_OSM_SERIE/NUM
+    # e FLE_SMM_NUM=1 apontando pro item recém-lançado. FLE_ORDEM é a posição do
+    # paciente na fila daquele médico naquele dia — não é identity, incrementa
+    # por (FLE_PSV_COD, dia): MAX(FLE_ORDEM)+1. Feito como passo separado, depois
+    # do commit da OS — se falhar, a OS já lançada continua válida, só vira aviso.
+    fila_info = None
+    if req.adicionar_fila:
+        try:
+            cur.execute(
+                "SELECT ISNULL(MAX(CAST(FLE_ORDEM AS INT)),0)+1 FROM fle "
+                "WHERE FLE_PSV_COD=? AND CAST(FLE_DTHR_CHEGADA AS DATE)=CAST(GETDATE() AS DATE)",
+                (req.medico_executante,),
+            )
+            ordem = cur.fetchone()[0]
+            cur.execute("""
+                INSERT INTO fle (FLE_DTHR_CHEGADA, FLE_PSV_COD, FLE_STR_COD, FLE_PAC_REG, FLE_ORDEM,
+                                  FLE_STATUS, FLE_USR_LOGIN, FLE_PSV_RESP, FLE_DTHR_REG,
+                                  FLE_DTHR_CHEGADA_INICIAL, FLE_PROCED, FLE_OSM_SERIE, FLE_OSM_NUM,
+                                  FLE_SMM_NUM, FLE_MARC_EXTRA, FLE_VERSAO)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                agora, req.medico_executante, req.setor, req.paciente, ordem,
+                'A', req.login, req.medico_executante, agora,
+                agora, 'OS ', serie, num,
+                1, '   ', 'Dashboard',
+            ))
+            conn.commit()
+            fila_info = {"adicionado": True, "psv_cod": req.medico_executante, "ordem": ordem}
+        except pyodbc.Error as e:
+            conn.rollback()
+            avisos.append(f"OS lançada, mas não foi possível adicionar à fila (fle): {e}")
+            fila_info = {"adicionado": False}
+
+    conn.close()
+    return {
+        "ok": True, "ambiente": "smart_hml", "os": f"{serie}-{num}",
+        "tabela_preco_usada": tabela, "convenio_exige_tiss": exige_tiss,
+        "itens": itens_computados, "avisos": avisos, "fila": fila_info,
+    }
+
+
+class AdicionarFilaSenhaRequest(BaseModel):
+    paciente: int        # pac_reg
+    setor: str           # osm_str — setor de recepção (RDI/ROC/RCN/RCI)
+    fila_psv_cod: int    # FLE_CFG_SENHA_PSV_COD — qual fila de senha (VALE, PARTICULAR, OUTRAS EMPRESAS...)
+    login: str           # quem lança — precisa existir em USR
+    preferencial: bool = False
+
+
+@app.post("/api/faturamento/adicionar-fila-senha-teste")
+def faturamento_adicionar_fila_senha_teste(req: AdicionarFilaSenhaRequest):
+    """
+    Prova de conceito — gera uma senha de verdade (ex: "PAR001", "OEP016") numa
+    das filas oficiais cadastradas em FLE_CFG_SENHA (mesma lista de
+    /api/painel-fila/prestadores), igual o totem/recepção do Smart desktop faz.
+    Diferente do "adicionar_fila" de /lancar-os-teste (que cria uma linha
+    técnica ligada ao médico executante de uma OS específica): isso aqui é a
+    fila de atendimento física/visual que aparece no Painel de Senhas — não
+    depende de OS nenhuma, só de paciente + setor + a fila escolhida.
+    O prefixo vem de psv.PSV_FILA_SENHA_PREFIXO (confirmado com dado real de
+    produção — bate exatamente com os prefixos observados em fle.FLE_BIP).
+    Grava só em smart_hml, nunca em produção.
+    """
+    if req.setor not in RECEPCOES:
+        raise HTTPException(400, f"Setor inválido: {req.setor}. Use um de {list(RECEPCOES)}.")
+
+    conn = get_conn_hml()
+    cur = conn.cursor()
+
+    # FLE_CFG_SENHA (usada em /painel-fila/prestadores pra listar as filas) não
+    # existe em smart_hml — só a tabela `psv` foi confirmada lá, com a mesma
+    # coluna PSV_FILA_SENHA_PREFIXO. Busca o prefixo direto por psv_cod.
+    cur.execute("SELECT RTRIM(ISNULL(PSV_FILA_SENHA_PREFIXO,'')), RTRIM(psv_apel) FROM psv WHERE psv_cod=?",
+                (req.fila_psv_cod,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(400, f"Fila (código {req.fila_psv_cod}) existe em produção mas não em smart_hml — "
+                                  "essa tela só grava em homologação. Escolha outra fila pra testar.")
+    prefixo, fila_nome = row
+    if not prefixo:
+        conn.close()
+        raise HTTPException(400, f"Fila '{fila_nome}' não tem prefixo de senha cadastrado (PSV_FILA_SENHA_PREFIXO).")
+
+    agora = datetime.now()
+    cur.execute("""
+        SELECT MAX(CAST(SUBSTRING(RTRIM(FLE_BIP), LEN(?)+1, 10) AS INT))
+        FROM fle
+        WHERE FLE_PSV_COD=? AND CAST(FLE_DTHR_CHEGADA AS DATE) = CAST(GETDATE() AS DATE)
+          AND RTRIM(FLE_BIP) LIKE ? + '%'
+    """, (prefixo, req.fila_psv_cod, prefixo))
+    ultimo = cur.fetchone()[0]
+    numero = (ultimo or 0) + 1
+    senha = f"{prefixo}{numero:03d}"
+
+    try:
+        cur.execute("""
+            INSERT INTO fle (FLE_DTHR_CHEGADA, FLE_PSV_COD, FLE_STR_COD, FLE_PAC_REG, FLE_ORDEM,
+                              FLE_STATUS, FLE_USR_LOGIN, FLE_PSV_RESP, FLE_DTHR_REG,
+                              FLE_DTHR_CHEGADA_INICIAL, FLE_PROCED, FLE_BIP, fle_psv_t_prefixo,
+                              FLE_PREFERENCIAL, FLE_VERSAO)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            agora, req.fila_psv_cod, req.setor, req.paciente, 1,
+            'A', req.login, req.fila_psv_cod, agora,
+            agora, 'REG', senha, prefixo,
+            'S' if req.preferencial else 'N', 'Dashboard',
+        ))
+        conn.commit()
+    except pyodbc.Error as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(400, f"Erro ao gravar senha em smart_hml: {e}")
+
+    conn.close()
+    return {"ok": True, "ambiente": "smart_hml", "senha": senha, "fila": fila_nome}
+
+
+@app.get("/api/faturamento/buscar-medico")
+def faturamento_buscar_medico(q: str, limite: int = 15):
+    """Busca prestador (psv) por nome — usado pra escolher médico requisitante/
+    executante na tela de lançamento de OS. Lê produção (só leitura)."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "resultados": []}
+    rows = query(f"""
+        SELECT TOP {limite}
+            psv_cod                          AS codigo,
+            RTRIM(psv_nome)                   AS nome,
+            RTRIM(ISNULL(psv_apel,''))        AS apelido
+        FROM psv
+        WHERE psv_nome LIKE ? OR RTRIM(ISNULL(psv_apel,'')) LIKE ?
+        ORDER BY LEN(psv_nome), psv_nome
+    """, (f"%{termo}%", f"%{termo}%"))
+    return {"total": len(rows), "resultados": rows}
+
+
+@app.get("/api/faturamento/buscar-item-os")
+def faturamento_buscar_item_os(q: str, convenio: str = None, limite: int = 15):
+    """Busca no catálogo SMK (sem exigir TUSS, ao contrário de /buscar-procedimento
+    — cobre exames de laboratório/particular que não têm código TUSS) pra montar
+    os itens de uma OS. Se `convenio` for informado, já resolve o preço pela
+    tabela do convênio (mesmo lookup usado em /lancar-os-teste), pra mostrar o
+    valor ao usuário antes de adicionar o item."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "resultados": []}
+
+    tabela = None
+    if convenio:
+        cnv_row = query("SELECT RTRIM(ISNULL(CNV_TAB,'')) AS tabela FROM cnv WHERE RTRIM(cnv_cod)=?",
+                         (convenio.strip().upper(),))
+        if cnv_row and cnv_row[0]["tabela"]:
+            tabela = cnv_row[0]["tabela"]
+
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(SMK_TIPO)                  AS tipo,
+            RTRIM(SMK_COD)                    AS codigo,
+            RTRIM(ISNULL(SMK_NOME,''))        AS nome,
+            RTRIM(ISNULL(SMK_COD_TUSS,''))    AS tuss
+        FROM smk
+        WHERE SMK_STATUS = 'A' AND (SMK_NOME LIKE ? OR RTRIM(SMK_COD) LIKE ?)
+        ORDER BY LEN(SMK_NOME)
+    """, (f"%{termo}%", f"{termo}%"))
+
+    for r in rows:
+        preco = None
+        if tabela:
+            preco_row = query(
+                "SELECT preco1 FROM V_TAB_PRECOS WHERE tabela=? AND RTRIM(tipo)=? AND RTRIM(codigo)=?",
+                (tabela, r["tipo"], r["codigo"]),
+            )
+            if preco_row and preco_row[0]["preco1"] is not None:
+                preco = float(preco_row[0]["preco1"])
+        r["preco"] = preco
+
+    return {"total": len(rows), "resultados": rows, "tabela_preco": tabela}
+
+
 @app.get("/api/debug/scheduler-status")
 def debug_scheduler_status():
     try:
@@ -13680,6 +14011,88 @@ def health():
         return {"status": "ok", "db": "conectado", "ts": datetime.now().isoformat()}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
+
+
+# ── STATUS DOS SERVIÇOS ────────────────────────────────────────────────────────
+# Painel operacional: cada serviço relacionado ao Dashboard (não só ele mesmo)
+# checado com timeout curto, pra não travar o carregamento do painel se um
+# deles estiver fora do ar. Não usa o /api/health de cada um quando não existe
+# (ex: WPPConnect não tem endpoint de health — usa status-session, que já é
+# o mesmo padrão usado pelo restante do código de WhatsApp).
+def _status_servico(nome, checagem_fn):
+    inicio = datetime.now()
+    try:
+        detalhe = checagem_fn()
+        ok = True
+    except Exception as e:
+        detalhe = str(e)[:200]
+        ok = False
+    tempo_ms = int((datetime.now() - inicio).total_seconds() * 1000)
+    return {"nome": nome, "status": "up" if ok else "down", "detalhe": detalhe, "tempo_resposta_ms": tempo_ms}
+
+
+def _checar_banco_smart():
+    conn = get_conn()
+    conn.close()
+    return "Conectado (192.168.1.9)"
+
+
+def _checar_wppconnect():
+    cfg = _load_wpp_config()
+    session = cfg.get("wppconnect_session", "myinstance")
+    token = cfg.get("wppconnect_token", "")
+    base = cfg.get("wppconnect_url", "http://localhost:21465")
+    if not token:
+        raise Exception("Token não configurado")
+    resp = httpx.get(
+        f"{base}/api/{session}/status-session",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=8,
+    )
+    resp.raise_for_status()
+    status = resp.json().get("status", "?")
+    if status != "CONNECTED":
+        raise Exception(f"Sessão \"{status}\" (não conectada)")
+    return "Sessão conectada"
+
+
+def _checar_netmonitor():
+    resp = httpx.get("http://localhost:8700/api/health", timeout=8)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("scheduler_disponivel", True):
+        raise Exception("Scheduler indisponível")
+    return "Scheduler ativo"
+
+
+def _checar_evolution_api():
+    cfg = _load_wpp_config()
+    base = cfg.get("evolution_url", "http://localhost:8080")
+    resp = httpx.get(base, timeout=8)
+    resp.raise_for_status()
+    return "Respondendo"
+
+
+def _checar_frontend_build():
+    idx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "dist", "index.html")
+    if not os.path.exists(idx):
+        raise Exception("frontend/dist/index.html não encontrado — rode npm run build")
+    mtime = datetime.fromtimestamp(os.path.getmtime(idx))
+    return f"Build de {mtime.strftime('%d/%m/%Y %H:%M')}"
+
+
+@app.get("/api/status-servicos")
+def status_servicos():
+    return {
+        "checado_em": datetime.now().isoformat(),
+        "servicos": [
+            _status_servico("Banco Smart Pixeon (SQL Server)", _checar_banco_smart),
+            _status_servico("WhatsApp (WPPConnect)", _checar_wppconnect),
+            _status_servico("NetMonitor", _checar_netmonitor),
+            _status_servico("Evolution API", _checar_evolution_api),
+            _status_servico("Build do Frontend", _checar_frontend_build),
+        ],
+    }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # INTEGRAÇÃO CLINIA — plataforma de agendamento via WhatsApp
