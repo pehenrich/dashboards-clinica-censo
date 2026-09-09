@@ -4,7 +4,6 @@ const useMobile = () => useContext(MobileCtx);
 import PainelTV from "./PainelTV";
 import PacientesDB from "./PacientesDB";
 import Gestao from "./Gestao";
-import ResultadosFinanceiros from "./ResultadosFinanceiros";
 import ModuloContratos from "./ModuloContratos";
 import Recepcao from "./Recepcao";
 import Login, { AuthProvider, useAuth, AdminPermissoes } from "./Login";
@@ -19,8 +18,12 @@ import BriefingCard from "./BriefingCard";
 import GraficoProducaoRecepcao from "./GraficoProducaoRecepcao";
 import Atendimento from "./Atendimento";
 import Faturamento from "./Faturamento";
+import LancarOS from "./LancarOS";
+import Coleta from "./Coleta";
 import AssistenteAgenda from "./AssistenteAgenda";
 import AlertaImportante from "./AlertaImportante";
+import StatusServicos from "./StatusServicos";
+import EditorPDF from "./EditorPDF";
 
 const BACKEND_TUNNEL = "https://breaking-sarah-gmc-drum.trycloudflare.com";
 const API = `${window.location.protocol}//${window.location.host}`;
@@ -3999,6 +4002,8 @@ const Icon = ({ name, size=18, color="currentColor" }) => {
     activity:  "M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01",
     document:  "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M8 13h8M8 17h8M8 9h1",
     clock:     "M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2",
+    edit:      "M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z",
+    droplet:   "M12 2.69l5.66 5.66a8 8 0 11-11.31 0z",
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -6643,22 +6648,33 @@ function PainelValorHora() {
 // ══════════════════════════════════════════════════════════════════════════════
 // NAVEGAÇÃO
 // ══════════════════════════════════════════════════════════════════════════════
+// Agrupado por área de uso (facilita achar no menu — antes era uma lista
+// única de 19 itens sem organização, com vários ícones repetidos entre
+// módulos diferentes, o que atrapalhava ainda mais no modo recolhido
+// (só ícone, sem legenda)). Cada módulo agora tem um ícone só dele.
 const NAV = [
-  { id: "home",       label: "Home",            icon: "home",         color: "#8B1A1A" },
-  { id: "contratos",  label: "Contratos",       icon: "document",     color: "#0D9488", desc: "Gestão de contratos" },
-  { id: "faturamento",label: "Faturamento",     icon: "dollar",       color: "#059669", desc: "Guias pendentes de faturamento" },
-  { id: "clinica",    label: "Clínica",         icon: "stethoscope",  color: "#8B1A1A", desc: "Assistencial · Ocupacional · Serviços · Agenda" },
-  { id: "atendimento",label: "Atendimento",     icon: "activity",     color: "#8B1A1A", desc: "Fila do médico · Prontuário (teste)" },
-  { id: "laboratorio",label: "Laboratório",     icon: "flask",        color: "#10B981", desc: "Exames · Diagnóstico · Ocupacional" },
-  { id: "recepcao",   label: "Recepção",        icon: "users",        color: "#D97706", desc: "Métricas por recepcionista" },
-  { id: "assistente_agenda", label: "Assistente & Chat", icon: "activity", color: "#8B1A1A", desc: "Agenda por especialidade (IA) e chat interno entre setores" },
-  { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento" },
-  { id: "pacientesdb",label: "Pacientes",    icon: "layers",       color: "#0891B2", desc: "Base · logradouros · ranking · aniversários" },
-  { id: "estoque",    label: "Estoque",         icon: "package",      color: "#0D9488", desc: "Posição, giro e validade" },
-  { id: "painel_tv",  label: "Painel TV",       icon: "monitor",      color: "#7C3AED", desc: "Tempo real · para telão" },
-  { id: "gestao",     label: "Gestão",          icon: "grid",         color: "#4F46E5", desc: "Organograma e indicadores por setor" },
-  { id: "resultados", label: "Resultados Financeiros", icon: "money-trend", color: "#7C3AED", desc: "Visão executiva para apresentação aos sócios" },
-  { id: "admin",      label: "Permissões",      icon: "settings",     color: "#374151", desc: "Gerenciar acessos" },
+  { id: "home",       label: "Home",            icon: "home",         color: "#8B1A1A", grupo: "Visão geral" },
+
+  { id: "clinica",    label: "Clínica",         icon: "stethoscope",  color: "#8B1A1A", desc: "Assistencial · Ocupacional · Serviços · Agenda", grupo: "Clínico" },
+  { id: "atendimento",label: "Atendimento",     icon: "pulse",        color: "#8B1A1A", desc: "Fila do médico · Prontuário (teste)", grupo: "Clínico" },
+  { id: "lancar_os",  label: "Lançar OS",       icon: "clock",        color: "#4F46E5", desc: "Abrir OS sem usar o Smart desktop (teste, grava em homologação)", grupo: "Clínico" },
+  { id: "laboratorio",label: "Laboratório",     icon: "flask",        color: "#10B981", desc: "Exames · Diagnóstico · Ocupacional", grupo: "Clínico" },
+  { id: "coleta",     label: "Coleta",          icon: "droplet",      color: "#0EA5E9", desc: "Fila de coleta, recebimento de amostra e impressão de etiqueta", grupo: "Clínico" },
+  { id: "recepcao",   label: "Recepção",        icon: "users",        color: "#D97706", desc: "Métricas por recepcionista", grupo: "Clínico" },
+
+  { id: "faturamento",label: "Faturamento",     icon: "dollar",       color: "#059669", desc: "Guias pendentes de faturamento", grupo: "Financeiro" },
+  { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento", grupo: "Financeiro" },
+  { id: "contratos",  label: "Contratos",       icon: "document",     color: "#0D9488", desc: "Gestão de contratos", grupo: "Financeiro" },
+
+  { id: "pacientesdb",label: "Pacientes",    icon: "layers",       color: "#0891B2", desc: "Base · logradouros · ranking · aniversários", grupo: "Gestão" },
+  { id: "estoque",    label: "Estoque",         icon: "package",      color: "#0D9488", desc: "Posição, giro e validade", grupo: "Gestão" },
+  { id: "gestao",     label: "Gestão",          icon: "grid",         color: "#4F46E5", desc: "Indicadores de gestão por setor", grupo: "Gestão" },
+  { id: "painel_tv",  label: "Painel TV",       icon: "monitor",      color: "#7C3AED", desc: "Tempo real · para telão", grupo: "Gestão" },
+  { id: "assistente_agenda", label: "Assistente & Chat", icon: "calendar", color: "#8B1A1A", desc: "Agenda por especialidade (IA) e chat interno entre setores", grupo: "Gestão" },
+
+  { id: "admin",      label: "Permissões",      icon: "settings",     color: "#374151", desc: "Gerenciar acessos", grupo: "Sistema" },
+  { id: "status",     label: "Status",          icon: "wifi",         color: "#1E293B", desc: "Status dos serviços (backend, WhatsApp, NetMonitor...)", grupo: "Sistema" },
+  { id: "editor_pdf", label: "Editor de PDF",   icon: "edit",         color: "#059669", desc: "Trocar uma palavra num PDF já emitido (ex.: ASO)", grupo: "Sistema" },
 ];
 
 const IconLayers = ({ size=18, color="currentColor" }) => (
@@ -6692,7 +6708,10 @@ const RENDER_MAP = {
   estoque:     (p) => <SecaoEstoque     periodo={p}/>,
   painel_tv:   ()  => <PainelTV/>,
   gestao:      ()  => <Gestao/>,
-  resultados:  ()  => <ResultadosFinanceiros/>,
+  status:      ()  => <StatusServicos/>,
+  editor_pdf:  ()  => <EditorPDF/>,
+  lancar_os:   ()  => <LancarOS/>,
+  coleta:      ()  => <Coleta/>,
 };
 
 
@@ -8336,24 +8355,33 @@ function AppInner() {
           </div>
 
           <div style={{ flex:1, overflowY:"auto", padding:"6px" }}>
-            {NAV.filter(n => n.id === "admin" ? user?.admin : podeVer(n.id)).map(n => {
-              const active = page === n.id;
-              return (
-                <button key={n.id} onClick={()=>{ setPage(n.id); setCollapsed(true); }}
-                  onMouseEnter={(e)=>{ const r=e.currentTarget.getBoundingClientRect(); setNavHover({ id:n.id, top:r.top+r.height/2, left:r.right }); }}
-                  onMouseLeave={()=>setNavHover(h=>h?.id===n.id?null:h)}
-                  style={{ width:44, height:44, borderRadius:10, border:"none", cursor:"pointer",
-                    background:active?"rgba(255,255,255,0.15)":"transparent",
-                    display:"flex", alignItems:"center", justifyContent:"center",
-                    margin:"0 auto 4px", position:"relative", transition:"all 0.15s" }}>
-                  <div style={{ width:30, height:30, borderRadius:8, background:active?"#fff":"rgba(255,255,255,0.15)",
-                    display:"flex", alignItems:"center", justifyContent:"center",
-                    boxShadow:active?"0 3px 8px rgba(0,0,0,0.3)":"none" }}>
-                    <Icon name={n.icon} size={15} color={active?n.color:"#fff"}/>
+            {(() => {
+              const visiveis = NAV.filter(n => ["admin","status","editor_pdf"].includes(n.id) ? user?.admin : podeVer(n.id));
+              let grupoAnterior = null;
+              return visiveis.map(n => {
+                const active = page === n.id;
+                const novoGrupo = n.grupo !== grupoAnterior;
+                grupoAnterior = n.grupo;
+                return (
+                  <div key={n.id}>
+                    {novoGrupo && <div style={{ height:1, background:"rgba(255,255,255,0.15)", margin:"6px 4px" }}/>}
+                    <button onClick={()=>{ setPage(n.id); setCollapsed(true); }}
+                      onMouseEnter={(e)=>{ const r=e.currentTarget.getBoundingClientRect(); setNavHover({ id:n.id, top:r.top+r.height/2, left:r.right }); }}
+                      onMouseLeave={()=>setNavHover(h=>h?.id===n.id?null:h)}
+                      style={{ width:44, height:44, borderRadius:10, border:"none", cursor:"pointer",
+                        background:active?"rgba(255,255,255,0.15)":"transparent",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                        margin:"0 auto 4px", position:"relative", transition:"all 0.15s" }}>
+                      <div style={{ width:30, height:30, borderRadius:8, background:active?"#fff":"rgba(255,255,255,0.15)",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                        boxShadow:active?"0 3px 8px rgba(0,0,0,0.3)":"none" }}>
+                        <Icon name={n.icon} size={15} color={active?n.color:"#fff"}/>
+                      </div>
+                    </button>
                   </div>
-                </button>
-              );
-            })}
+                );
+              });
+            })()}
           </div>
         </aside>
 
@@ -8383,29 +8411,43 @@ function AppInner() {
             display:"flex", flexDirection:"column", animation:"fadeIn 0.15s ease",
           }}>
             <div style={{ flex:1, overflowY:"auto", padding:"10px" }}>
-              {NAV.filter(n => n.id === "admin" ? user?.admin : podeVer(n.id)).map(n => {
-                const active = page === n.id;
-                return (
-                  <button key={n.id} onClick={()=>{ setPage(n.id); setCollapsed(true); }}
-                    style={{ width:"100%", display:"flex", alignItems:"center", gap:10,
-                      padding:"9px 12px", borderRadius:10, border:"none", cursor:"pointer",
-                      background:active?"rgba(255,255,255,0.15)":"transparent",
-                      borderLeft:active?"3px solid #fff":"3px solid transparent",
-                      color:active?"#fff":"rgba(255,255,255,0.8)",
-                      fontSize:13, fontWeight:active?700:500,
-                      textAlign:"left", transition:"all 0.12s", marginBottom:2 }}>
-                    <div style={{ width:28, height:28, borderRadius:8, background:active?"#fff":"rgba(255,255,255,0.15)",
-                      display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
-                      boxShadow:active?"0 3px 8px rgba(0,0,0,0.3)":"none" }}>
-                      <Icon name={n.icon} size={14} color={active?n.color:"#fff"}/>
+              {(() => {
+                const visiveis = NAV.filter(n => ["admin","status","editor_pdf"].includes(n.id) ? user?.admin : podeVer(n.id));
+                let grupoAnterior = null;
+                return visiveis.map(n => {
+                  const active = page === n.id;
+                  const novoGrupo = n.grupo !== grupoAnterior;
+                  grupoAnterior = n.grupo;
+                  return (
+                    <div key={n.id}>
+                      {novoGrupo && (
+                        <div style={{
+                          fontSize:10, fontWeight:800, color:"rgba(255,255,255,0.5)", textTransform:"uppercase",
+                          letterSpacing:".06em", padding:"10px 12px 4px", marginTop: n === visiveis[0] ? 0 : 4,
+                        }}>{n.grupo}</div>
+                      )}
+                      <button onClick={()=>{ setPage(n.id); setCollapsed(true); }}
+                        style={{ width:"100%", display:"flex", alignItems:"center", gap:10,
+                          padding:"9px 12px", borderRadius:10, border:"none", cursor:"pointer",
+                          background:active?"rgba(255,255,255,0.15)":"transparent",
+                          borderLeft:active?"3px solid #fff":"3px solid transparent",
+                          color:active?"#fff":"rgba(255,255,255,0.8)",
+                          fontSize:13, fontWeight:active?700:500,
+                          textAlign:"left", transition:"all 0.12s", marginBottom:2 }}>
+                        <div style={{ width:28, height:28, borderRadius:8, background:active?"#fff":"rgba(255,255,255,0.15)",
+                          display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
+                          boxShadow:active?"0 3px 8px rgba(0,0,0,0.3)":"none" }}>
+                          <Icon name={n.icon} size={14} color={active?n.color:"#fff"}/>
+                        </div>
+                        <div style={{ minWidth:0 }}>
+                          <div style={{ fontSize:13, fontWeight:active?700:500, lineHeight:1.2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{n.label}</div>
+                          {active && <div style={{ fontSize:10, color:"rgba(255,255,255,0.75)", marginTop:1, opacity:.9 }}>{n.desc}</div>}
+                        </div>
+                      </button>
                     </div>
-                    <div style={{ minWidth:0 }}>
-                      <div style={{ fontSize:13, fontWeight:active?700:500, lineHeight:1.2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{n.label}</div>
-                      {active && <div style={{ fontSize:10, color:"rgba(255,255,255,0.75)", marginTop:1, opacity:.9 }}>{n.desc}</div>}
-                    </div>
-                  </button>
-                );
-              })}
+                  );
+                });
+              })()}
             </div>
             <div style={{ padding:"10px 14px", borderTop:"1px solid rgba(255,255,255,0.15)", fontSize:11, color:"rgba(255,255,255,0.6)" }}>
               Parauapebas · PA · v2.0
@@ -8475,23 +8517,38 @@ function AppInner() {
               style={{ background:"none", border:"none", fontSize:22, cursor:"pointer", color:"#fff" }}>✕</button>
           </div>
           <div style={{ display:"flex", flexDirection:"column" }}>
-            {NAV.map(item => (
-              <button key={item.id} onClick={() => setPage(item.id)} style={{
-                display:"flex", alignItems:"center", gap:14, width:"100%",
-                padding:"14px 20px", background:page===item.id?"rgba(255,255,255,0.15)":"none",
-                border:"none", borderBottom:"1px solid rgba(255,255,255,0.12)", cursor:"pointer",
-                textAlign:"left", color:page===item.id?"#fff":"rgba(255,255,255,0.8)",
-                borderLeft:page===item.id?"3px solid #fff":"3px solid transparent",
-              }}>
-                <div style={{ width:36, height:36, borderRadius:10, flexShrink:0,
-                  background:page===item.id?"#fff":"rgba(255,255,255,0.15)",
-                  boxShadow:page===item.id?"0 3px 8px rgba(0,0,0,0.3)":"none",
-                  display:"flex", alignItems:"center", justifyContent:"center" }}>
-                  <Icon name={item.icon} size={18} color={page===item.id?item.color:"#fff"}/>
-                </div>
-                <span style={{ fontSize:15, fontWeight:page===item.id?700:500 }}>{item.label}</span>
-              </button>
-            ))}
+            {(() => {
+              let grupoAnterior = null;
+              return NAV.map((item, i) => {
+                const novoGrupo = item.grupo !== grupoAnterior;
+                grupoAnterior = item.grupo;
+                return (
+                  <div key={item.id}>
+                    {novoGrupo && (
+                      <div style={{
+                        fontSize:11, fontWeight:800, color:"rgba(255,255,255,0.5)", textTransform:"uppercase",
+                        letterSpacing:".06em", padding:"14px 20px 6px",
+                      }}>{item.grupo}</div>
+                    )}
+                    <button onClick={() => setPage(item.id)} style={{
+                      display:"flex", alignItems:"center", gap:14, width:"100%",
+                      padding:"14px 20px", background:page===item.id?"rgba(255,255,255,0.15)":"none",
+                      border:"none", borderBottom:"1px solid rgba(255,255,255,0.12)", cursor:"pointer",
+                      textAlign:"left", color:page===item.id?"#fff":"rgba(255,255,255,0.8)",
+                      borderLeft:page===item.id?"3px solid #fff":"3px solid transparent",
+                    }}>
+                      <div style={{ width:36, height:36, borderRadius:10, flexShrink:0,
+                        background:page===item.id?"#fff":"rgba(255,255,255,0.15)",
+                        boxShadow:page===item.id?"0 3px 8px rgba(0,0,0,0.3)":"none",
+                        display:"flex", alignItems:"center", justifyContent:"center" }}>
+                        <Icon name={item.icon} size={18} color={page===item.id?item.color:"#fff"}/>
+                      </div>
+                      <span style={{ fontSize:15, fontWeight:page===item.id?700:500 }}>{item.label}</span>
+                    </button>
+                  </div>
+                );
+              });
+            })()}
           </div>
         </div>
       )}

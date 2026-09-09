@@ -11797,7 +11797,11 @@ class LancarOSTesteRequest(BaseModel):
     tiss_tipo_saida: str = "5"          # osm_tiss_tipo_saida — dominante em RDI/RCN/RCI (>90%); raro em ROC
     tiss_tipo_atende: str | None = None # osm_tiss_tipo_atende — varia bastante (05/23/04/14/16...), sem moda clara
     regime_atend: str | None = None     # osm_regime_atend — só ~18% das OS preenchem; concentrado em Hapvida/AMS
+    osm_w_senha: str | None = None       # senha de autorização — grava em SMM_SENHA do 1º item (não em OSM),
+                                          # ~71% das OS TISS preenchem no primeiro item; opcional nos demais
     adicionar_fila: bool = True    # grava também em fle (fila do médico executante), igual o desktop faz
+    fila_destino_psv_cod: int | None = None  # override: manda pra fila de outro prestador/estação (ex.: Coleta
+                                              # Diagnóstico), independente de quem fatura o serviço (medico_executante)
 
 @app.post("/api/faturamento/lancar-os-teste")
 def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
@@ -11830,12 +11834,15 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
     # no autofill de exame de sangue, existe em produção mas não em smart_hml).
     # Confere antes de tentar o INSERT pra dar um erro claro em vez de um erro
     # de FK OSM/SMM que não diz o que realmente falhou.
-    for label, cod in (("requisitante", req.medico_requisitante), ("executante", req.medico_executante)):
+    checagens_psv = [("requisitante", req.medico_requisitante), ("executante", req.medico_executante)]
+    if req.fila_destino_psv_cod is not None:
+        checagens_psv.append(("da fila", req.fila_destino_psv_cod))
+    for label, cod in checagens_psv:
         cur.execute("SELECT 1 FROM psv WHERE psv_cod=?", (cod,))
         if cur.fetchone() is None:
             conn.close()
-            raise HTTPException(400, f"Médico {label} (código {cod}) existe em produção mas não em smart_hml — "
-                                      "essa tela só grava em homologação. Escolha outro médico pra testar.")
+            raise HTTPException(400, f"Prestador {label} (código {cod}) existe em produção mas não em smart_hml — "
+                                      "essa tela só grava em homologação. Escolha outro pra testar.")
 
     agora = datetime.now()
     avisos = []
@@ -11881,8 +11888,9 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
                                   OSM_MREQ, OSM_STR, OSM_IND_URG, OSM_DT_RESULT, OSM_ATEND,
                                   OSM_USR_LOGIN_CAD, OSM_MREQ_IND_SLINE, osm_ind_gestante,
                                   osm_ind_lactante, OSM_OBS, OSM_TISS_TIPO_SAIDA,
-                                  OSM_TISS_TIPO_ATENDE, osm_regime_atend, osm_sus_ind_prog_transp)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                  OSM_TISS_TIPO_ATENDE, osm_regime_atend, osm_sus_ind_prog_transp,
+                                  osm_dt_solic)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 serie, candidato, req.paciente, agora, convenio, 'A',
                 req.medico_requisitante, req.setor, 'S' if req.urgente else 'N',
@@ -11890,6 +11898,7 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
                 req.login, 'S', 'N', 'N',
                 req.observacao or "Lançado via Dashboard (teste smart_hml)",
                 req.tiss_tipo_saida, req.tiss_tipo_atende, req.regime_atend, 'N',
+                agora,
             ))
             num = candidato
             break
@@ -11916,8 +11925,8 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
                                   SMM_EXEC, SMM_SFAT, SMM_REP, SMM_STR, SMM_MED, SMM_VLCH, SMM_VLR,
                                   SMM_TAB_COD, SMM_USR_LOGIN_LANC, SMM_DTHR_LANC, SMM_DTHR_EXEC,
                                   SMM_DTHR_ALTER, SMM_MREQ_1, SMM_MREQ_2, SMM_MREQ_3, SMM_PAC_REG,
-                                  SMM_TIPO_FATURA, SMM_IND_RESULT_PARCIAL, SMM_IND_URG)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                  SMM_TIPO_FATURA, SMM_IND_RESULT_PARCIAL, SMM_IND_URG, SMM_SENHA)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 serie, num, i, item["tipo"], item["cod"], item["qt"],
                 'A', 'F', req.login, item["setor_execucao"], req.medico_executante,
@@ -11925,6 +11934,10 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
                 tabela, req.login, agora, agora,
                 agora, 'S', 'S', 'S', req.paciente,
                 'E', 'N', 'S' if req.urgente else 'N',
+                # Senha de autorização — dado real (produção, 90 dias) mostra que fica
+                # em SMM_SENHA do primeiro item (~71% preenchido), não em OSM_W_SENHA
+                # (praticamente sempre vazio quando SMM_SENHA existe).
+                req.osm_w_senha if i == 1 else None,
             ))
         conn.commit()
     except pyodbc.Error as e:
@@ -11932,22 +11945,26 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
         conn.close()
         raise HTTPException(400, f"Erro ao gravar itens em smart_hml: {e}")
 
-    # Adiciona o paciente à fila do médico executante em `fle` — mesma tabela que
-    # o Painel de Senhas e /api/atendimento/fila leem. Confirmado com dado real
-    # (produção, 05/09/26): quando uma OS é aberta pelo Smart desktop, ele grava
-    # em `fle` uma linha com FLE_PROCED='OS ', FLE_STATUS='A' (aguardando),
-    # FLE_PSV_COD/FLE_PSV_RESP = médico executante (smm_med), FLE_OSM_SERIE/NUM
-    # e FLE_SMM_NUM=1 apontando pro item recém-lançado. FLE_ORDEM é a posição do
-    # paciente na fila daquele médico naquele dia — não é identity, incrementa
-    # por (FLE_PSV_COD, dia): MAX(FLE_ORDEM)+1. Feito como passo separado, depois
-    # do commit da OS — se falhar, a OS já lançada continua válida, só vira aviso.
+    # Adiciona o paciente numa fila em `fle` — mesma tabela que o Painel de
+    # Senhas e /api/atendimento/fila leem. Confirmado com dado real (produção,
+    # 05/09/26): quando uma OS é aberta pelo Smart desktop, ele grava em `fle`
+    # uma linha com FLE_PROCED='OS ', FLE_STATUS='A' (aguardando), FLE_OSM_SERIE/
+    # NUM e FLE_SMM_NUM=1 apontando pro item recém-lançado. FLE_ORDEM é a posição
+    # do paciente na fila naquele dia — não é identity, incrementa por
+    # (FLE_PSV_COD, dia): MAX(FLE_ORDEM)+1.
+    # FLE_PSV_COD é o dono da fila — por padrão o médico executante (smm_med),
+    # mas pode ser outro prestador/estação (fila_destino_psv_cod, ex.: "Coleta
+    # Diagnóstico"), já que quem fatura o serviço nem sempre é quem recebe o
+    # paciente na prática. Feito como passo separado, depois do commit da OS —
+    # se falhar, a OS já lançada continua válida, só vira aviso.
     fila_info = None
     if req.adicionar_fila:
+        psv_fila = req.fila_destino_psv_cod or req.medico_executante
         try:
             cur.execute(
                 "SELECT ISNULL(MAX(CAST(FLE_ORDEM AS INT)),0)+1 FROM fle "
                 "WHERE FLE_PSV_COD=? AND CAST(FLE_DTHR_CHEGADA AS DATE)=CAST(GETDATE() AS DATE)",
-                (req.medico_executante,),
+                (psv_fila,),
             )
             ordem = cur.fetchone()[0]
             cur.execute("""
@@ -11957,13 +11974,13 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
                                   FLE_SMM_NUM, FLE_MARC_EXTRA, FLE_VERSAO)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
-                agora, req.medico_executante, req.setor, req.paciente, ordem,
-                'A', req.login, req.medico_executante, agora,
+                agora, psv_fila, req.setor, req.paciente, ordem,
+                'A', req.login, psv_fila, agora,
                 agora, 'OS ', serie, num,
                 1, '   ', 'Dashboard',
             ))
             conn.commit()
-            fila_info = {"adicionado": True, "psv_cod": req.medico_executante, "ordem": ordem}
+            fila_info = {"adicionado": True, "psv_cod": psv_fila, "ordem": ordem}
         except pyodbc.Error as e:
             conn.rollback()
             avisos.append(f"OS lançada, mas não foi possível adicionar à fila (fle): {e}")
@@ -12052,6 +12069,260 @@ def faturamento_adicionar_fila_senha_teste(req: AdicionarFilaSenhaRequest):
 
     conn.close()
     return {"ok": True, "ambiente": "smart_hml", "senha": senha, "fila": fila_nome}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COLETA — recebimento de amostra e impressão de etiqueta
+# Diferente da prova de conceito de "Lançar OS": aqui lê/grava direto em
+# produção (get_conn/query), porque precisa funcionar com qualquer OS,
+# inclusive as lançadas pelo Smart desktop (não só as de teste do Dashboard).
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/coleta/fila")
+def coleta_fila(fila_psv_cod: int = 9126):
+    """
+    Fila de pacientes aguardando coleta — lê `fle` em produção, mesma fonte do
+    Painel de Senhas. Default psv_cod 9126 (Jessica Oliveira Ferreira) — dona
+    de fato da fila de Laboratório em produção (confirmado com dado real:
+    ~96% dos itens LAB usam esse FLE_PSV_COD). Use fila_psv_cod pra ver outra.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    rows = query("""
+        SELECT
+            fle.FLE_OSM_SERIE AS os_serie, fle.FLE_OSM_NUM AS os_num,
+            fle.FLE_PAC_REG AS pac_reg, RTRIM(pac.pac_nome) AS paciente,
+            CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
+            fle.FLE_DTHR_CHEGADA AS chegada, fle.FLE_PREFERENCIAL AS preferencial,
+            CAST(fle.FLE_ORDEM AS INT) AS ordem
+        FROM fle
+        JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        WHERE fle.FLE_PSV_COD = ?
+          AND CAST(fle.FLE_DTHR_CHEGADA AS DATE) = ?
+          AND fle.FLE_STATUS = 'A'
+          AND fle.FLE_OSM_SERIE IS NOT NULL
+        ORDER BY fle.FLE_PREFERENCIAL DESC, fle.FLE_ORDEM ASC
+    """, (fila_psv_cod, hoje))
+    for r in rows:
+        if hasattr(r.get("chegada"), "strftime"):
+            r["chegada"] = r["chegada"].strftime("%H:%M")
+    return rows
+
+
+@app.get("/api/coleta/os/{serie}/{num}")
+def coleta_os_detalhe(serie: int, num: int):
+    """Itens da OS (produção) pra tela de recebimento — já mostra o que já foi coletado antes."""
+    pac_rows = query("""
+        SELECT RTRIM(pac.pac_nome) AS paciente, CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
+               RTRIM(ISNULL(cnv.cnv_nome, osm.osm_cnv)) AS convenio
+        FROM osm
+        JOIN pac ON pac.pac_reg = osm.osm_pac
+        LEFT JOIN cnv ON RTRIM(cnv.cnv_cod) = RTRIM(osm.osm_cnv)
+        WHERE osm.osm_serie = ? AND osm.osm_num = ?
+    """, (serie, num))
+    if not pac_rows:
+        raise HTTPException(404, "OS não encontrada.")
+
+    itens = query("""
+        SELECT smm.SMM_NUM AS num, RTRIM(smm.SMM_COD) AS cod,
+               RTRIM(ISNULL(smk.SMK_NOME, '')) AS nome,
+               smm.SMM_DTHR_COLETA AS coleta_dthr,
+               RTRIM(ISNULL(smm.SMM_USR_LOGIN_COLETA, '')) AS coleta_login,
+               RTRIM(ISNULL(smm.SMM_COD_AMOSTRA, '')) AS cod_amostra
+        FROM smm
+        LEFT JOIN smk ON RTRIM(smk.SMK_TIPO) = RTRIM(smm.SMM_TPCOD) AND RTRIM(smk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE smm.SMM_OSM_SERIE = ? AND smm.SMM_OSM = ?
+        ORDER BY smm.SMM_NUM
+    """, (serie, num))
+    for it in itens:
+        if hasattr(it.get("coleta_dthr"), "strftime"):
+            it["coleta_dthr"] = it["coleta_dthr"].strftime("%d/%m/%Y %H:%M")
+
+    p = pac_rows[0]
+    return {"paciente": p["paciente"], "nascimento": p["nascimento"], "convenio": p["convenio"], "itens": itens}
+
+
+class ReceberAmostraRequest(BaseModel):
+    serie: int
+    num: int
+    itens: list[int]  # SMM_NUM dos itens recebidos
+    login: str
+
+
+@app.post("/api/coleta/receber")
+def coleta_receber_amostra(req: ReceberAmostraRequest):
+    """
+    Marca os itens como coletados (SMM_DTHR_COLETA/SMM_USR_LOGIN_COLETA) e
+    encerra a espera na fila (FLE_STATUS 'A'->'X'). Grava em PRODUÇÃO.
+    """
+    if not req.itens:
+        raise HTTPException(400, "Informe ao menos um item.")
+    conn = get_conn()
+    cur = conn.cursor()
+    agora = datetime.now()
+    placeholders = ",".join("?" for _ in req.itens)
+    try:
+        # SMM_USR_LOGIN_COLETA não é o login comum — tem FK pra tabela COL
+        # (cadastro específico de coletadores) e na prática não é preenchido
+        # (0 ocorrências em 30 dias de dado real); só a data/hora importa.
+        cur.execute(f"""
+            UPDATE smm SET SMM_DTHR_COLETA=?
+            WHERE SMM_OSM_SERIE=? AND SMM_OSM=? AND SMM_NUM IN ({placeholders})
+        """, (agora, req.serie, req.num, *req.itens))
+        atualizados = cur.rowcount
+        # FLE_STATUS='Z' é o status terminal real das linhas tipo OS (confirmado
+        # com dado real: todo registro 'Z' tem FLE_DTHR_FINAL preenchido e
+        # FLE_DTHR_ATENDIMENTO vazio). 'X' é outra coisa — usado quando o médico
+        # chama o paciente direto pelo Smart (FLE_DTHR_ATENDIMENTO preenchido),
+        # não tem relação com coleta de amostra.
+        cur.execute("""
+            UPDATE fle SET FLE_STATUS='Z', FLE_DTHR_FINAL=?, FLE_USR_FINAL=?
+            WHERE FLE_OSM_SERIE=? AND FLE_OSM_NUM=? AND FLE_STATUS='A'
+        """, (agora, req.login, req.serie, req.num))
+        conn.commit()
+    except pyodbc.Error as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(400, f"Erro ao gravar recebimento: {e}")
+    conn.close()
+    return {"ok": True, "itens_atualizados": atualizados}
+
+
+# Nome amigável da recepção — mesmo texto usado no Painel de Senhas
+# (painel_fila_pacientes) quando STR_NOME vem vazio/genérico.
+_SETORES_RECEPCAO_NOME = {
+    "RDI": "Recepção Diagnóstico", "ROC": "Recepção Ocupacional",
+    "RPS": "Recepção Pro Saúde", "RCN": "Recepção Consultórios",
+    "RCI": "Recepção Censo Imagem",
+}
+
+
+def _desenhar_etiqueta_coleta(c, d):
+    """
+    Etiqueta 50x40mm — layout confirmado com etiqueta real do Smart: nome do
+    paciente (maior), nome da mãe, data/hora da OS + nascimento lado a lado,
+    código de barras (nº da OS), nº da OS, nome da recepção, nome do exame,
+    e o texto do tubo/amostra vindo da tabela ETI (ex.: "HP-SORO").
+    """
+    from reportlab.lib.units import mm as _mm
+    from reportlab.graphics.barcode import code128 as _code128
+    LARGURA, ALTURA = 50 * _mm, 40 * _mm
+    c.setPageSize((LARGURA, ALTURA))
+
+    y = ALTURA - 4 * _mm
+    c.setFont("Helvetica-Bold", 8.5)
+    c.drawString(2 * _mm, y, d["paciente"][:32])
+
+    y -= 3.6 * _mm
+    c.setFont("Helvetica", 5.8)
+    c.drawString(2 * _mm, y, f'Mae: {d["mae"][:34]}')
+
+    y -= 3.8 * _mm
+    c.setFont("Helvetica", 5.8)
+    c.drawString(2 * _mm, y, f'OS: {d["os_dthr"]}')
+    c.drawRightString(LARGURA - 2 * _mm, y, f'Nasc: {d["nascimento"]}')
+
+    barcode = _code128.Code128(d["os_barcode"], barHeight=6 * _mm, barWidth=0.28 * _mm)
+    bx = (LARGURA - barcode.width) / 2
+    barcode_bottom_y = y - 4 * _mm - 6 * _mm
+    barcode.drawOn(c, bx, barcode_bottom_y)
+
+    y = barcode_bottom_y - 3.2 * _mm
+    c.setFont("Helvetica-Bold", 7)
+    c.drawCentredString(LARGURA / 2, y, d["os"])
+
+    y -= 3.6 * _mm
+    c.setFont("Helvetica", 5.8)
+    c.drawCentredString(LARGURA / 2, y, d["recepcao"][:36])
+
+    y -= 3.8 * _mm
+    c.setFont("Helvetica-Bold", 7)
+    c.drawCentredString(LARGURA / 2, y, d["exame"][:30])
+
+    y -= 3.6 * _mm
+    c.setFont("Helvetica", 6.2)
+    c.drawCentredString(LARGURA / 2, y, d["etiqueta_amostra"][:30])
+
+    c.showPage()
+
+
+@app.get("/api/coleta/etiqueta/{serie}/{num}")
+def coleta_etiqueta_pdf(serie: int, num: int, background_tasks: BackgroundTasks):
+    """
+    Gera o PDF de etiquetas da OS — uma por tubo. O tipo de tubo/amostra vem
+    de ETI_COD (confirmado com etiqueta real): usa SMM_ETI_COD_AMOSTRA quando
+    a OS já rodou a lógica de coleta do Smart desktop, e cai para o padrão do
+    catálogo (SMK_ETI_COD) quando ainda não tem (ex.: OS lançada pelo
+    Dashboard). Itens sem nenhum dos dois códigos saem um por etiqueta, sem
+    agrupar — não arrisca juntar exame incompatível no mesmo tubo por engano.
+    Com mais de 1 exame no mesmo tubo, mostra a contagem em vez de listar os
+    nomes (não cabem sem cortar numa etiqueta de 50mm).
+    """
+    import tempfile, uuid
+    from reportlab.pdfgen import canvas as _pdf_canvas
+
+    pac_rows = query("""
+        SELECT RTRIM(pac.pac_nome) AS paciente, CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
+               RTRIM(ISNULL(pac.PAC_NOME_MAE, '')) AS mae,
+               osm.osm_dthr AS os_dthr, RTRIM(osm.osm_str) AS setor,
+               RTRIM(ISNULL(str.str_nome, '')) AS setor_nome
+        FROM osm
+        JOIN pac ON pac.pac_reg = osm.osm_pac
+        LEFT JOIN str ON RTRIM(str.str_cod) = RTRIM(osm.osm_str)
+        WHERE osm.osm_serie = ? AND osm.osm_num = ?
+    """, (serie, num))
+    if not pac_rows:
+        raise HTTPException(404, "OS não encontrada.")
+    p = pac_rows[0]
+    recepcao = p["setor_nome"] or _SETORES_RECEPCAO_NOME.get(p["setor"], p["setor"])
+    os_dthr_txt = p["os_dthr"].strftime("%d/%m %H:%M") if hasattr(p["os_dthr"], "strftime") else str(p["os_dthr"] or "")
+
+    itens = query("""
+        SELECT smm.SMM_NUM AS num, RTRIM(ISNULL(smk.SMK_NOME, smm.SMM_COD)) AS nome,
+               RTRIM(ISNULL(smm.SMM_ETI_COD_AMOSTRA, ISNULL(smk.SMK_ETI_COD, ''))) AS eti_cod
+        FROM smm
+        LEFT JOIN smk ON RTRIM(smk.SMK_TIPO) = RTRIM(smm.SMM_TPCOD) AND RTRIM(smk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE smm.SMM_OSM_SERIE = ? AND smm.SMM_OSM = ?
+        ORDER BY smm.SMM_NUM
+    """, (serie, num))
+    if not itens:
+        raise HTTPException(400, "OS sem itens.")
+
+    # Resolve o texto de cada código de tubo/amostra na tabela ETI (cadastro
+    # de etiquetas do Smart) — ex.: ETI_COD='HP' -> ETI_NOME='HP-SORO'.
+    cods = sorted({it["eti_cod"] for it in itens if it["eti_cod"]})
+    eti_nomes = {}
+    if cods:
+        placeholders = ",".join("?" for _ in cods)
+        eti_rows = query(f"SELECT RTRIM(ETI_COD) AS cod, RTRIM(ETI_NOME) AS nome FROM ETI WHERE RTRIM(ETI_COD) IN ({placeholders})", tuple(cods))
+        eti_nomes = {r["cod"]: r["nome"] for r in eti_rows}
+
+    grupos = {}
+    avulsos = []
+    for it in itens:
+        if it["eti_cod"]:
+            grupos.setdefault(it["eti_cod"], []).append(it["nome"])
+        else:
+            avulsos.append((None, [it["nome"]]))
+    etiquetas = [(cod, nomes) for cod, nomes in grupos.items()] + avulsos
+
+    os_texto = f"{serie}-{num}"
+    os_barcode = f"{serie}{num}"
+
+    tmp_dir = tempfile.gettempdir()
+    pdf_path = os.path.join(tmp_dir, f"etiqueta_{serie}_{num}_{uuid.uuid4().hex[:8]}.pdf")
+    c = _pdf_canvas.Canvas(pdf_path)
+    for cod, nomes in etiquetas:
+        exame = nomes[0] if len(nomes) == 1 else f"{len(nomes)} exames (ver OS)"
+        etiqueta_amostra = eti_nomes.get(cod, cod or "")
+        _desenhar_etiqueta_coleta(c, {
+            "paciente": p["paciente"], "mae": p["mae"], "nascimento": p["nascimento"],
+            "os_dthr": os_dthr_txt, "os": os_texto, "os_barcode": os_barcode,
+            "recepcao": recepcao, "exame": exame, "etiqueta_amostra": etiqueta_amostra,
+        })
+    c.save()
+
+    background_tasks.add_task(lambda: os.remove(pdf_path) if os.path.exists(pdf_path) else None)
+    return FileResponse(pdf_path, media_type="application/pdf", filename=f"etiqueta_{serie}_{num}.pdf", background=background_tasks)
 
 
 @app.get("/api/faturamento/buscar-medico")
