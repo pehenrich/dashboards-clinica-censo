@@ -40,6 +40,7 @@ export default function Coleta() {
   const [fila, setFila] = useState(FILAS_PADRAO[0]);
   const [buscaFila, setBuscaFila] = useState("");
   const [resultadosFila, setResultadosFila] = useState(null);
+  const [mostrarColetados, setMostrarColetados] = useState(false);
 
   const [pacientes, setPacientes] = useState([]);
   const [carregandoFila, setCarregandoFila] = useState(false);
@@ -48,16 +49,17 @@ export default function Coleta() {
   const [carregandoOs, setCarregandoOs] = useState(false);
   const [itensMarcados, setItensMarcados] = useState({});
   const [enviando, setEnviando] = useState(false);
+  const [chamando, setChamando] = useState(false);
   const [erro, setErro] = useState(null);
   const [aviso, setAviso] = useState(null);
 
   const carregarFila = useCallback(() => {
     if (!fila) return;
     setCarregandoFila(true);
-    fetch(`${API}/api/coleta/fila?fila_psv_cod=${fila.codigo}`)
+    fetch(`${API}/api/coleta/fila?fila_psv_cod=${fila.codigo}&mostrar_coletados=${mostrarColetados}`)
       .then(r => r.json()).then(setPacientes).catch(() => setPacientes([]))
       .finally(() => setCarregandoFila(false));
-  }, [fila]);
+  }, [fila, mostrarColetados]);
 
   useEffect(() => { carregarFila(); }, [carregarFila]);
 
@@ -82,7 +84,7 @@ export default function Coleta() {
       .then(d => {
         setOsDetalhe(d);
         const marcados = {};
-        d.itens.forEach(it => { marcados[it.num] = !it.coleta_dthr; });
+        d.itens.forEach(it => { marcados[it.num] = !it.coleta_dthr && it.exame_sangue === 1; });
         setItensMarcados(marcados);
       })
       .catch(() => setErro("Não foi possível carregar a OS."))
@@ -115,7 +117,33 @@ export default function Coleta() {
 
   const imprimirEtiqueta = () => {
     if (!selecionado) return;
-    window.open(`${API}/api/coleta/etiqueta/${selecionado.os_serie}/${selecionado.os_num}`, "_blank");
+    const itens = Object.keys(itensMarcados).filter(n => itensMarcados[n]).map(Number);
+    const qs = itens.length > 0 ? `?itens=${itens.join(",")}` : "";
+    window.open(`${API}/api/coleta/etiqueta/${selecionado.os_serie}/${selecionado.os_num}${qs}`, "_blank");
+  };
+
+  const chamarPaciente = async () => {
+    if (!selecionado) return;
+    setChamando(true); setErro(null); setAviso(null);
+    try {
+      const resp = await fetch(`${API}/api/coleta/chamar`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ serie: selecionado.os_serie, num: selecionado.os_num, login }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || "Erro ao chamar paciente.");
+      if (!data.itens_atualizados) {
+        setAviso("Paciente já havia sido chamado.");
+      } else {
+        setAviso("📢 Paciente chamado no painel.");
+      }
+      setSelecionado(prev => prev ? { ...prev, chamado: 1 } : prev);
+      carregarFila();
+    } catch (e) {
+      setErro(String(e.message || e));
+    } finally {
+      setChamando(false);
+    }
   };
 
   return (
@@ -137,6 +165,11 @@ export default function Coleta() {
               border: "none", background: "transparent", color: COR, cursor: "pointer", fontSize: 13, fontWeight: 700,
             }}>⟳</button>
           </div>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, fontSize: 12, color: "#64748B", cursor: "pointer" }}>
+            <input type="checkbox" checked={mostrarColetados} onChange={e => setMostrarColetados(e.target.checked)} />
+            Mostrar já coletados hoje
+          </label>
 
           <div style={{ position: "relative", marginBottom: 12 }}>
             <input type="text" value={buscaFila} onChange={e => setBuscaFila(e.target.value)}
@@ -170,15 +203,21 @@ export default function Coleta() {
               {pacientes.map(p => (
                 <div key={`${p.os_serie}-${p.os_num}`} onClick={() => abrirPaciente(p)} style={{
                   padding: "10px 12px", borderRadius: 10, cursor: "pointer",
+                  opacity: p.coletado === 1 ? 0.6 : 1,
                   border: selecionado?.os_serie === p.os_serie && selecionado?.os_num === p.os_num ? `2px solid ${COR}` : "1.5px solid #F1F5F9",
-                  background: selecionado?.os_serie === p.os_serie && selecionado?.os_num === p.os_num ? `${COR}0D` : "#FAFBFC",
+                  background: selecionado?.os_serie === p.os_serie && selecionado?.os_num === p.os_num ? `${COR}0D` : p.coletado === 1 ? "#F8FAFC" : "#FAFBFC",
                 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ fontSize: 13, fontWeight: 700, color: "#0F172A" }}>{p.paciente}</span>
-                    {p.preferencial === "S" && <span style={{ fontSize: 9, fontWeight: 800, color: "#DC2626", background: "#FEF2F2", padding: "1px 6px", borderRadius: 99 }}>PREF</span>}
+                    <div style={{ display: "flex", gap: 4 }}>
+                      {p.coletado === 1 && <span style={{ fontSize: 9, fontWeight: 800, color: "#059669", background: "#ECFDF5", padding: "1px 6px", borderRadius: 99 }}>✓ COLETADO</span>}
+                      {p.chamado === 1 && p.coletado !== 1 && <span style={{ fontSize: 9, fontWeight: 800, color: "#0369A1", background: "#EFF6FF", padding: "1px 6px", borderRadius: 99 }}>📢 CHAMADO</span>}
+                      {p.preferencial === "S" && <span style={{ fontSize: 9, fontWeight: 800, color: "#DC2626", background: "#FEF2F2", padding: "1px 6px", borderRadius: 99 }}>PREF</span>}
+                    </div>
                   </div>
                   <div style={{ fontSize: 11, color: "#94A3B8" }}>
                     OS {p.os_serie}-{p.os_num} · chegou {p.chegada}{idade(p.nascimento) != null ? ` · ${idade(p.nascimento)} anos` : ""}
+                    {p.coletado === 1 && p.coletado_em ? ` · coletado ${p.coletado_em}` : (p.chamado === 1 && p.chamado_em ? ` · chamado ${p.chamado_em}` : "")}
                   </div>
                 </div>
               ))}
@@ -196,15 +235,25 @@ export default function Coleta() {
             <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
                 <div>
-                  <div style={{ fontSize: 16, fontWeight: 900, color: "#0F172A" }}>{osDetalhe.paciente}</div>
+                  <div style={{ fontSize: 16, fontWeight: 900, color: "#0F172A" }}>
+                    {osDetalhe.paciente}
+                    {selecionado?.coletado === 1 && <span style={{ fontSize: 11, fontWeight: 800, color: "#059669", background: "#ECFDF5", padding: "2px 8px", borderRadius: 99, marginLeft: 8, verticalAlign: "middle" }}>✓ COLETADO {selecionado?.coletado_em || ""}</span>}
+                  </div>
                   <div style={{ fontSize: 12, color: "#94A3B8" }}>
                     Nasc: {osDetalhe.nascimento} · OS {selecionado.os_serie}-{selecionado.os_num} · {osDetalhe.convenio}
                   </div>
                 </div>
-                <button onClick={imprimirEtiqueta} style={{
-                  padding: "9px 16px", borderRadius: 10, border: "none",
-                  background: `linear-gradient(135deg,${COR},${COR2})`, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer",
-                }}>🏷️ Imprimir etiqueta</button>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={chamarPaciente} disabled={chamando || selecionado?.chamado === 1 || selecionado?.coletado === 1} style={{
+                    padding: "9px 16px", borderRadius: 10, border: `1.5px solid ${COR}`,
+                    background: (selecionado?.chamado === 1 || selecionado?.coletado === 1) ? "#F1F5F9" : "#fff", color: (selecionado?.chamado === 1 || selecionado?.coletado === 1) ? "#94A3B8" : COR2, fontWeight: 700, fontSize: 12.5,
+                    cursor: (chamando || selecionado?.chamado === 1 || selecionado?.coletado === 1) ? "not-allowed" : "pointer",
+                  }}>{selecionado?.chamado === 1 ? "📢 Já chamado" : chamando ? "Chamando..." : "📢 Chamar no painel"}</button>
+                  <button onClick={imprimirEtiqueta} style={{
+                    padding: "9px 16px", borderRadius: 10, border: "none",
+                    background: `linear-gradient(135deg,${COR},${COR2})`, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer",
+                  }}>🏷️ Imprimir etiqueta</button>
+                </div>
               </div>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
@@ -238,12 +287,12 @@ export default function Coleta() {
                 </div>
               )}
 
-              <button onClick={receberAmostra} disabled={enviando} style={{
+              <button onClick={receberAmostra} disabled={enviando || selecionado?.coletado === 1} style={{
                 width: "100%", padding: "14px 20px", borderRadius: 12, border: "none",
-                background: enviando ? "#CBD5E1" : `linear-gradient(135deg,${COR},${COR2})`,
-                color: "#fff", fontSize: 14, fontWeight: 800, cursor: enviando ? "not-allowed" : "pointer",
+                background: (enviando || selecionado?.coletado === 1) ? "#CBD5E1" : `linear-gradient(135deg,${COR},${COR2})`,
+                color: "#fff", fontSize: 14, fontWeight: 800, cursor: (enviando || selecionado?.coletado === 1) ? "not-allowed" : "pointer",
               }}>
-                {enviando ? "Registrando..." : "✓ Receber amostra selecionada"}
+                {selecionado?.coletado === 1 ? "✓ Já recebido" : enviando ? "Registrando..." : "✓ Receber amostra selecionada"}
               </button>
             </>
           ) : (

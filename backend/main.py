@@ -856,6 +856,167 @@ def chat_marcar_lido(payload: ChatLidoRequest):
     return {"ok": True}
 
 
+# ── Indicadores de Gestão (módulo Gestão) ─────────────────────────────────────
+@app.get("/api/indicadores/setores")
+def indicadores_setores():
+    from indicadores import listar_setores
+    return listar_setores()
+
+
+@app.get("/api/indicadores")
+def indicadores_listar(periodo: str, setor: str | None = None):
+    """`periodo` no formato YYYY-MM. `setor` opcional filtra o catálogo."""
+    from indicadores import listar_indicadores
+    return listar_indicadores(periodo, setor)
+
+
+class IndicadorRequest(BaseModel):
+    setor: str
+    indicador: str
+    objetivo: str | None = None
+    formula: str | None = None
+    meta: str | None = None
+    periodicidade: str | None = None
+    responsavel: str | None = None
+
+
+@app.post("/api/indicadores")
+def indicadores_criar(req: IndicadorRequest):
+    from indicadores import criar_indicador
+    novo_id = criar_indicador(req.setor, req.indicador, req.objetivo, req.formula, req.meta, req.periodicidade, req.responsavel)
+    return {"ok": True, "id": novo_id}
+
+
+@app.put("/api/indicadores/{indicador_id}")
+def indicadores_atualizar(indicador_id: int, req: IndicadorRequest):
+    from indicadores import atualizar_indicador
+    try:
+        atualizar_indicador(indicador_id, req.setor, req.indicador, req.objetivo, req.formula, req.meta, req.periodicidade, req.responsavel)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/indicadores/{indicador_id}")
+def indicadores_excluir(indicador_id: int):
+    from indicadores import excluir_indicador
+    try:
+        excluir_indicador(indicador_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+class IndicadorResultadoRequest(BaseModel):
+    periodo: str
+    resultado: str | None = None
+    status: str | None = None
+    plano_acao: str | None = None
+    usuario: str
+
+
+@app.post("/api/indicadores/{indicador_id}/resultados")
+def indicadores_lancar_resultado(indicador_id: int, req: IndicadorResultadoRequest):
+    from indicadores import lancar_resultado
+    try:
+        lancar_resultado(indicador_id, req.periodo, req.resultado, req.status, req.plano_acao, req.usuario)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/indicadores/{indicador_id}/historico")
+def indicadores_historico(indicador_id: int, limite: int = 12):
+    from indicadores import historico_resultados
+    return historico_resultados(indicador_id, limite)
+
+
+@app.get("/api/indicadores/dashboard-setor")
+def indicadores_dashboard_setor(setor: str, periodo: str, n_periodos: int = 12):
+    from indicadores import dashboard_setor
+    return dashboard_setor(setor, periodo, n_periodos)
+
+
+# ── Motor de fórmulas dos indicadores ──────────────────────────────────────────
+@app.get("/api/indicadores/calculos-automaticos")
+def indicadores_calculos_automaticos():
+    from indicadores import listar_calculos_automaticos
+    return listar_calculos_automaticos()
+
+
+class IndicadorExpressaoRequest(BaseModel):
+    expressao: str | None = None
+
+
+@app.put("/api/indicadores/{indicador_id}/expressao")
+def indicadores_salvar_expressao(indicador_id: int, req: IndicadorExpressaoRequest):
+    from indicadores import salvar_expressao
+    try:
+        salvar_expressao(indicador_id, req.expressao)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/indicadores/{indicador_id}/variaveis")
+def indicadores_listar_variaveis(indicador_id: int):
+    from indicadores import listar_variaveis
+    return listar_variaveis(indicador_id)
+
+
+class VariavelRequest(BaseModel):
+    chave: str
+    label: str
+    tipo: str  # 'automatico' | 'manual'
+    calculo_id: str | None = None
+    ordem: int = 0
+
+
+@app.post("/api/indicadores/{indicador_id}/variaveis")
+def indicadores_criar_variavel(indicador_id: int, req: VariavelRequest):
+    from indicadores import criar_variavel
+    try:
+        novo_id = criar_variavel(indicador_id, req.chave, req.label, req.tipo, req.calculo_id, req.ordem)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "id": novo_id}
+
+
+@app.delete("/api/indicadores/variaveis/{variavel_id}")
+def indicadores_excluir_variavel(variavel_id: int):
+    from indicadores import excluir_variavel
+    try:
+        excluir_variavel(variavel_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True}
+
+
+class VariavelValorRequest(BaseModel):
+    periodo: str
+    valor: float | None = None
+    usuario: str
+
+
+@app.post("/api/indicadores/variaveis/{variavel_id}/valor")
+def indicadores_lancar_valor_variavel(variavel_id: int, req: VariavelValorRequest):
+    from indicadores import lancar_valor_variavel
+    try:
+        lancar_valor_variavel(variavel_id, req.periodo, req.valor, req.usuario)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/indicadores/{indicador_id}/calcular")
+def indicadores_calcular(indicador_id: int, periodo: str):
+    from indicadores import calcular_indicador
+    try:
+        return calcular_indicador(indicador_id, periodo)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
 # ── ENDPOINT: Salvar permissões de um usuário ─────────────────────────────────
 class PermissaoRequest(BaseModel):
     login:       str
@@ -904,8 +1065,18 @@ def salvar_permissoes(req: PermissaoRequest):
 # ── ENDPOINT: Módulos disponíveis ─────────────────────────────────────────────
 @app.get("/api/auth/modulos")
 def auth_modulos():
-    """Retorna lista de todos os módulos do sistema."""
-    return TODOS_MODULOS
+    """Retorna lista de todos os módulos do sistema, incluindo um módulo de
+    permissão sintético por setor de indicadores (ex.: 'indicadores_laboratorio'),
+    gerado dinamicamente a partir do catálogo — assim, cadastrar um setor novo
+    em Indicadores já cria a permissão correspondente automaticamente."""
+    modulos = list(TODOS_MODULOS)
+    try:
+        from indicadores import listar_setores, slug_setor
+        for s in listar_setores():
+            modulos.append({"id": f"indicadores_{slug_setor(s)}", "label": f"Indicadores · {s}"})
+    except Exception as e:
+        print(f"[Auth] Erro ao listar setores de indicadores: {e}")
+    return modulos
 
 @app.get("/api/auth/diagnostico/{login}")
 def auth_diagnostico(login: str):
@@ -997,6 +1168,12 @@ async def startup_event():
         inicializar_db_chat()
     except Exception as e:
         print(f"[Startup] Erro ao iniciar DB do chat_interno: {e}")
+    try:
+        from indicadores import inicializar_db as inicializar_db_indicadores, set_query_func as set_query_func_indicadores
+        inicializar_db_indicadores()
+        set_query_func_indicadores(query)
+    except Exception as e:
+        print(f"[Startup] Erro ao iniciar DB do indicadores: {e}")
     if _WPP_AVAILABLE:
         try:
             from scheduler import set_query_func, iniciar_scheduler_em_background
@@ -12079,33 +12256,75 @@ def faturamento_adicionar_fila_senha_teste(req: AdicionarFilaSenhaRequest):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/coleta/fila")
-def coleta_fila(fila_psv_cod: int = 9126):
+def coleta_fila(fila_psv_cod: int = 9126, mostrar_coletados: bool = False):
     """
     Fila de pacientes aguardando coleta — lê `fle` em produção, mesma fonte do
     Painel de Senhas. Default psv_cod 9126 (Jessica Oliveira Ferreira) — dona
     de fato da fila de Laboratório em produção (confirmado com dado real:
     ~96% dos itens LAB usam esse FLE_PSV_COD). Use fila_psv_cod pra ver outra.
+    Inclui também quem já foi chamado (FLE_STATUS='X') mas ainda não teve a
+    amostra recebida. Com mostrar_coletados=True inclui também quem já foi
+    finalizado hoje (FLE_STATUS='Z') — pra dar noção de quem já foi coletado,
+    já que esse status some da fila normal (senão ficaria misturado com quem
+    ainda está esperando).
     """
     hoje = datetime.now().strftime("%Y-%m-%d")
-    rows = query("""
+    status_sql = "('A', 'X', 'Z')" if mostrar_coletados else "('A', 'X')"
+    rows = query(f"""
         SELECT
             fle.FLE_OSM_SERIE AS os_serie, fle.FLE_OSM_NUM AS os_num,
             fle.FLE_PAC_REG AS pac_reg, RTRIM(pac.pac_nome) AS paciente,
             CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
             fle.FLE_DTHR_CHEGADA AS chegada, fle.FLE_PREFERENCIAL AS preferencial,
-            CAST(fle.FLE_ORDEM AS INT) AS ordem
+            CAST(fle.FLE_ORDEM AS INT) AS ordem,
+            CASE WHEN fle.FLE_STATUS = 'X' THEN 1 ELSE 0 END AS chamado,
+            CONVERT(VARCHAR(5), fle.FLE_DTHR_ATENDIMENTO, 108) AS chamado_em,
+            CASE WHEN fle.FLE_STATUS = 'Z' THEN 1 ELSE 0 END AS coletado,
+            CONVERT(VARCHAR(5), fle.FLE_DTHR_FINAL, 108) AS coletado_em
         FROM fle
         JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
         WHERE fle.FLE_PSV_COD = ?
           AND CAST(fle.FLE_DTHR_CHEGADA AS DATE) = ?
-          AND fle.FLE_STATUS = 'A'
+          AND fle.FLE_STATUS IN {status_sql}
           AND fle.FLE_OSM_SERIE IS NOT NULL
-        ORDER BY fle.FLE_PREFERENCIAL DESC, fle.FLE_ORDEM ASC
+        ORDER BY CASE WHEN fle.FLE_STATUS = 'Z' THEN 1 ELSE 0 END ASC,
+                 fle.FLE_PREFERENCIAL DESC, fle.FLE_ORDEM ASC
     """, (fila_psv_cod, hoje))
     for r in rows:
         if hasattr(r.get("chegada"), "strftime"):
             r["chegada"] = r["chegada"].strftime("%H:%M")
     return rows
+
+
+class ChamarPacienteRequest(BaseModel):
+    serie: int
+    num: int
+    login: str
+
+
+@app.post("/api/coleta/chamar")
+def coleta_chamar_paciente(req: ChamarPacienteRequest):
+    """
+    Chama o paciente — mesmo mecanismo de "médico chama pelo Smart"
+    (FLE_STATUS='A'->'X', FLE_DTHR_ATENDIMENTO=agora), que já é lido pelo
+    Painel TV em /api/painel-fila/pacientes. Grava em PRODUÇÃO.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    agora = datetime.now()
+    try:
+        cur.execute("""
+            UPDATE fle SET FLE_STATUS='X', FLE_DTHR_ATENDIMENTO=?, FLE_USR_ATENDIMENTO=?
+            WHERE FLE_OSM_SERIE=? AND FLE_OSM_NUM=? AND FLE_STATUS='A'
+        """, (agora, req.login, req.serie, req.num))
+        atualizados = cur.rowcount
+        conn.commit()
+    except pyodbc.Error as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(400, f"Erro ao chamar paciente: {e}")
+    conn.close()
+    return {"ok": True, "itens_atualizados": atualizados}
 
 
 @app.get("/api/coleta/os/{serie}/{num}")
@@ -12127,7 +12346,9 @@ def coleta_os_detalhe(serie: int, num: int):
                RTRIM(ISNULL(smk.SMK_NOME, '')) AS nome,
                smm.SMM_DTHR_COLETA AS coleta_dthr,
                RTRIM(ISNULL(smm.SMM_USR_LOGIN_COLETA, '')) AS coleta_login,
-               RTRIM(ISNULL(smm.SMM_COD_AMOSTRA, '')) AS cod_amostra
+               RTRIM(ISNULL(smm.SMM_COD_AMOSTRA, '')) AS cod_amostra,
+               CASE WHEN RTRIM(ISNULL(smm.SMM_ETI_COD_AMOSTRA, ISNULL(smk.SMK_ETI_COD, ''))) <> ''
+                    THEN 1 ELSE 0 END AS exame_sangue
         FROM smm
         LEFT JOIN smk ON RTRIM(smk.SMK_TIPO) = RTRIM(smm.SMM_TPCOD) AND RTRIM(smk.SMK_COD) = RTRIM(smm.SMM_COD)
         WHERE smm.SMM_OSM_SERIE = ? AND smm.SMM_OSM = ?
@@ -12151,8 +12372,8 @@ class ReceberAmostraRequest(BaseModel):
 @app.post("/api/coleta/receber")
 def coleta_receber_amostra(req: ReceberAmostraRequest):
     """
-    Marca os itens como coletados (SMM_DTHR_COLETA/SMM_USR_LOGIN_COLETA) e
-    encerra a espera na fila (FLE_STATUS 'A'->'X'). Grava em PRODUÇÃO.
+    Marca os itens como coletados (SMM_DTHR_COLETA) e encerra a espera na
+    fila (FLE_STATUS 'A' ou 'X' -> 'Z'). Grava em PRODUÇÃO.
     """
     if not req.itens:
         raise HTTPException(400, "Informe ao menos um item.")
@@ -12176,7 +12397,7 @@ def coleta_receber_amostra(req: ReceberAmostraRequest):
         # não tem relação com coleta de amostra.
         cur.execute("""
             UPDATE fle SET FLE_STATUS='Z', FLE_DTHR_FINAL=?, FLE_USR_FINAL=?
-            WHERE FLE_OSM_SERIE=? AND FLE_OSM_NUM=? AND FLE_STATUS='A'
+            WHERE FLE_OSM_SERIE=? AND FLE_OSM_NUM=? AND FLE_STATUS IN ('A', 'X')
         """, (agora, req.login, req.serie, req.num))
         conn.commit()
     except pyodbc.Error as e:
@@ -12198,55 +12419,55 @@ _SETORES_RECEPCAO_NOME = {
 
 def _desenhar_etiqueta_coleta(c, d):
     """
-    Etiqueta 50x40mm — layout confirmado com etiqueta real do Smart: nome do
-    paciente (maior), nome da mãe, data/hora da OS + nascimento lado a lado,
-    código de barras (nº da OS), nº da OS, nome da recepção, nome do exame,
-    e o texto do tubo/amostra vindo da tabela ETI (ex.: "HP-SORO").
+    Etiqueta 50x30mm (x1 via) — layout confirmado com etiqueta real do Smart:
+    nome do paciente (maior), nome da mãe, data/hora da OS + nascimento lado
+    a lado, código de barras (nº da OS), nº da OS, nome da recepção, nome do
+    exame, e o texto do tubo/amostra vindo da tabela ETI (ex.: "HP-SORO").
     """
     from reportlab.lib.units import mm as _mm
     from reportlab.graphics.barcode import code128 as _code128
-    LARGURA, ALTURA = 50 * _mm, 40 * _mm
+    LARGURA, ALTURA = 50 * _mm, 30 * _mm
     c.setPageSize((LARGURA, ALTURA))
 
-    y = ALTURA - 4 * _mm
-    c.setFont("Helvetica-Bold", 8.5)
+    y = ALTURA - 3 * _mm
+    c.setFont("Helvetica-Bold", 8)
     c.drawString(2 * _mm, y, d["paciente"][:32])
 
-    y -= 3.6 * _mm
-    c.setFont("Helvetica", 5.8)
+    y -= 2.8 * _mm
+    c.setFont("Helvetica", 5.3)
     c.drawString(2 * _mm, y, f'Mae: {d["mae"][:34]}')
 
-    y -= 3.8 * _mm
-    c.setFont("Helvetica", 5.8)
+    y -= 3 * _mm
+    c.setFont("Helvetica", 5.3)
     c.drawString(2 * _mm, y, f'OS: {d["os_dthr"]}')
     c.drawRightString(LARGURA - 2 * _mm, y, f'Nasc: {d["nascimento"]}')
 
-    barcode = _code128.Code128(d["os_barcode"], barHeight=6 * _mm, barWidth=0.28 * _mm)
+    barcode = _code128.Code128(d["os_barcode"], barHeight=5 * _mm, barWidth=0.26 * _mm)
     bx = (LARGURA - barcode.width) / 2
-    barcode_bottom_y = y - 4 * _mm - 6 * _mm
+    barcode_bottom_y = y - 2.6 * _mm - 5 * _mm
     barcode.drawOn(c, bx, barcode_bottom_y)
 
-    y = barcode_bottom_y - 3.2 * _mm
-    c.setFont("Helvetica-Bold", 7)
+    y = barcode_bottom_y - 2.6 * _mm
+    c.setFont("Helvetica-Bold", 6.5)
     c.drawCentredString(LARGURA / 2, y, d["os"])
 
-    y -= 3.6 * _mm
-    c.setFont("Helvetica", 5.8)
+    y -= 3 * _mm
+    c.setFont("Helvetica", 5.3)
     c.drawCentredString(LARGURA / 2, y, d["recepcao"][:36])
 
-    y -= 3.8 * _mm
-    c.setFont("Helvetica-Bold", 7)
+    y -= 3 * _mm
+    c.setFont("Helvetica-Bold", 6.5)
     c.drawCentredString(LARGURA / 2, y, d["exame"][:30])
 
-    y -= 3.6 * _mm
-    c.setFont("Helvetica", 6.2)
+    y -= 3 * _mm
+    c.setFont("Helvetica", 5.6)
     c.drawCentredString(LARGURA / 2, y, d["etiqueta_amostra"][:30])
 
     c.showPage()
 
 
 @app.get("/api/coleta/etiqueta/{serie}/{num}")
-def coleta_etiqueta_pdf(serie: int, num: int, background_tasks: BackgroundTasks):
+def coleta_etiqueta_pdf(serie: int, num: int, background_tasks: BackgroundTasks, itens: str | None = None):
     """
     Gera o PDF de etiquetas da OS — uma por tubo. O tipo de tubo/amostra vem
     de ETI_COD (confirmado com etiqueta real): usa SMM_ETI_COD_AMOSTRA quando
@@ -12256,9 +12477,18 @@ def coleta_etiqueta_pdf(serie: int, num: int, background_tasks: BackgroundTasks)
     agrupar — não arrisca juntar exame incompatível no mesmo tubo por engano.
     Com mais de 1 exame no mesmo tubo, mostra a contagem em vez de listar os
     nomes (não cabem sem cortar numa etiqueta de 50mm).
+    `itens`: lista opcional de SMM_NUM separados por vírgula — restringe a
+    impressão só aos itens selecionados na tela; sem isso, imprime a OS toda.
     """
     import tempfile, uuid
     from reportlab.pdfgen import canvas as _pdf_canvas
+
+    itens_filtro = None
+    if itens:
+        try:
+            itens_filtro = {int(n) for n in itens.split(",") if n.strip()}
+        except ValueError:
+            raise HTTPException(400, "Parâmetro itens inválido.")
 
     pac_rows = query("""
         SELECT RTRIM(pac.pac_nome) AS paciente, CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
@@ -12284,6 +12514,8 @@ def coleta_etiqueta_pdf(serie: int, num: int, background_tasks: BackgroundTasks)
         WHERE smm.SMM_OSM_SERIE = ? AND smm.SMM_OSM = ?
         ORDER BY smm.SMM_NUM
     """, (serie, num))
+    if itens_filtro is not None:
+        itens = [it for it in itens if it["num"] in itens_filtro]
     if not itens:
         raise HTTPException(400, "OS sem itens.")
 

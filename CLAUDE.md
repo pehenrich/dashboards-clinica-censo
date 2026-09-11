@@ -24,10 +24,14 @@ cd backend
 pip install -r requirements.txt
 # dev (HTTP simples):
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-# produção (HTTPS, como roda de fato — ver start_backend.ps1 na raiz):
-powershell -File ..\start_backend.ps1
 ```
 Não há venv de projeto — usa o Python global da máquina. Não há suíte de testes automatizados.
+
+**Produção roda como serviço do Windows** (`DashboardBackend`, instalado via `backend/service_dashboard.py` com pywin32 — não depende de nenhuma sessão/console aberto, sobrevive a reboot). Depois de qualquer mudança em `main.py` ou módulos importados por ele, reiniciar assim (como Administrador):
+```powershell
+Restart-Service DashboardBackend
+```
+Log fica em `C:\Dashboard\backend_out.log` (append — cresce a cada restart, sem rotação configurada ainda). `start_backend.ps1` na raiz continua existindo só pra rodar manualmente em foreground durante debug pontual — **não usar pra produção**, porque um processo lançado assim (ou via tarefa em background do Claude Code) fica preso ao ciclo de vida de quem o lançou e cai se essa sessão for encerrada (aconteceu de verdade: o backend caiu quando uma tarefa em background do Claude Code foi limpa pelo sistema).
 
 ### Frontend (React/Vite)
 ```powershell
@@ -49,7 +53,7 @@ Navegador → HTTPS:31000 → FastAPI (backend/main.py, ~12 mil linhas, monolito
                               └─ backend/scheduler.py — thread própria, envios diários agendados
 ```
 
-- **Backend**: FastAPI + `pyodbc` (SQL Server) + `uvicorn` com SSL nativo (obrigatório — HTTP puro não responde). Acesso interno: `https://192.168.1.40:31000`. Acesso externo via Cloudflare Tunnel (`cloudflared`, URL efêmera).
+- **Backend**: FastAPI + `pyodbc` (SQL Server) + `uvicorn` com SSL nativo (obrigatório — HTTP puro não responde), rodando como serviço do Windows (`DashboardBackend`). Acesso interno: `https://192.168.1.40:31000`. Acesso externo via Cloudflare Tunnel (`cloudflared`, URL efêmera).
 - **Frontend**: SPA React + Vite, **sem client-side router** — navegação entre módulos troca um estado `activeModule` (`RENDER_MAP` em `App.jsx`), não a URL. Estilização quase toda via `style={{...}}` inline (Tailwind está instalado mas pouco usado no Dashboard principal). Gráficos: Recharts. Hook de dados: `useFetch(path, deps, intervalMs)` monta querystring a partir de `deps` e opcionalmente faz polling.
 - **`get_conn()`/`query()`** em `main.py` é o helper central de leitura no SQL Server; `get_conn_hml()` conecta em homologação (`smart_hml`), usada para gravações clínicas ainda não validadas em produção.
 - **`periodo_datas(periodo)`** converte strings de período (`"7d"`, `"30d"`, `"mes:YYYY-MM"`, `"custom:..."`, etc.) em intervalo de datas — reutilizado por quase todo endpoint financeiro/operacional.

@@ -22,11 +22,15 @@ frontend/.env.production
 frontend/cloudflared
 cloudflared.exe
 
+# Documentação interna com credenciais (para direção/handover) — nunca commitar
+docs-interno/
+
 # Bancos locais por módulo (dados de cada instalação, não fazem parte do código)
 backend/*.db
 
 # Screenshots de teste/depuração
 backend/test_*.png
+wpp_qr_atual.png
 
 # Node
 node_modules/

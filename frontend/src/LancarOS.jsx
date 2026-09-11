@@ -23,6 +23,16 @@ const TIPOS_ATENDIMENTO_OCUP = [
 
 const SETORES_EXECUCAO = ["LAB", "RAD", "USG", "CAR", "OFT", "FON", "GIN", "NUT", "PSI", "END", "ORT", "DER", "PED", "NEU", "PNE", "CSM"];
 
+// Setores de execução com um único "dono" da fila na prática — confirmado com
+// dado real de produção (ago-set/2026): LAB praticamente sempre Jessica
+// Oliveira Ferreira (~96% dos casos), RAD praticamente sempre Maria de
+// Nazaré Martins Leão (~99%). Outros setores (PSI, USG, CSM...) têm vários
+// profissionais dividindo a fila, então não têm um padrão único confiável.
+const EXECUTANTE_PADRAO_POR_SETOR = {
+  LAB: { codigo: 9126, nome: "Jessica Oliveira Ferreira" },
+  RAD: { codigo: 8541, nome: "Maria de Nazaré Martins Leão" },
+};
+
 function brl(v) {
   return (v ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
@@ -201,22 +211,15 @@ export default function LancarOS() {
   const [itens, setItens] = useState([]);
   const [tissTipoAtende, setTissTipoAtende] = useState("");
   const [regimeAtend, setRegimeAtend] = useState("");
+  const [osmWSenha, setOsmWSenha] = useState("");
   const [observacao, setObservacao] = useState("");
 
   const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState(null);
   const [resultado, setResultado] = useState(null);
 
-  const [filasSenha, setFilasSenha] = useState([]);
-  const [filaEscolhida, setFilaEscolhida] = useState("");
-  const [filaPreferencial, setFilaPreferencial] = useState(false);
-  const [filaEnviando, setFilaEnviando] = useState(false);
-  const [filaErro, setFilaErro] = useState(null);
-  const [filaResultado, setFilaResultado] = useState(null);
-
-  useEffect(() => {
-    fetch(`${API}/api/painel-fila/prestadores`).then(r => r.json()).then(setFilasSenha).catch(() => setFilasSenha([]));
-  }, []);
+  const [modalFilaAberto, setModalFilaAberto] = useState(false);
+  const [filaDestino, setFilaDestino] = useState(null);
 
   const buscarPaciente = useCallback((q) =>
     fetch(`${API}/api/atendimento/buscar-paciente?q=${encodeURIComponent(q)}`).then(r => r.json()).then(d => d.pacientes || []), []);
@@ -233,17 +236,37 @@ export default function LancarOS() {
   const exigeTiss = convenio?.tiss === "S";
   const valorTotal = itens.reduce((s, it) => s + (it.preco || 0) * (it.qt || 1), 0);
 
+  // Pré-seleciona o executante padrão daquele setor de execução (LAB/RAD...),
+  // quando existe um "dono" único e dominante na prática — continua editável.
+  // Também pré-seleciona a mesma pessoa como fila padrão (é quem realmente
+  // recebe o paciente na prática) — mas fila e executante são campos
+  // independentes a partir daqui: trocar um não mexe no outro.
+  const aplicarExecutantePadrao = (setorExec) => {
+    const padrao = EXECUTANTE_PADRAO_POR_SETOR[setorExec];
+    if (!padrao) return;
+    setMesmoMedico(false);
+    setMedicoExec(prev => prev || padrao);
+    setFilaDestino(prev => prev || padrao);
+  };
+
+  // Escolher explicitamente pra qual fila mandar o paciente — campo
+  // independente do médico executante (que fatura o serviço, SMM_MED, e
+  // precisa ser sempre um profissional real). A fila pode ser uma "estação"
+  // cadastrada como prestador (Coleta Diagnóstico, Radiologia Diagnóstica,
+  // Vale, Particular etc.) sem relação com quem executa de fato. Não gera
+  // senha — é só o mesmo mecanismo de "entra como último da fila".
+  const escolherFila = (f) => {
+    setFilaDestino(f);
+    setModalFilaAberto(false);
+  };
+
   const adicionarItem = (r) => {
     setItens(prev => [...prev, {
       chave: `${r.tipo}-${r.codigo}-${prev.length}`,
       tipo: r.tipo, cod: r.codigo, nome: r.nome, qt: 1,
       setor_execucao: "LAB", preco: r.preco, tuss: r.tuss || "",
     }]);
-    // Exames de sangue (setor de execução LAB, o padrão ao adicionar item) são
-    // sempre coletados pela Jessica Oliveira Ferreira (biomédica, psv_cod 9126)
-    // — pré-seleciona como executante, mas continua editável.
-    setMesmoMedico(false);
-    setMedicoExec(prev => prev || { codigo: 9126, nome: "Jessica Oliveira Ferreira" });
+    aplicarExecutantePadrao("LAB");
   };
   const copiarTuss = (tuss, chave) => {
     navigator.clipboard?.writeText(tuss);
@@ -251,7 +274,10 @@ export default function LancarOS() {
     setTimeout(() => setTussCopiado(c => c === chave ? null : c), 1500);
   };
   const removerItem = (chave) => setItens(prev => prev.filter(i => i.chave !== chave));
-  const atualizarItem = (chave, campo, valor) => setItens(prev => prev.map(i => i.chave === chave ? { ...i, [campo]: valor } : i));
+  const atualizarItem = (chave, campo, valor) => {
+    setItens(prev => prev.map(i => i.chave === chave ? { ...i, [campo]: valor } : i));
+    if (campo === "setor_execucao") aplicarExecutantePadrao(valor.toUpperCase());
+  };
 
   const resetarParaProximaOS = () => {
     setPaciente(null); setItens([]); setObservacao(""); setResultado(null); setErro(null);
@@ -259,34 +285,6 @@ export default function LancarOS() {
   };
 
   const podeEnviar = setor && paciente && convenio && medicoReq && (mesmoMedico || medicoExec) && itens.length > 0 && !enviando;
-
-  const podeAdicionarNaFila = setor && paciente && filaEscolhida && !filaEnviando;
-
-  const adicionarNaFilaSenha = async () => {
-    if (!podeAdicionarNaFila) return;
-    setFilaEnviando(true); setFilaErro(null); setFilaResultado(null);
-    try {
-      const resp = await fetch(`${API}/api/faturamento/adicionar-fila-senha-teste`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          paciente: paciente.pac_reg, setor, fila_psv_cod: Number(filaEscolhida),
-          login, preferencial: filaPreferencial,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        let msg = "Erro ao adicionar na fila.";
-        if (typeof data.detail === "string") msg = data.detail;
-        else if (Array.isArray(data.detail)) msg = data.detail.map(d => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join(" · ");
-        throw new Error(msg);
-      }
-      setFilaResultado(data);
-    } catch (e) {
-      setFilaErro(String(e.message || e));
-    } finally {
-      setFilaEnviando(false);
-    }
-  };
 
   const enviar = async () => {
     if (!podeEnviar) return;
@@ -304,8 +302,10 @@ export default function LancarOS() {
         urgente,
         tiss_tipo_atende: tissTipoAtende || null,
         regime_atend: regimeAtend || null,
+        osm_w_senha: osmWSenha || null,
         observacao: observacao || null,
         adicionar_fila: adicionarFila,
+        fila_destino_psv_cod: filaDestino?.codigo || null,
       };
       const resp = await fetch(`${API}/api/faturamento/lancar-os-teste`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -428,45 +428,6 @@ export default function LancarOS() {
         </Card>
       </div>
 
-      {/* Fila de atendimento (senha) — independente da OS */}
-      <Card style={{ padding: 20, marginBottom: 16 }}>
-        <Rotulo>Fila de atendimento (senha de recepção)</Rotulo>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <select value={filaEscolhida} onChange={e => setFilaEscolhida(e.target.value)} style={{
-            flex: "1 1 260px", padding: "10px 12px", borderRadius: 10, border: "1.5px solid #E2E8F0",
-            fontSize: 13, background: "#fff", color: filaEscolhida ? "#0F172A" : "#94A3B8",
-          }}>
-            <option value="">Selecione a fila do paciente...</option>
-            {filasSenha.map(f => (
-              <option key={f.psv_cod} value={f.psv_cod}>{f.psv_apel}{f.especialidade ? ` — ${f.especialidade}` : ""}</option>
-            ))}
-          </select>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
-            <input type="checkbox" checked={filaPreferencial} onChange={e => setFilaPreferencial(e.target.checked)} />
-            Preferencial
-          </label>
-          <button type="button" onClick={adicionarNaFilaSenha} disabled={!podeAdicionarNaFila} style={{
-            padding: "10px 18px", borderRadius: 10, border: "none",
-            background: podeAdicionarNaFila ? `linear-gradient(135deg,${COR},${COR2})` : "#CBD5E1",
-            color: "#fff", fontWeight: 800, fontSize: 12.5, cursor: podeAdicionarNaFila ? "pointer" : "not-allowed", flexShrink: 0,
-          }}>{filaEnviando ? "Adicionando..." : "+ Adicionar na fila"}</button>
-        </div>
-        {!paciente && <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 8 }}>Escolha o setor e o paciente pra habilitar.</div>}
-        {filaErro && (
-          <div style={{ marginTop: 10, fontSize: 12.5, color: "#DC2626", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 12px" }}>
-            ⚠ {filaErro}
-          </div>
-        )}
-        {filaResultado && (
-          <div style={{ marginTop: 10, fontSize: 13, color: "#059669", background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
-            ✓ Senha <b>{filaResultado.senha}</b> gerada na fila "{filaResultado.fila}"
-            <button type="button" onClick={() => navigator.clipboard?.writeText(filaResultado.senha)} title="Copiar senha" style={{
-              border: "1px solid #A7F3D0", background: "#fff", color: "#059669", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer",
-            }}>⧉ copiar</button>
-          </div>
-        )}
-      </Card>
-
       {/* Médicos */}
       <Card style={{ padding: 20, marginBottom: 16 }}>
         <div style={{ display: "grid", gridTemplateColumns: mesmoMedico ? "1fr" : "1fr 1fr", gap: 16 }}>
@@ -568,15 +529,33 @@ export default function LancarOS() {
 
       {/* TISS + urgência + observação */}
       <Card style={{ padding: 20, marginBottom: 16 }}>
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: exigeTiss ? 16 : 0 }}>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center", marginBottom: exigeTiss ? 16 : 0 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#334155", cursor: "pointer" }}>
             <input type="checkbox" checked={urgente} onChange={e => setUrgente(e.target.checked)} />
             Urgente
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#334155", cursor: "pointer" }}>
             <input type="checkbox" checked={adicionarFila} onChange={e => setAdicionarFila(e.target.checked)} />
-            Adicionar paciente à fila do médico executante (como no Smart desktop)
+            Adicionar paciente à fila{filaDestino ? " de:" : " do médico executante"} (como no Smart desktop)
           </label>
+          {adicionarFila && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              {filaDestino && (
+                <span style={{ fontSize: 11.5, fontWeight: 800, color: COR, background: `${COR}12`, padding: "3px 10px", borderRadius: 99 }}>
+                  {filaDestino.nome}
+                </span>
+              )}
+              <button type="button" onClick={() => setModalFilaAberto(true)} style={{
+                padding: "5px 10px", borderRadius: 8, border: `1.5px solid ${COR}30`, background: `${COR}08`,
+                color: COR, fontWeight: 700, fontSize: 11.5, cursor: "pointer",
+              }}>{filaDestino ? "trocar fila" : "🔀 Escolher fila específica..."}</button>
+              {filaDestino && (
+                <button type="button" onClick={() => setFilaDestino(null)} title="Voltar ao padrão (fila do médico executante)" style={{
+                  border: "none", background: "transparent", color: "#94A3B8", fontWeight: 700, fontSize: 11, cursor: "pointer",
+                }}>✕</button>
+              )}
+            </div>
+          )}
         </div>
 
         {exigeTiss && (
@@ -594,6 +573,13 @@ export default function LancarOS() {
                 placeholder="ex: 01 (ambulatorial)..."
                 style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 13, boxSizing: "border-box" }} />
               <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 4 }}>Só uma parte das OS desse tipo de convênio preenche — confirme se se aplica.</div>
+            </div>
+            <div>
+              <Rotulo>Senha de autorização (opcional)</Rotulo>
+              <input type="text" value={osmWSenha} onChange={e => setOsmWSenha(e.target.value)}
+                placeholder="senha da guia no convênio, se já autorizada..."
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 13, boxSizing: "border-box" }} />
+              <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 4 }}>Maioria das OS TISS preenche (grava no primeiro item, como já é feito no Smart) — confira se o convênio já autorizou antes de lançar.</div>
             </div>
           </div>
         )}
@@ -623,7 +609,7 @@ export default function LancarOS() {
           <div style={{ fontSize: 12, color: "#065F46" }}>Tabela de preço usada: <b>{resultado.tabela_preco_usada}</b> · ambiente: <b>{resultado.ambiente}</b></div>
           {resultado.fila?.adicionado && (
             <div style={{ fontSize: 12, color: "#065F46", marginTop: 4 }}>
-              ✓ Paciente adicionado à fila do médico (posição <b>{resultado.fila.ordem}</b>)
+              ✓ Paciente adicionado à fila de <b>{filaDestino?.nome || "médico executante"}</b> (posição <b>{resultado.fila.ordem}</b>)
             </div>
           )}
           {resultado.avisos?.length > 0 && (
@@ -646,6 +632,39 @@ export default function LancarOS() {
       }}>
         {enviando ? "Lançando..." : `⚡ Lançar OS${itens.length ? ` — ${brl(valorTotal)}` : ""}`}
       </button>
+
+      {modalFilaAberto && (
+        <div onClick={() => setModalFilaAberto(false)} style={{
+          position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", zIndex: 4000,
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: "#fff", borderRadius: 16, width: "100%", maxWidth: 440,
+            boxShadow: "0 20px 60px rgba(0,0,0,.3)", padding: 20,
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>Mandar paciente pra qual fila?</div>
+            <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 12 }}>
+              Busca cobre médicos reais e estações cadastradas como prestador (Coleta Diagnóstico, Radiologia Diagnóstica, Vale, Particular...).
+            </div>
+            <CampoBusca
+              placeholder="Nome da fila ou do médico..."
+              buscar={buscarMedico}
+              chaveItem={m => m.codigo}
+              onEscolher={escolherFila}
+              renderItem={m => (
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#0F172A" }}>{m.nome}</div>
+                  {m.apelido && m.apelido !== m.nome && <div style={{ fontSize: 11, color: "#94A3B8" }}>{m.apelido}</div>}
+                </div>
+              )} />
+            <div style={{ marginTop: 14, textAlign: "right" }}>
+              <button type="button" onClick={() => setModalFilaAberto(false)} style={{
+                border: "none", background: "transparent", color: "#94A3B8", fontWeight: 700, fontSize: 12.5, cursor: "pointer",
+              }}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
