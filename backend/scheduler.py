@@ -244,6 +244,26 @@ def loop_scheduler():
                     log.error(f"Erro no relatorio semanal: {e}")
                     print(f"[Scheduler] Erro no relatorio semanal: {e}")
 
+        # ── Backup diário dos bancos SQLite locais (guias/chat/atas/etc) pro
+        # Nextcloud + cópia local rotativa — não existia nenhum backup antes
+        # disso, os bancos só viviam neste disco ──────────────────────────────
+        chave_backup = f"{agora.strftime('%Y-%m-%d')}-backup"
+        if chave_backup not in ultimo_envio and agora.hour == 3 and agora.minute == 30:
+            try:
+                from backup_diario import fazer_backup_diario
+                log.info("Disparando backup diario dos bancos locais")
+                resultado_backup = _com_timeout(fazer_backup_diario, 120)
+                log.info(f"Backup diario: {resultado_backup}")
+                if not resultado_backup.get("ok"):
+                    print(f"[Scheduler] Backup diario falhou: {resultado_backup}")
+                ultimo_envio[chave_backup] = True  # marca mesmo em falha: tenta de novo só amanhã, evita martelar o Nextcloud a cada 30s
+            except _FutureTimeoutError:
+                log.error("Erro no backup diario: timeout (>120s)")
+                print("[Scheduler] Erro: timeout no backup diario")
+            except Exception as e:
+                log.error(f"Erro no backup diario: {e}")
+                print(f"[Scheduler] Erro no backup diario: {e}")
+
         # ── Envio automático de prontuários via Nextcloud — vigia a pasta de
         # rede a cada ciclo (leitura de diretório é barata; só processa de
         # verdade quando há PDF novo) ────────────────────────────────────────

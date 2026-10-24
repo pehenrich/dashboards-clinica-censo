@@ -28,6 +28,9 @@ docs-interno/
 # Bancos locais por módulo (dados de cada instalação, não fazem parte do código)
 backend/*.db
 
+# Backups locais dos bancos (zips rotativos — a cópia de verdade vai pro Nextcloud)
+backend/backups/
+
 # Screenshots de teste/depuração
 backend/test_*.png
 wpp_qr_atual.png
