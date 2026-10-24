@@ -10,6 +10,7 @@ const SETORES = [
   { id: "RCN", label: "Consultórios", desc: "Consultas e pequenos procedimentos" },
   { id: "ROC", label: "Ocupacional",  desc: "ASO — admissional, periódico, demissional..." },
   { id: "RCI", label: "Censo Imagem", desc: "Unidade de imagem" },
+  { id: "57",  label: "CMI",          desc: "Recepção CMI" },
 ];
 
 const TIPOS_ATENDIMENTO_OCUP = [
@@ -32,6 +33,16 @@ const EXECUTANTE_PADRAO_POR_SETOR = {
   LAB: { codigo: 9126, nome: "Jessica Oliveira Ferreira" },
   RAD: { codigo: 8541, nome: "Maria de Nazaré Martins Leão" },
 };
+
+// Recepção fica "fixa" por navegador — a recepcionista escolhe o setor uma vez e
+// ele continua pré-selecionado em todas as próximas OS e depois de recarregar.
+const SETOR_KEY = "lancaros_setor_fixo";
+function carregarSetorFixo() {
+  try { return localStorage.getItem(SETOR_KEY) || null; } catch { return null; }
+}
+function salvarSetorFixo(setor) {
+  try { setor ? localStorage.setItem(SETOR_KEY, setor) : localStorage.removeItem(SETOR_KEY); } catch { /* ignore */ }
+}
 
 function brl(v) {
   return (v ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -71,12 +82,13 @@ const Rotulo = ({ children, obrigatorio }) => (
 );
 
 // ── Campo de busca genérico (autocomplete com dropdown flutuante) ───────────
-function CampoBusca({ placeholder, buscar, renderItem, onEscolher, minLen = 2, disabled, valorFixo, chaveItem }) {
+function CampoBusca({ placeholder, buscar, renderItem, onEscolher, minLen = 2, disabled, valorFixo, chaveItem, debounceMs = 280, autoFocus = false }) {
   const [termo, setTermo] = useState("");
   const [resultados, setResultados] = useState(null);
   const [aberto, setAberto] = useState(false);
   const [buscando, setBuscando] = useState(false);
   const [rect, setRect] = useState(null);
+  const [destaque, setDestaque] = useState(0);
   const boxRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -85,11 +97,13 @@ function CampoBusca({ placeholder, buscar, renderItem, onEscolher, minLen = 2, d
     setBuscando(true);
     const t = setTimeout(() => {
       buscar(termo.trim())
-        .then(r => { setResultados(r); setBuscando(false); })
+        .then(r => { setResultados(r); setDestaque(0); setBuscando(false); })
         .catch(() => { setResultados([]); setBuscando(false); });
-    }, 280);
+    }, debounceMs);
     return () => clearTimeout(t);
   }, [termo, aberto]);
+
+  useEffect(() => { if (autoFocus && !valorFixo) inputRef.current?.focus(); }, [autoFocus, valorFixo]);
 
   useEffect(() => {
     const fechar = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setAberto(false); };
@@ -111,7 +125,18 @@ function CampoBusca({ placeholder, buscar, renderItem, onEscolher, minLen = 2, d
     setTermo("");
     setAberto(false);
     setResultados(null);
+    setDestaque(0);
     inputRef.current?.focus();
+  };
+
+  // Teclado: ↓/↑ navega, Enter escolhe o item destacado (por padrão o 1º — então
+  // digitar o código e dar Enter já adiciona sem precisar do mouse), Esc fecha.
+  const aoTeclar = (e) => {
+    if (!aberto || !resultados || resultados.length === 0) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); setDestaque(d => Math.min(d + 1, resultados.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setDestaque(d => Math.max(d - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); escolher(resultados[destaque] || resultados[0]); }
+    else if (e.key === "Escape") { setAberto(false); }
   };
 
   if (valorFixo) {
@@ -131,7 +156,7 @@ function CampoBusca({ placeholder, buscar, renderItem, onEscolher, minLen = 2, d
   return (
     <div ref={boxRef} style={{ position: "relative" }}>
       <input ref={inputRef} type="text" value={termo} placeholder={placeholder} disabled={disabled}
-        onFocus={abrir} onChange={e => { setTermo(e.target.value); abrir(); }}
+        onFocus={abrir} onChange={e => { setTermo(e.target.value); abrir(); }} onKeyDown={aoTeclar}
         style={{
           width: "100%", padding: "11px 14px", borderRadius: 10, boxSizing: "border-box",
           border: "1.5px solid #E2E8F0", fontSize: 13.5, outline: "none",
@@ -150,11 +175,11 @@ function CampoBusca({ placeholder, buscar, renderItem, onEscolher, minLen = 2, d
           ) : resultados.length === 0 ? (
             <div style={{ padding: 16, fontSize: 12.5, color: "#CBD5E1", textAlign: "center" }}>Nada encontrado.</div>
           ) : resultados.map((r, i) => (
-            <div key={chaveItem ? chaveItem(r) : i} onClick={() => escolher(r)} style={{
+            <div key={chaveItem ? chaveItem(r) : i} onClick={() => escolher(r)}
+              onMouseEnter={() => setDestaque(i)} style={{
               padding: "10px 14px", cursor: "pointer", borderBottom: "1px solid #F8FAFC",
-            }}
-              onMouseEnter={e => e.currentTarget.style.background = "#EEF2FF"}
-              onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+              background: i === destaque ? "#EEF2FF" : "transparent",
+            }}>
               {renderItem(r)}
             </div>
           ))}
@@ -198,7 +223,9 @@ export default function LancarOS() {
   const { user } = useAuth();
   const login = user?.login || "";
 
-  const [setor, setSetor] = useState(null);
+  const [setor, setSetorState] = useState(() => carregarSetorFixo());
+  // Troca de setor já persiste — vira a recepção fixa deste navegador.
+  const setSetor = useCallback((s) => { setSetorState(s); salvarSetorFixo(s); }, []);
   const [paciente, setPaciente] = useState(null);
   const [convenio, setConvenio] = useState(null);
   const [medicoReq, setMedicoReq] = useState(null);
@@ -220,6 +247,45 @@ export default function LancarOS() {
 
   const [modalFilaAberto, setModalFilaAberto] = useState(false);
   const [filaDestino, setFilaDestino] = useState(null);
+
+  const FORM_PAC_VAZIO = { nome: "", nascimento: "", sexo: "", cpf: "", telefone: "" };
+  const [modalPacienteAberto, setModalPacienteAberto] = useState(false);
+  const [formPac, setFormPac] = useState(FORM_PAC_VAZIO);
+  const [salvandoPac, setSalvandoPac] = useState(false);
+  const [erroPac, setErroPac] = useState(null);
+
+  const abrirCadastroPaciente = () => {
+    setFormPac(FORM_PAC_VAZIO);
+    setErroPac(null);
+    setModalPacienteAberto(true);
+  };
+
+  const cadastrarPaciente = async () => {
+    if (formPac.nome.trim().length < 3) { setErroPac("Informe o nome completo."); return; }
+    setSalvandoPac(true); setErroPac(null);
+    try {
+      const resp = await fetch(`${API}/api/faturamento/cadastrar-paciente-teste`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nome: formPac.nome.trim(),
+          nascimento: formPac.nascimento || null,
+          sexo: formPac.sexo || null,
+          cpf: formPac.cpf || null,
+          telefone: formPac.telefone || null,
+          convenio: convenio?.codigo || null,
+          login,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Erro ao cadastrar paciente.");
+      setPaciente({ pac_reg: data.pac_reg, nome: data.nome, nascimento: data.nascimento, cpf: data.cpf });
+      setModalPacienteAberto(false);
+    } catch (e) {
+      setErroPac(String(e.message || e));
+    } finally {
+      setSalvandoPac(false);
+    }
+  };
 
   const buscarPaciente = useCallback((q) =>
     fetch(`${API}/api/atendimento/buscar-paciente?q=${encodeURIComponent(q)}`).then(r => r.json()).then(d => d.pacientes || []), []);
@@ -341,7 +407,14 @@ export default function LancarOS() {
 
       {/* Setor */}
       <Card style={{ padding: 20, marginBottom: 16 }}>
-        <Rotulo obrigatorio>Setor de recepção</Rotulo>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+          <Rotulo obrigatorio>Setor de recepção</Rotulo>
+          {setor && (
+            <span style={{ fontSize: 10, fontWeight: 800, color: COR, background: `${COR}12`, padding: "2px 8px", borderRadius: 99, marginBottom: 7 }}>
+              📌 fixada neste computador
+            </span>
+          )}
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
           {SETORES.map(s => (
             <button key={s.id} type="button" onClick={() => setSetor(s.id)} style={{
@@ -403,6 +476,12 @@ export default function LancarOS() {
                 </div>
               </div>
             )} />
+          {!paciente && (
+            <button type="button" onClick={abrirCadastroPaciente} style={{
+              marginTop: 10, width: "100%", padding: "9px 14px", borderRadius: 10, cursor: "pointer",
+              border: `1.5px dashed ${COR}50`, background: `${COR}06`, color: COR, fontWeight: 700, fontSize: 12.5,
+            }}>+ Cadastrar novo paciente</button>
+          )}
         </Card>
 
         <Card style={{ padding: 20 }}>
@@ -464,8 +543,9 @@ export default function LancarOS() {
       <Card style={{ padding: 20, marginBottom: 16 }}>
         <Rotulo obrigatorio>Itens da OS</Rotulo>
         <CampoBusca
-          placeholder={convenio ? "Buscar exame/procedimento — já mostra o preço da tabela do convênio..." : "Selecione o convênio pra ver o preço ao buscar..."}
+          placeholder={convenio ? "Buscar por código ou nome — Enter adiciona o 1º resultado..." : "Selecione o convênio pra ver o preço ao buscar..."}
           buscar={buscarItem}
+          debounceMs={140}
           chaveItem={r => `${r.tipo}-${r.codigo}`}
           onEscolher={adicionarItem}
           renderItem={r => (
@@ -661,6 +741,89 @@ export default function LancarOS() {
               <button type="button" onClick={() => setModalFilaAberto(false)} style={{
                 border: "none", background: "transparent", color: "#94A3B8", fontWeight: 700, fontSize: 12.5, cursor: "pointer",
               }}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalPacienteAberto && (
+        <div onClick={() => setModalPacienteAberto(false)} style={{
+          position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", zIndex: 4000,
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: "#fff", borderRadius: 16, width: "100%", maxWidth: 460,
+            boxShadow: "0 20px 60px rgba(0,0,0,.3)", padding: 22,
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>Cadastrar novo paciente</div>
+            <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 16 }}>
+              Grava em <code>smart_hml</code> (homologação), como o resto desta tela. Só o nome é obrigatório.
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <Rotulo obrigatorio>Nome completo</Rotulo>
+              <input type="text" value={formPac.nome} autoFocus
+                onChange={e => setFormPac(f => ({ ...f, nome: e.target.value }))}
+                onKeyDown={e => { if (e.key === "Enter") cadastrarPaciente(); }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 13, boxSizing: "border-box" }} />
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+              <div>
+                <Rotulo>Data de nascimento</Rotulo>
+                <input type="date" value={formPac.nascimento}
+                  onChange={e => setFormPac(f => ({ ...f, nascimento: e.target.value }))}
+                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 13, boxSizing: "border-box" }} />
+              </div>
+              <div>
+                <Rotulo>Sexo</Rotulo>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {["M", "F"].map(s => (
+                    <button key={s} type="button" onClick={() => setFormPac(f => ({ ...f, sexo: f.sexo === s ? "" : s }))} style={{
+                      flex: 1, padding: "9px 0", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700,
+                      border: formPac.sexo === s ? `1.5px solid ${COR}` : "1.5px solid #E2E8F0",
+                      background: formPac.sexo === s ? `${COR}0D` : "#fff", color: formPac.sexo === s ? COR : "#64748B",
+                    }}>{s === "M" ? "Masculino" : "Feminino"}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+              <div>
+                <Rotulo>CPF</Rotulo>
+                <input type="text" inputMode="numeric" value={formPac.cpf} placeholder="só números"
+                  onChange={e => setFormPac(f => ({ ...f, cpf: e.target.value }))}
+                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 13, boxSizing: "border-box" }} />
+              </div>
+              <div>
+                <Rotulo>Telefone/celular</Rotulo>
+                <input type="text" value={formPac.telefone}
+                  onChange={e => setFormPac(f => ({ ...f, telefone: e.target.value }))}
+                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 13, boxSizing: "border-box" }} />
+              </div>
+            </div>
+
+            <div style={{ fontSize: 11, color: "#94A3B8", marginBottom: 14 }}>
+              Convênio: <b>{convenio ? convenio.nome : "Particular Diag (padrão)"}</b>
+              {" "}— pode trocar depois no campo Convênio da OS.
+            </div>
+
+            {erroPac && (
+              <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#DC2626", borderRadius: 8, padding: "9px 12px", fontSize: 12, marginBottom: 12 }}>
+                ⚠ {erroPac}
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              <button type="button" onClick={() => setModalPacienteAberto(false)} style={{
+                border: "none", background: "transparent", color: "#94A3B8", fontWeight: 700, fontSize: 12.5, cursor: "pointer",
+              }}>Cancelar</button>
+              <button type="button" onClick={cadastrarPaciente} disabled={salvandoPac} style={{
+                padding: "9px 18px", borderRadius: 10, border: "none",
+                background: salvandoPac ? "#CBD5E1" : `linear-gradient(135deg,${COR},${COR2})`,
+                color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: salvandoPac ? "not-allowed" : "pointer",
+              }}>{salvandoPac ? "Salvando..." : "Cadastrar e usar"}</button>
             </div>
           </div>
         </div>

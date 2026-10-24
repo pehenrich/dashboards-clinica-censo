@@ -28,6 +28,33 @@ function usePainelFetch(url, intervalMs = 30000) {
   return { data, loading, tick };
 }
 
+function InfoTip({ texto }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+      onClick={(e) => { e.stopPropagation(); setShow(s => !s); }}
+      style={{ position: "relative", display: "inline-flex", marginLeft: 5 }}
+    >
+      <span style={{
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        width: 12, height: 12, borderRadius: "50%", background: "#64748B", color: "#fff",
+        fontSize: 8, fontWeight: 800, cursor: "help", userSelect: "none", fontStyle: "normal",
+      }}>i</span>
+      {show && (
+        <span style={{
+          position: "absolute", bottom: "140%", left: 0, transform: "translateX(-10%)",
+          background: "#0F172A", color: "#F1F5F9", fontSize: 11, fontWeight: 500, lineHeight: 1.45,
+          padding: "9px 11px", borderRadius: 8, width: 220, zIndex: 80,
+          boxShadow: "0 6px 18px rgba(0,0,0,.4)", border: "1px solid #334155",
+          textAlign: "left", textTransform: "none", letterSpacing: "normal",
+        }}>{texto}</span>
+      )}
+    </span>
+  );
+}
+
 function ColunaRecepcaoTV({ cod, nome, cor }) {
   const { data: resumo, loading } = usePainelFetch(`/api/painel/resumo-hoje?setor=${cod}`);
   const [meta, setMeta] = useState(undefined); // undefined=carregando, null=sem meta
@@ -70,9 +97,9 @@ function ColunaRecepcaoTV({ cod, nome, cor }) {
   const corBarra = pct >= 100 ? "#10B981" : pct >= 60 ? cor : pct >= 30 ? "#F59E0B" : "#EF4444";
 
   return (
-    <div style={{ background:"#1E293B", borderRadius:14, overflow:"hidden", border:`1px solid ${cor}40` }}>
+    <div style={{ background:"#1E293B", borderRadius:14, border:`1px solid ${cor}40` }}>
       {/* Barra de meta no topo */}
-      <div style={{ background:`linear-gradient(135deg, ${cor}30, ${cor}10)`, padding:"14px 16px", borderBottom:`2px solid ${cor}` }}>
+      <div style={{ background:`linear-gradient(135deg, ${cor}30, ${cor}10)`, padding:"14px 16px", borderBottom:`2px solid ${cor}`, borderRadius:"14px 14px 0 0", overflow:"hidden" }}>
         <div style={{ fontSize:13, fontWeight:800, color:"#F1F5F9", marginBottom:8 }}>{nome}</div>
         {meta === undefined ? (
           <div style={{ height:8 }}/>
@@ -137,7 +164,10 @@ function ColunaRecepcaoTV({ cod, nome, cor }) {
             </div>
           </div>
           <div>
-            <div style={{ fontSize:9, color:"#64748B", fontWeight:700, textTransform:"uppercase" }}>Espera Média</div>
+            <div style={{ fontSize:9, color:"#64748B", fontWeight:700, textTransform:"uppercase", display:"flex", alignItems:"center" }}>
+              Espera Média
+              <InfoTip texto="Hoje: da chegada (senha) até a chamada real; cai para a abertura da OS quando não há chamada nem senha correlacionada para aquele atendimento (ex.: Censo Imagem, que não usa senha/totem)." />
+            </div>
             <div style={{ fontSize:14, fontWeight:800,
               color: !resumo?.espera_media_min ? "#475569" : resumo.espera_media_min<=15?"#10B981":resumo.espera_media_min<=30?"#F59E0B":"#EF4444" }}>
               {loading ? "…" : resumo?.espera_media_min > 0 ? `${Math.round(resumo.espera_media_min)}min` : "—"}
@@ -401,11 +431,12 @@ function PainelTV() {
         <div style={{ fontSize:13, color:"#94A3B8", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
           📍 Por Recepção — Hoje
         </div>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:14 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:14 }}>
           <ColunaRecepcaoTV cod="RCN" nome="Consultórios" cor="#3B7EF5"/>
           <ColunaRecepcaoTV cod="RDI" nome="Diagnóstico"  cor="#8B5CF6"/>
           <ColunaRecepcaoTV cod="OCUP_TIPO" nome="Ocupacional" cor="#F59E0B"/>
           <ColunaRecepcaoTV cod="RCI" nome="Censo Imagem" cor="#10B981"/>
+          <ColunaRecepcaoTV cod="57" nome="CMI" cor="#2563EB"/>
         </div>
       </div>
 

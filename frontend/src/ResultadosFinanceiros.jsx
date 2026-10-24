@@ -235,6 +235,7 @@ const SETORES_FILTRO = [
   { cod: "RDI", label: "Recepção Diagnóstico" },
   { cod: "ROC", label: "Recepção Ocupacional" },
   { cod: "RCI", label: "Recepção Censo Imagem" },
+  { cod: "57",  label: "Recepção CMI" },
 ];
 
 const SETORES_RECEPCAO = SETORES_FILTRO.filter(s => s.cod !== "TODOS");

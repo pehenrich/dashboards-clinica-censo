@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "./Login";
+import TelaProntuario from "./AtendimentoProntuario";
 
 const API = `${window.location.protocol}//${window.location.host}`;
 const COR = "#8B1A1A";
@@ -30,6 +31,21 @@ function iniciais(nome) {
   if (!nome) return "?";
   const partes = nome.trim().split(/\s+/);
   return ((partes[0]?.[0] || "") + (partes[1]?.[0] || "")).toUpperCase();
+}
+
+const PREPOSICOES_NOME = new Set(["de", "da", "do", "das", "dos", "e"]);
+function capitalizar(nome) {
+  if (!nome) return "";
+  return nome.trim().toLowerCase().split(/\s+/)
+    .map((p, i) => (i > 0 && PREPOSICOES_NOME.has(p)) ? p : p.charAt(0).toUpperCase() + p.slice(1))
+    .join(" ");
+}
+
+function corEspera(min) {
+  if (min == null) return { cor: "#64748B", bg: "#F1F5F9" };
+  if (min > 30) return { cor: "#DC2626", bg: "#FEF2F2" };
+  if (min > 15) return { cor: "#D97706", bg: "#FFFBEB" };
+  return { cor: "#059669", bg: "#ECFDF5" };
 }
 
 function hora(dtISO) {
@@ -71,33 +87,34 @@ function AtendimentoHero({ nome, fila, loading }) {
   const stats = [
     { label: "Na fila", value: loading ? "—" : String(total), sub: total === 1 ? "paciente" : "pacientes" },
     { label: "Tempo médio de espera", value: loading ? "—" : `${esperaMedia} min`, sub: total ? "aguardando" : "sem fila" },
-    { label: "Próximo", value: loading ? "—" : (proximo ? proximo.paciente.split(" ").slice(0, 2).join(" ") : "—"), sub: proximo?.servico || "" },
+    { label: "Próximo", value: loading ? "—" : (proximo ? capitalizar(proximo.paciente).split(" ").slice(0, 2).join(" ") : "—"), sub: proximo?.servico || "" },
   ];
 
   return (
     <div style={{
       background: `linear-gradient(135deg, ${COR} 0%, ${COR2} 100%)`,
-      borderRadius: 20, padding: "22px 30px",
-      boxShadow: `0 8px 32px ${COR}40`, position: "relative", overflow: "hidden",
+      borderRadius: 16, padding: "10px 18px",
+      boxShadow: `0 8px 32px ${COR}40`, position: "relative", overflow: "hidden", flexShrink: 0,
     }}>
-      <div style={{ position: "absolute", right: -30, top: -30, width: 200, height: 200, borderRadius: "50%", background: "rgba(255,255,255,0.07)", pointerEvents: "none" }} />
-      <div style={{ position: "absolute", right: 60, bottom: -60, width: 160, height: 160, borderRadius: "50%", background: "rgba(255,255,255,0.05)", pointerEvents: "none" }} />
+      <div style={{ position: "absolute", right: -30, top: -30, width: 160, height: 160, borderRadius: "50%", background: "rgba(255,255,255,0.07)", pointerEvents: "none" }} />
       <div style={{ position: "relative" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-          <span style={{ fontSize: 22 }}>🩺</span>
-          <div style={{ fontSize: 20, fontWeight: 900, color: "#fff", letterSpacing: "-0.3px" }}>Atendimento — {nome}</div>
-        </div>
-        <div style={{ fontSize: 13, color: "rgba(255,255,255,0.75)", marginBottom: 22, fontWeight: 500 }}>
-          Fila de pacientes recepcionados hoje, em tempo real
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 16 }}>
-          {stats.map((s, i) => (
-            <div key={i} style={{ background: "rgba(255,255,255,0.15)", borderRadius: 14, padding: "14px 18px", backdropFilter: "blur(4px)", minWidth: 0 }}>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.8)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 5 }}>{s.label}</div>
-              <div style={{ fontSize: 22, fontWeight: 900, color: "#fff", lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.value}</div>
-              {s.sub && <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginTop: 3 }}>{s.sub}</div>}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            <span style={{ fontSize: 20, flexShrink: 0 }}>🩺</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 16.5, fontWeight: 900, color: "#fff", letterSpacing: "-0.3px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Atendimento — {nome}</div>
+              <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.75)", fontWeight: 500 }}>Fila de pacientes recepcionados hoje, em tempo real</div>
             </div>
-          ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {stats.map((s, i) => (
+              <div key={i} style={{ background: "rgba(255,255,255,0.15)", borderRadius: 10, padding: "5px 14px", backdropFilter: "blur(4px)", minWidth: 96, maxWidth: 160, textAlign: "center" }}>
+                <div style={{ fontSize: 9.5, color: "rgba(255,255,255,0.8)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>{s.label}</div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: "#fff", lineHeight: 1.25, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.value}</div>
+                {s.sub && <div style={{ fontSize: 10, color: "rgba(255,255,255,0.7)" }}>{s.sub}</div>}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>
@@ -125,70 +142,224 @@ function Fila({ psvCod, onAbrir, onCarregou }) {
   }, [carregar]);
 
   return (
-    <Card style={{ flex: 1, minHeight: 0 }}>
-      <div style={{ padding: "18px 22px", borderBottom: "1px solid #F1F5F9", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 34, height: 34, borderRadius: 10, background: `${COR}12`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>📋</div>
+    <Card style={{ flex: 1, minHeight: 340 }}>
+      <div style={{ padding: "20px 24px", borderBottom: "1px solid #F1F5F9", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 12, background: `${COR}12`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>📋</div>
           <div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>Fila de Atendimento</div>
-            <div style={{ fontSize: 12, color: "#64748B", marginTop: 1 }}>Pacientes recepcionados, aguardando chamada</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#0F172A" }}>Fila de Atendimento</div>
+            <div style={{ fontSize: 13, color: "#64748B", marginTop: 1 }}>Pacientes recepcionados, aguardando chamada</div>
           </div>
         </div>
         <button onClick={carregar} title="Atualizar" style={{
-          width: 36, height: 36, borderRadius: 10, border: "1px solid #E2E8F0", background: "#F8FAFC",
-          cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: "#64748B",
+          width: 42, height: 42, borderRadius: 12, border: "1px solid #E2E8F0", background: "#F8FAFC",
+          cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, color: "#64748B",
           transition: "transform .2s",
         }}>↻</button>
       </div>
 
       {loading ? (
-        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+          <Skeleton h={84} /><Skeleton h={84} /><Skeleton h={84} />
+        </div>
+      ) : erro ? (
+        <div style={{ padding: 32, textAlign: "center", color: "#DC2626", fontSize: 14 }}>{erro}</div>
+      ) : fila.length === 0 ? (
+        <div style={{ padding: 56, textAlign: "center", color: "#CBD5E1" }}>
+          <div style={{ fontSize: 44, marginBottom: 12 }}>✓</div>
+          <div style={{ fontSize: 15.5, fontWeight: 700, color: "#94A3B8" }}>Nenhum paciente aguardando</div>
+          <div style={{ fontSize: 13, color: "#CBD5E1", marginTop: 5 }}>A fila atualiza automaticamente a cada 30s</div>
+        </div>
+      ) : (
+        <div style={{ overflowY: "auto", flex: 1, minHeight: 0, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+          {fila.map((p, i) => {
+            const espera = corEspera(p.espera_min);
+            const proximo = i === 0;
+            const nome = capitalizar(p.paciente);
+            return (
+              <div key={p.pac_reg + "_" + p.chegada} onClick={() => onAbrir(p)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 16, padding: "16px 18px", cursor: "pointer",
+                  borderRadius: 16, transition: "background .12s, border-color .12s",
+                  border: proximo ? `1.5px solid ${COR}30` : "1.5px solid #F1F5F9",
+                  background: proximo ? `${COR}06` : "#FAFBFC",
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = proximo ? `${COR}0F` : "#F1F5F9"}
+                onMouseLeave={e => e.currentTarget.style.background = proximo ? `${COR}06` : "#FAFBFC"}>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5, flexShrink: 0, width: 52 }}>
+                  <div style={{
+                    width: 50, height: 50, borderRadius: "50%", flexShrink: 0,
+                    background: proximo ? `linear-gradient(135deg,${COR},${COR2})` : "#EEF1F5",
+                    color: proximo ? "#fff" : "#64748B", display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 15.5, fontWeight: 800, boxShadow: proximo ? `0 4px 12px ${COR}40` : "none",
+                  }}>{iniciais(nome)}</div>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: proximo ? COR : "#CBD5E1" }}>{i + 1}º</span>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: "#0F172A", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>
+                      {nome}
+                    </div>
+                    {p.preferencial === "S" && (
+                      <span title="Atendimento preferencial" style={{
+                        fontSize: 10.5, fontWeight: 800, color: "#B45309", background: "#FFFBEB", padding: "2px 8px", borderRadius: 99, flexShrink: 0,
+                      }}>★ PREF.</span>
+                    )}
+                    {proximo && (
+                      <span style={{ fontSize: 10.5, fontWeight: 800, color: "#fff", background: `linear-gradient(135deg,${COR},${COR2})`, padding: "2px 9px", borderRadius: 99, flexShrink: 0 }}>
+                        PRÓXIMO
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 13, color: "#94A3B8", marginTop: 4, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                    <span>{idade(p.nascimento)}</span><span>·</span><span>chegou {hora(p.chegada)}</span>
+                    {p.servico && <span style={{
+                      fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 99,
+                      background: `${COR}12`, color: COR,
+                    }}>{p.servico}</span>}
+                  </div>
+                </div>
+                <div style={{
+                  fontSize: 12.5, fontWeight: 800, padding: "7px 14px", borderRadius: 99, flexShrink: 0, textAlign: "center", minWidth: 66,
+                  background: espera.bg, color: espera.cor,
+                }}>{p.espera_min} min</div>
+                <div style={{ color: "#CBD5E1", fontSize: 20, flexShrink: 0 }}>›</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── STATUS DA AGENDA (agm_stat) ──────────────────────────────────────────────
+const STATUS_AGM = {
+  A: { label: "Aguardando", cor: "#2563EB", bg: "#EFF6FF" },
+  E: { label: "Executado", cor: "#059669", bg: "#ECFDF5" },
+  C: { label: "Cancelado", cor: "#DC2626", bg: "#FEF2F2" },
+};
+function statusAgm(s) {
+  return STATUS_AGM[s] || { label: s || "—", cor: "#94A3B8", bg: "#F1F5F9" };
+}
+
+function hojeISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// ── MINHA AGENDA ─────────────────────────────────────────────────────────────
+function MinhaAgenda({ psvCod, onAbrir }) {
+  const [data, setData] = useState(hojeISO());
+  const [agenda, setAgenda] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [erro, setErro] = useState(null);
+
+  const carregar = useCallback(() => {
+    setLoading(true); setErro(null);
+    fetch(`${API}/api/atendimento/agenda?medico=${psvCod}&data=${data}`)
+      .then(r => r.json())
+      .then(d => { setAgenda(d.agenda || []); setLoading(false); })
+      .catch(() => { setErro("Não foi possível carregar a agenda."); setLoading(false); });
+  }, [psvCod, data]);
+
+  useEffect(() => {
+    carregar();
+    const t = setInterval(carregar, 60000);
+    return () => clearInterval(t);
+  }, [carregar]);
+
+  const mudarDia = (delta) => {
+    const d = new Date(data + "T12:00:00");
+    d.setDate(d.getDate() + delta);
+    setData(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+  };
+
+  const abrirItem = (a) => {
+    onAbrir({
+      pac_reg: a.pac_reg, paciente: a.paciente, nascimento: a.nascimento,
+      chegada: a.chegada ? `${data}T${a.chegada}:00` : null,
+      espera_min: null, servico: a.servico,
+    });
+  };
+
+  return (
+    <Card style={{ flex: 1, minHeight: 340 }}>
+      <div style={{ padding: "20px 24px", borderBottom: "1px solid #F1F5F9", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 12, background: `${COR}12`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>📅</div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#0F172A" }}>Minha Agenda</div>
+            <div style={{ fontSize: 13, color: "#64748B", marginTop: 1 }}>
+              {new Date(data + "T12:00:00").toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" })}
+              {data === hojeISO() ? " · hoje" : ""}
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => mudarDia(-1)} title="Dia anterior" style={{
+            width: 40, height: 40, borderRadius: 11, border: "1px solid #E2E8F0", background: "#F8FAFC",
+            cursor: "pointer", fontSize: 16, color: "#64748B",
+          }}>‹</button>
+          <button onClick={() => setData(hojeISO())} title="Hoje" style={{
+            padding: "0 14px", height: 40, borderRadius: 11, border: "1px solid #E2E8F0", background: "#F8FAFC",
+            cursor: "pointer", fontSize: 12.5, fontWeight: 700, color: "#64748B",
+          }}>Hoje</button>
+          <button onClick={() => mudarDia(1)} title="Próximo dia" style={{
+            width: 40, height: 40, borderRadius: 11, border: "1px solid #E2E8F0", background: "#F8FAFC",
+            cursor: "pointer", fontSize: 16, color: "#64748B",
+          }}>›</button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
           <Skeleton h={64} /><Skeleton h={64} /><Skeleton h={64} />
         </div>
       ) : erro ? (
-        <div style={{ padding: 32, textAlign: "center", color: "#DC2626", fontSize: 13 }}>{erro}</div>
-      ) : fila.length === 0 ? (
-        <div style={{ padding: 48, textAlign: "center", color: "#CBD5E1" }}>
-          <div style={{ fontSize: 38, marginBottom: 10 }}>✓</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#94A3B8" }}>Nenhum paciente aguardando</div>
-          <div style={{ fontSize: 12, color: "#CBD5E1", marginTop: 4 }}>A fila atualiza automaticamente a cada 30s</div>
+        <div style={{ padding: 32, textAlign: "center", color: "#DC2626", fontSize: 14 }}>{erro}</div>
+      ) : agenda.length === 0 ? (
+        <div style={{ padding: 56, textAlign: "center", color: "#CBD5E1" }}>
+          <div style={{ fontSize: 44, marginBottom: 12 }}>📅</div>
+          <div style={{ fontSize: 15.5, fontWeight: 700, color: "#94A3B8" }}>Sem agendamentos nesse dia</div>
         </div>
       ) : (
         <div style={{ overflowY: "auto", flex: 1, minHeight: 0 }}>
-          {fila.map((p, i) => (
-            <div key={p.pac_reg + "_" + p.chegada} onClick={() => onAbrir(p)}
-              style={{
-                display: "flex", alignItems: "center", gap: 14, padding: "16px 22px", cursor: "pointer",
-                borderBottom: i < fila.length - 1 ? "1px solid #F1F5F9" : "none", transition: "background .12s",
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = "#FEF2F2"}
-              onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-              <div style={{
-                width: 40, height: 40, borderRadius: "50%", flexShrink: 0,
-                background: i === 0 ? `linear-gradient(135deg,${COR},${COR2})` : "#F1F5F9",
-                color: i === 0 ? "#fff" : "#64748B", display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 13, fontWeight: 800, boxShadow: i === 0 ? `0 4px 12px ${COR}40` : "none",
-              }}>{iniciais(p.paciente)}</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#0F172A", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {p.paciente}
+          {agenda.map((a, i) => {
+            const st = statusAgm(a.status);
+            return (
+              <div key={a.pac_reg + "_" + a.hora_inicio} onClick={() => abrirItem(a)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 16, padding: "16px 24px", cursor: "pointer",
+                  borderBottom: i < agenda.length - 1 ? "1px solid #F1F5F9" : "none",
+                  opacity: a.status === "C" ? 0.55 : 1,
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = "#FEF2F2"}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                <div style={{ width: 54, flexShrink: 0, textAlign: "center" }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: "#334155" }}>{a.hora_inicio}</div>
+                  <div style={{ fontSize: 11, color: "#CBD5E1" }}>{a.hora_fim}</div>
                 </div>
-                <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  <span>{idade(p.nascimento)}</span><span>·</span><span>chegou {hora(p.chegada)}</span>
-                  {p.servico && <span style={{
-                    fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99,
-                    background: `${COR}12`, color: COR,
-                  }}>{p.servico}</span>}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 15.5, fontWeight: 700, color: "#0F172A", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {capitalizar(a.paciente)}
+                  </div>
+                  <div style={{ fontSize: 13, color: "#94A3B8", marginTop: 3, display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                    {a.servico && <span>{a.servico}</span>}
+                    {a.chegou === 1 && (
+                      <span style={{ fontSize: 11, fontWeight: 800, color: "#059669", background: "#ECFDF5", padding: "2px 8px", borderRadius: 99 }}>
+                        ✓ chegou {a.chegada}
+                      </span>
+                    )}
+                  </div>
                 </div>
+                <span style={{
+                  fontSize: 11.5, fontWeight: 800, padding: "5px 12px", borderRadius: 99, flexShrink: 0,
+                  background: st.bg, color: st.cor,
+                }}>{st.label}</span>
               </div>
-              <div style={{
-                fontSize: 11, fontWeight: 800, padding: "5px 12px", borderRadius: 99, flexShrink: 0,
-                background: p.espera_min > 30 ? "#FEF2F2" : "#ECFDF5",
-                color: p.espera_min > 30 ? "#DC2626" : "#059669",
-              }}>{p.espera_min} min</div>
-              <div style={{ color: "#CBD5E1", fontSize: 18 }}>›</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Card>
@@ -285,46 +456,46 @@ function BuscaPaciente({ onSelecionar }) {
   };
 
   return (
-    <Card style={{ marginBottom: 16 }}>
+    <Card style={{ flexShrink: 0 }}>
       <div onClick={() => setAberto(v => !v)} style={{
-        padding: "16px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer",
+        padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 34, height: 34, borderRadius: 10, background: "#EFF6FF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🔍</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 10, background: "#EFF6FF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🔍</div>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 800, color: "#0F172A" }}>Buscar Paciente</div>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: "#0F172A" }}>Buscar Paciente</div>
             <div style={{ fontSize: 12, color: "#64748B", marginTop: 1 }}>Atender alguém fora da fila (busca no cadastro)</div>
           </div>
         </div>
-        <span style={{ fontSize: 14, color: "#94A3B8", transform: aberto ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▾</span>
+        <span style={{ fontSize: 16, color: "#94A3B8", transform: aberto ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▾</span>
       </div>
       {aberto && (
         <div style={{ padding: "0 22px 18px" }}>
           <input autoFocus placeholder="Nome, nº de registro ou CPF..." value={termo}
             onChange={e => setTermo(e.target.value)}
-            style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: "1.5px solid #E2E8F0", fontSize: 13, boxSizing: "border-box", outline: "none" }}
+            style={{ width: "100%", padding: "13px 16px", borderRadius: 12, border: "1.5px solid #E2E8F0", fontSize: 14.5, boxSizing: "border-box", outline: "none" }}
             onFocus={e => e.target.style.borderColor = COR}
             onBlur={e => e.target.style.borderColor = "#E2E8F0"} />
-          {buscando && <div style={{ marginTop: 10 }}><Skeleton h={40} /></div>}
+          {buscando && <div style={{ marginTop: 10 }}><Skeleton h={44} /></div>}
           {resultados !== null && !buscando && (
             resultados.length === 0 ? (
-              <div style={{ padding: 14, textAlign: "center", color: "#CBD5E1", fontSize: 12 }}>Nenhum paciente encontrado.</div>
+              <div style={{ padding: 16, textAlign: "center", color: "#CBD5E1", fontSize: 13 }}>Nenhum paciente encontrado.</div>
             ) : (
-              <div style={{ marginTop: 10, maxHeight: 280, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ marginTop: 10, maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 7 }}>
                 {resultados.map(p => (
                   <div key={p.pac_reg} onClick={() => escolher(p)} style={{
-                    display: "flex", alignItems: "center", gap: 10,
-                    padding: "10px 14px", borderRadius: 10, border: "1px solid #F1F5F9", cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 12,
+                    padding: "12px 16px", borderRadius: 12, border: "1px solid #F1F5F9", cursor: "pointer",
                   }}
                     onMouseEnter={e => e.currentTarget.style.background = "#FEF2F2"}
                     onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
                     <div style={{
-                      width: 30, height: 30, borderRadius: "50%", background: "#F1F5F9", color: "#64748B",
-                      display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0,
+                      width: 36, height: 36, borderRadius: "50%", background: "#F1F5F9", color: "#64748B",
+                      display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, flexShrink: 0,
                     }}>{iniciais(p.nome)}</div>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "#0F172A" }}>{p.nome}</div>
-                      <div style={{ fontSize: 11, color: "#94A3B8" }}>
+                      <div style={{ fontSize: 14.5, fontWeight: 700, color: "#0F172A" }}>{capitalizar(p.nome)}</div>
+                      <div style={{ fontSize: 12.5, color: "#94A3B8" }}>
                         {idade(p.nascimento)} · reg. {p.pac_reg}{p.cpf ? ` · CPF ${p.cpf}` : ""}
                       </div>
                     </div>
@@ -508,12 +679,66 @@ function AbaPrescricao({ suportado, valor, onChange }) {
 }
 
 // ── ABA DOCUMENTOS (gerar/imprimir — não grava no banco) ───────────────────
-function abrirEImprimir(html, titulo) {
+export function abrirEImprimir(html, titulo) {
   const janela = window.open("", "_blank", "width=900,height=1000");
   janela.document.write(html);
   janela.document.close();
   janela.focus();
   setTimeout(() => janela.print(), 300);
+}
+
+// Cabeçalho timbrado (logo da Clínica Censo + logo do ICDS) — exigido em
+// todo documento impresso pelo Dashboard (atestado, receituário, guia etc.),
+// não só um texto genérico "Clínica Censo".
+export const CSS_TIMBRADO = `
+  .timbrado { margin-bottom:26px; }
+  .timbrado-barra { height:5px; border-radius:4px 4px 0 0;
+                     background:linear-gradient(90deg,#8B1A1A 0%,#C0392B 60%,#D97706 100%); }
+  .timbrado-conteudo { display:flex; align-items:center; gap:16px; padding:14px 20px;
+                        background:#FAFAFA; border:1px solid #ECECEC; border-top:none;
+                        border-radius:0 0 10px 10px; }
+  .timbrado-conteudo img.logo-clinica { height:42px; object-fit:contain; }
+  .timbrado-conteudo img.logo-icds { height:28px; object-fit:contain; margin-left:auto; }
+  .timbrado-divisor { width:1px; height:32px; background:#DDD; }
+  .timbrado-info .nome { font-size:14px; font-weight:800; letter-spacing:.05em; color:#111; }
+  .timbrado-info .sub { font-size:10.5px; color:#888; margin-top:2px; letter-spacing:.02em; }
+`;
+export function htmlTimbrado() {
+  return `
+    <div class="timbrado">
+      <div class="timbrado-barra"></div>
+      <div class="timbrado-conteudo">
+        <img class="logo-clinica" src="/logo_clinica_censo.png" onerror="this.style.display='none'"/>
+        <div class="timbrado-divisor"></div>
+        <div class="timbrado-info">
+          <div class="nome">CLÍNICA CENSO</div>
+          <div class="sub">Parauapebas · PA · Gestão ICDS</div>
+        </div>
+        <img class="logo-icds" src="/icds_logo.png" onerror="this.style.display='none'"/>
+      </div>
+    </div>`;
+}
+
+// Rodapé com endereço e contato da clínica (ver /api/atendimento/clinica).
+// Telefone e e-mail de contato NÃO vêm do Smart (EMP_FONE/EMP_EMAIL são de
+// outro setor/uso) — são fixos, confirmados pelo usuário: (94) 9255-5249 e
+// ouvidoria.censo@icds.org.br.
+export const CSS_RODAPE_CLINICA = `
+  .rodape-clinica { margin-top:36px; padding-top:8px; border-top:1px solid #E5E5E5;
+                     text-align:center; font-size:9.5px; color:#999; letter-spacing:.01em; }
+`;
+const TELEFONE_CONTATO_CLINICA = "(94) 9255-5249";
+const EMAIL_CONTATO_CLINICA = "ouvidoria.censo@icds.org.br";
+export function htmlRodapeClinica(clinica) {
+  const partes = [];
+  if (clinica?.rua) {
+    const bairro = (clinica.bairro || "").replace(/^BAIRRO\s+/i, "Bairro ");
+    partes.push(`Rua ${clinica.rua}${clinica.numero ? `, nº ${clinica.numero}` : ""}${bairro ? `, ${bairro}` : ""}`);
+  }
+  if (clinica?.cep) partes.push(`CEP ${clinica.cep.replace(/(\d{5})(\d{3})/, "$1-$2")}`);
+  partes.push(TELEFONE_CONTATO_CLINICA);
+  partes.push(EMAIL_CONTATO_CLINICA);
+  return `<div class="rodape-clinica">${partes.join(" · ")}</div>`;
 }
 
 // ── busca de procedimento (TUSS) ─────────────────────────────────────────────
@@ -720,7 +945,7 @@ function CampoConvenio({ onEscolher }) {
 }
 
 // ── Guia SP/SADT (solicitação de exames/procedimentos ao convênio) ─────────
-function DocGuiaSadt({ item, medicoInfo }) {
+export function DocGuiaSadt({ item, medicoInfo }) {
   const [paciente, setPaciente] = useState(null);
   const [clinica, setClinica] = useState(null);
   const [carater, setCarater] = useState("eletivo");
@@ -752,21 +977,17 @@ function DocGuiaSadt({ item, medicoInfo }) {
   const remover = (i) => setItens(prev => prev.filter((_, j) => j !== i));
   const setQtd = (i, qtd) => setItens(prev => prev.map((it, j) => j === i ? { ...it, qtd } : it));
 
+  // Layout fiel ao formulário oficial Padrão TISS - Componente de Conteúdo e
+  // Estrutura (ANS) da Guia de Serviço Profissional/SP-SADT — mesma numeração
+  // de campo (1 a 68) e agrupamento em seções usado por todas as operadoras,
+  // não um layout inventado. Campos que só o faturamento/operadora preenche
+  // (autorização, execução, valores) ficam em branco de propósito.
   const gerar = () => {
     const hoje = new Date().toLocaleDateString("pt-BR");
     const medNome = medicoInfo ? `${medicoInfo.tratamento} ${medicoInfo.nome}`.trim() : "";
     const medConselho = medicoInfo?.conselho || "";
     const medNumConselho = medicoInfo?.crm || "";
     const medUf = medicoInfo?.uf || "";
-    const logoUrl = convenio?.codigo ? `${API}/tiss-logos/c-${convenio.codigo.trim()}.bmp` : "";
-
-    const linhasProc = itens.map(it => `
-      <tr>
-        <td>${hoje}</td><td style="text-align:center">22</td><td>${it.tuss}</td><td>${it.nome}</td><td style="text-align:center">${it.qtd}</td>
-      </tr>`).join("");
-    // preenche linhas vazias até 5, pra manter o formato de tabela do formulário oficial
-    const linhasVazias = Array.from({ length: Math.max(0, 5 - itens.length) })
-      .map(() => `<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>`).join("");
 
     const box = (num, lbl, val, width) => `
       <div class="box" style="width:${width}">
@@ -775,88 +996,169 @@ function DocGuiaSadt({ item, medicoInfo }) {
         <span class="val">${val || "&nbsp;"}</span>
       </div>`;
 
+    const linhasSolic = Array.from({ length: 5 }).map((_, i) => {
+      const it = itens[i];
+      return `
+        <tr>
+          <td>${i + 1}</td>
+          <td>${it ? "22" : "&nbsp;"}</td>
+          <td>${it?.tuss || "&nbsp;"}</td>
+          <td>${it?.nome || "&nbsp;"}</td>
+          <td style="text-align:center">${it ? it.qtd : "&nbsp;"}</td>
+          <td>&nbsp;</td>
+        </tr>`;
+    }).join("");
+
+    const linhasExec = Array.from({ length: 5 }).map((_, i) => `
+      <tr>
+        <td>${i + 1}</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
+        <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
+      </tr>`).join("");
+
+    const linhasProfExec = Array.from({ length: 4 }).map(() => `
+      <tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>`).join("");
+
     const html = `
       <html><head><title>GUIA SP/SADT</title>
       <style>
+        @page { size: A4 landscape; margin: 8mm; }
         * { box-sizing: border-box; }
-        body { font-family: Arial, sans-serif; padding: 22px 28px; color: #111; font-size: 11px; }
-        .topo { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; }
-        .topo-boxes { display:flex; gap:0; }
-        .logo { height:44px; object-fit:contain; }
-        h1 { text-align:center; font-size:13px; letter-spacing:.5px; margin:6px 0 14px; text-transform:uppercase; }
-        .aviso { background:#FFF7E6; border:1px solid #D9A400; padding:6px 10px; margin-bottom:12px; font-size:10px; }
-        .secao { background:#8B1A1A; color:#fff; font-size:9.5px; font-weight:700; text-transform:uppercase;
-                 letter-spacing:.04em; padding:3px 8px; margin-top:10px; }
+        html, body { width: 100%; }
+        body { font-family: Arial, sans-serif; padding: 0; margin: 0; color: #111; font-size: 9px; }
+        .topo { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; gap:10px; }
+        h1 { text-align:center; font-size:12px; letter-spacing:.3px; margin:0; text-transform:uppercase; flex:1; }
+        .nguia { font-size:9px; text-align:right; }
+        .nguia b { font-size:13px; }
+        .aviso { background:#FFF7E6; border:1px solid #D9A400; padding:3px 9px; margin-bottom:4px; font-size:8px; }
+        .operadora { background:#111; color:#fff; text-align:center; padding:3px; font-size:10px; font-weight:800; letter-spacing:.04em; margin-bottom:4px; }
+        .secao { background:#8B1A1A; color:#fff; font-size:8px; font-weight:700; text-transform:uppercase;
+                 letter-spacing:.03em; padding:1px 7px; margin-top:0; }
         .linha-boxes { display:flex; flex-wrap:wrap; border:1px solid #111; border-top:none; }
-        .box { border-right:1px solid #111; border-bottom:1px solid #111; padding:3px 6px 4px; position:relative; min-height:34px; }
+        .box { border-right:1px solid #111; border-bottom:1px solid #111; padding:1px 5px 2px; position:relative; min-height:20px; }
         .box:last-child { border-right:none; }
-        .box .num { position:absolute; top:1px; left:3px; font-size:7px; color:#888; font-weight:700; }
-        .box .lbl { display:block; font-size:7px; color:#555; text-transform:uppercase; margin-top:7px; }
-        .box .val { display:block; font-size:11px; font-weight:600; margin-top:1px; }
+        .box .num { position:absolute; top:0; left:3px; font-size:6px; color:#888; font-weight:700; }
+        .box .lbl { display:block; font-size:6px; color:#555; text-transform:uppercase; margin-top:5px; }
+        .box .val { display:block; font-size:9px; font-weight:600; margin-top:0; }
         table.proc { width:100%; border-collapse:collapse; border:1px solid #111; border-top:none; }
-        table.proc th, table.proc td { border:1px solid #111; padding:4px 6px; font-size:10px; height:20px; }
-        table.proc th { background:#F1F5F9; text-align:left; font-size:8.5px; text-transform:uppercase; }
-        .assinatura { text-align:center; margin-top:60px; }
-        .linha-assin { border-top:1px solid #111; width:300px; margin:0 auto 5px; }
-        .rodape { margin-top:24px; font-size:8px; color:#999; text-align:center; }
+        table.proc th, table.proc td { border:1px solid #111; padding:1px 4px; font-size:7.5px; height:11px; }
+        table.proc th { background:#F1F5F9; text-align:left; font-size:6.5px; text-transform:uppercase; }
+        .assinaturas { display:flex; border:1px solid #111; border-top:none; }
+        .assinatura { flex:1; text-align:center; padding:10px 6px 3px; border-right:1px solid #111; font-size:7px; }
+        .assinatura:last-child { border-right:none; }
+        .linha-assin { border-top:1px solid #111; margin-bottom:3px; }
+        .rodape { margin-top:4px; font-size:7px; color:#999; text-align:center; }
       </style></head>
       <body>
         <div class="topo">
-          <div class="linha-boxes" style="border-bottom:none;">
-            ${box(1, "Registro ANS", convenio?.reg_ans, "170px")}
-            ${box(2, "Nº Guia no Prestador", `<b style="color:#B45309">A PREENCHER</b>`, "220px")}
-          </div>
-          ${logoUrl ? `<img class="logo" src="${logoUrl}" onerror="this.style.display='none'"/>` : ""}
+          <div></div>
+          <h1>Guia de Serviço Profissional / Serviço Auxiliar de<br/>Diagnóstico e Terapia - SP/SADT</h1>
+          <div class="nguia">2- Nº Guia no Prestador<br/><b style="color:#B45309">A PREENCHER</b></div>
         </div>
-        <h1>Guia de Solicitação de SP/SADT</h1>
-        <div class="aviso">⚠ Documento gerado pelo Dashboard Censo como SOLICITAÇÃO — o número oficial da guia e a autorização são atribuídos pelo setor de faturamento / operadora, não por este sistema.</div>
+        <div class="aviso">⚠ Documento gerado pelo Dashboard Censo como SOLICITAÇÃO — número da guia, autorização, execução e valores são preenchidos pelo faturamento/operadora, não por este sistema.</div>
+
+        <div class="operadora">OPERADORA: ${convenio?.nome ? convenio.nome.toUpperCase() : "<span style='color:#DC2626'>NÃO IDENTIFICADA — selecione o convênio antes de gerar</span>"}</div>
+
+        <div class="linha-boxes">
+          ${box(1, "Registro ANS", convenio?.reg_ans, "25%")}
+          ${box(3, "Número da Guia Principal", "", "75%")}
+        </div>
+        <div class="linha-boxes">
+          ${box(4, "Data da Autorização", "", "25%")}
+          ${box(5, "Senha", "", "25%")}
+          ${box(6, "Data de Validade da Senha", "", "25%")}
+          ${box(7, "Número da Guia Atribuído pela Operadora", "", "25%")}
+        </div>
 
         <div class="secao">Dados do Beneficiário</div>
         <div class="linha-boxes">
-          ${box(3, "Nº Carteira", carteirinha, "45%")}
-          ${box(4, "Validade da Carteira", "", "20%")}
-          ${box(5, "Nome", item.paciente, "35%")}
+          ${box(8, "Número da Carteira", carteirinha, "25%")}
+          ${box(9, "Validade da Carteira", "", "15%")}
+          ${box(10, "Nome", item.paciente, "35%")}
+          ${box(11, "Cartão Nacional de Saúde", "", "15%")}
+          ${box(12, "Atendimento a RN", "", "10%")}
         </div>
 
-        <div class="secao">Dados do Contratado Solicitante</div>
+        <div class="secao">Dados do Solicitante</div>
         <div class="linha-boxes">
-          ${box(6, "Nome do Contratado", clinica?.nome, "45%")}
-          ${box(7, "CNES", clinica?.cnes, "15%")}
-          ${box(8, "CNPJ", clinica?.cnpj, "40%")}
+          ${box(13, "Código na Operadora", "", "25%")}
+          ${box(14, "Nome do Contratado", clinica?.nome, "75%")}
         </div>
         <div class="linha-boxes">
-          ${box(9, "Nome do Profissional Solicitante", medNome, "45%")}
-          ${box(10, "Conselho", medConselho, "15%")}
-          ${box(11, "Número no Conselho", medNumConselho, "20%")}
-          ${box(12, "UF", medUf, "20%")}
-        </div>
-
-        <div class="secao">Dados da Solicitação</div>
-        <div class="linha-boxes">
-          ${box(13, "Data da Solicitação", hoje, "25%")}
-          ${box(14, "Caráter do Atendimento", carater === "eletivo" ? "1 - Eletivo" : "2 - Urgência/Emergência", "25%")}
-          ${box(15, "CID", cid, "50%")}
-        </div>
-        <div class="linha-boxes">
-          ${box(16, "Indicação Clínica", indicacao, "100%")}
+          ${box(15, "Nome do Profissional Solicitante", medNome, "40%")}
+          ${box(16, "Conselho Profissional", medConselho, "12%")}
+          ${box(17, "Número no Conselho", medNumConselho, "16%")}
+          ${box(18, "UF", medUf, "8%")}
+          ${box(19, "Código CBO", "", "12%")}
+          ${box(20, "Assinatura do Profissional Solicitante", "", "12%")}
         </div>
 
-        <div class="secao">Procedimentos ou Exames Solicitados</div>
+        <div class="secao">Dados da Solicitação / Procedimentos ou Itens Assistenciais Solicitados</div>
+        <div class="linha-boxes">
+          ${box(21, "Caráter do Atendimento", carater === "eletivo" ? "1" : "2", "12%")}
+          ${box(22, "Data da Solicitação", hoje, "13%")}
+          ${box(23, "Indicação Clínica", `${indicacao || ""}${cid ? ` (CID ${cid})` : ""}`, "75%")}
+        </div>
         <table class="proc">
           <tr>
-            <th style="width:70px">17 Data</th><th style="width:45px">18 Tabela</th>
-            <th style="width:90px">19 Código</th><th>20 Descrição</th><th style="width:50px">21 Qtd.</th>
+            <th style="width:20px">#</th><th style="width:45px">24-Tabela</th><th style="width:70px">25-Código</th>
+            <th>26-Descrição</th><th style="width:55px">27-Qtde Solic.</th><th style="width:55px">28-Qtde Aut.</th>
           </tr>
-          ${linhasProc}
-          ${linhasVazias}
+          ${linhasSolic}
         </table>
 
-        <div class="assinatura">
-          <div class="linha-assin"></div>
-          Data: ${hoje} &nbsp;·&nbsp; Assinatura e carimbo do profissional solicitante<br/>
-          ${medNome} — ${medConselho} ${medNumConselho}${medUf ? "/" + medUf : ""}
+        <div class="secao">Dados do Contratado Executante</div>
+        <div class="linha-boxes">
+          ${box(29, "Código na Operadora", "", "25%")}
+          ${box(30, "Nome do Contratado", "", "60%")}
+          ${box(31, "Código CNES", clinica?.cnes, "15%")}
         </div>
-        <div class="rodape">Documento gerado pelo Dashboard Censo · não substitui a guia oficial emitida/autorizada pela operadora</div>
+
+        <div class="secao">Dados do Atendimento</div>
+        <div class="linha-boxes">
+          ${box(32, "Tipo de Atendimento", "", "25%")}
+          ${box(33, "Indicação de Acidente", "", "25%")}
+          ${box(34, "Tipo de Consulta", "", "25%")}
+          ${box(35, "Motivo de Encerramento do Atendimento", "", "25%")}
+        </div>
+
+        <div class="secao">Dados da Execução / Procedimentos e Exames Realizados</div>
+        <table class="proc">
+          <tr>
+            <th>#</th><th>36-Data</th><th>37/38-Hora Ini/Fim</th><th>39-Tabela</th><th>40-Código</th>
+            <th>41-Descrição</th><th>42-Qtde</th><th>43-Via</th><th>45-Fator</th><th>46-Vlr Unit.</th><th>47-Vlr Total</th>
+          </tr>
+          ${linhasExec}
+        </table>
+
+        <div class="secao">Identificação do(s) Profissional(is) Executante(s)</div>
+        <table class="proc">
+          <tr>
+            <th>48-Seq.Ref</th><th>49-Grau Part.</th><th>50-Código Operadora/CPF</th><th>51-Nome do Profissional</th>
+            <th>52-Conselho</th><th>53-Nº Conselho</th><th>54-UF</th><th>55-Código CBO</th>
+          </tr>
+          ${linhasProfExec}
+        </table>
+
+        <div class="secao">Totais</div>
+        <div class="linha-boxes">
+          ${box(59, "Total de Procedimentos (R$)", "", "14%")}
+          ${box(60, "Total de Taxas e Aluguéis (R$)", "", "14%")}
+          ${box(61, "Total de Materiais (R$)", "", "14%")}
+          ${box(62, "Total de OPME (R$)", "", "14%")}
+          ${box(63, "Total de Medicamentos (R$)", "", "14%")}
+          ${box(64, "Total de Gases Medicinais (R$)", "", "15%")}
+          ${box(65, "Total Geral (R$)", "", "15%")}
+        </div>
+
+        <div class="assinaturas">
+          <div class="assinatura"><div class="linha-assin"></div>66 - Assinatura do Responsável pela Autorização</div>
+          <div class="assinatura"><div class="linha-assin"></div>67 - Assinatura do Beneficiário ou Responsável</div>
+          <div class="assinatura">
+            <div class="linha-assin"></div>68 - Assinatura do Contratado<br/>
+            ${medNome ? `${medNome} — ${medConselho} ${medNumConselho}${medUf ? "/" + medUf : ""}` : ""}
+          </div>
+        </div>
+        <div class="rodape">Documento gerado pelo Dashboard Censo, campos 1-68 conforme Padrão TISS/ANS (Componente de Conteúdo e Estrutura) · não substitui a guia oficial autorizada pela operadora</div>
       </body></html>`;
     abrirEImprimir(html, "GUIA SP/SADT");
   };
@@ -1047,7 +1349,7 @@ function TelaAtendimento({ item, medico, login, servico, onSalvo, onCancelar }) 
             display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800,
           }}>{iniciais(item.paciente)}</div>
           <div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>{item.paciente}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>{capitalizar(item.paciente)}</div>
             <div style={{ fontSize: 11, color: "#94A3B8" }}>
               Atendendo agora {template ? `· ${template.nome}` : ""} {template ? `(modelo ${template.modelo})` : ""}
             </div>
@@ -1207,7 +1509,7 @@ function DetalhePaciente({ item, onFechar, onIniciarAtendimento }) {
             boxShadow: `0 4px 14px ${COR}40`,
           }}>{iniciais(item.paciente)}</div>
           <div>
-            <div style={{ fontSize: 17, fontWeight: 800, color: "#0F172A" }}>{item.paciente}</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#0F172A" }}>{capitalizar(item.paciente)}</div>
             <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
               {idade(paciente?.nascimento || item.nascimento)}{paciente?.sexo ? ` · ${paciente.sexo === "F" ? "Feminino" : "Masculino"}` : ""}
               {paciente?.telefone ? ` · ${paciente.telefone}` : ""}
@@ -1276,7 +1578,21 @@ export default function Atendimento() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [filaAtual, setFilaAtual] = useState([]);
   const [filaLoading, setFilaLoading] = useState(true);
+  const [abaLista, setAbaLista] = useState("fila"); // fila | agenda
   const mobile = useIsMobileLocal();
+
+  const SeletorListaFilaAgenda = () => (
+    <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+      {[{ id: "fila", label: "📋 Fila", desc: "quem já chegou" }, { id: "agenda", label: "📅 Minha Agenda", desc: "todos os horários" }].map(t => (
+        <button key={t.id} onClick={() => setAbaLista(t.id)} style={{
+          flex: 1, padding: "8px 12px", borderRadius: 11, cursor: "pointer",
+          border: abaLista === t.id ? `1.5px solid ${COR}` : "1.5px solid #E2E8F0",
+          background: abaLista === t.id ? `${COR}0D` : "#fff",
+          color: abaLista === t.id ? COR : "#64748B", fontWeight: 700, fontSize: 13.5,
+        }}>{t.label}</button>
+      ))}
+    </div>
+  );
 
   if (!user?.psv_cod) {
     return (
@@ -1292,13 +1608,13 @@ export default function Atendimento() {
     );
   }
 
-  // Tela cheia de atendimento (Evolução/Prescrição/Documentos) — some tudo o resto, mobile e desktop.
+  // Tela cheia de atendimento (prontuário da consulta) — some tudo o resto, mobile e desktop.
   if (selecionado && servicoAtendimento) {
     return (
       <div style={{ height: "100%", padding: mobile ? 10 : "18px 24px", boxSizing: "border-box" }}>
-        <TelaAtendimento
-          item={selecionado} medico={user.psv_cod} login={user.login} servico={servicoAtendimento}
-          onSalvo={() => { setServicoAtendimento(null); setSelecionado(null); setRefreshKey(k => k + 1); }}
+        <TelaProntuario
+          item={selecionado} medico={user.psv_cod} medicoNome={user.nome} login={user.login}
+          onFinalizado={() => { setServicoAtendimento(null); setSelecionado(null); setRefreshKey(k => k + 1); }}
           onCancelar={() => setServicoAtendimento(null)}
         />
       </div>
@@ -1322,8 +1638,13 @@ export default function Atendimento() {
               <BuscaPaciente onSelecionar={setSelecionado} />
             </div>
             <div style={{ marginTop: 14 }}>
-              <Fila key={refreshKey} psvCod={user.psv_cod} onAbrir={setSelecionado}
-                onCarregou={(f, loading) => { setFilaAtual(f); setFilaLoading(loading); }} />
+              <SeletorListaFilaAgenda />
+              {abaLista === "fila" ? (
+                <Fila key={refreshKey} psvCod={user.psv_cod} onAbrir={setSelecionado}
+                  onCarregou={(f, loading) => { setFilaAtual(f); setFilaLoading(loading); }} />
+              ) : (
+                <MinhaAgenda psvCod={user.psv_cod} onAbrir={setSelecionado} />
+              )}
             </div>
           </>
         )}
@@ -1332,17 +1653,20 @@ export default function Atendimento() {
   }
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", padding: "18px 24px", boxSizing: "border-box", gap: 16, minHeight: 0 }}>
-      <div style={{ flexShrink: 0 }}>
-        <AtendimentoHero nome={user.nome?.split(" ").slice(0, 3).join(" ") || user.login} fila={filaAtual} loading={filaLoading} />
-      </div>
-      <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 18 }}>
-        <div style={{ width: 400, flexShrink: 0, display: "flex", flexDirection: "column", gap: 16, minHeight: 0 }}>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", padding: "10px 20px", boxSizing: "border-box", gap: 8, minHeight: 0, overflowY: "auto" }}>
+      <AtendimentoHero nome={user.nome?.split(" ").slice(0, 3).join(" ") || user.login} fila={filaAtual} loading={filaLoading} />
+      <div style={{ flex: 1, minHeight: 380, display: "flex", gap: 20 }}>
+        <div style={{ width: 480, flexShrink: 0, display: "flex", flexDirection: "column", gap: 8, minHeight: 0 }}>
           <div style={{ flexShrink: 0 }}>
             <BuscaPaciente onSelecionar={setSelecionado} />
           </div>
-          <Fila key={refreshKey} psvCod={user.psv_cod} onAbrir={setSelecionado}
-            onCarregou={(f, loading) => { setFilaAtual(f); setFilaLoading(loading); }} />
+          <SeletorListaFilaAgenda />
+          {abaLista === "fila" ? (
+            <Fila key={refreshKey} psvCod={user.psv_cod} onAbrir={setSelecionado}
+              onCarregou={(f, loading) => { setFilaAtual(f); setFilaLoading(loading); }} />
+          ) : (
+            <MinhaAgenda psvCod={user.psv_cod} onAbrir={setSelecionado} />
+          )}
         </div>
         <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
           {selecionado ? (
@@ -1354,9 +1678,9 @@ export default function Atendimento() {
           ) : (
             <Card style={{ height: "100%", alignItems: "center", justifyContent: "center" }}>
               <div style={{ textAlign: "center", color: "#CBD5E1", padding: 40 }}>
-                <div style={{ fontSize: 46, marginBottom: 14 }}>🩺</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: "#94A3B8" }}>Selecione um paciente</div>
-                <div style={{ fontSize: 13, color: "#CBD5E1", marginTop: 4 }}>
+                <div style={{ fontSize: 60, marginBottom: 18 }}>🩺</div>
+                <div style={{ fontSize: 19, fontWeight: 700, color: "#94A3B8" }}>Selecione um paciente</div>
+                <div style={{ fontSize: 14.5, color: "#CBD5E1", marginTop: 6 }}>
                   Escolha alguém na fila ao lado, ou busque um paciente fora da fila
                 </div>
               </div>

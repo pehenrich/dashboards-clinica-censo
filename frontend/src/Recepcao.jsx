@@ -19,6 +19,7 @@ const RECEPCOES = [
   { cod: "RDI", nome: "Diagnóstico" },
   { cod: "ROC", nome: "Ocupacional" },
   { cod: "RCI", nome: "Censo Imagem" },
+  { cod: "57",  nome: "CMI" },
 ];
 
 const COR_MANHA = "#8B1A1A";
@@ -32,7 +33,34 @@ function fitFontSize(value, base, min) {
   return min;
 }
 
-function KpiCard({ label, value, sub, color = "#111827" }) {
+function InfoTip({ texto, abrirPraBaixo }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+      onClick={(e) => { e.stopPropagation(); setShow(s => !s); }}
+      style={{ position: "relative", display: "inline-flex", marginLeft: 5 }}
+    >
+      <span style={{
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        width: 13, height: 13, borderRadius: "50%", background: "#94A3B8", color: "#fff",
+        fontSize: 9, fontWeight: 800, cursor: "help", userSelect: "none", fontStyle: "normal",
+      }}>i</span>
+      {show && (
+        <span style={{
+          position: "absolute", left: 0, transform: "translateX(-10%)",
+          ...(abrirPraBaixo ? { top: "130%" } : { bottom: "130%" }),
+          background: "#0F172A", color: "#F1F5F9", fontSize: 11, fontWeight: 500, lineHeight: 1.45,
+          padding: "9px 11px", borderRadius: 8, width: 240, zIndex: 80,
+          boxShadow: "0 6px 18px rgba(0,0,0,.3)", textAlign: "left", textTransform: "none", letterSpacing: "normal",
+        }}>{texto}</span>
+      )}
+    </span>
+  );
+}
+
+function KpiCard({ label, value, sub, color = "#111827", info }) {
   return (
     <div style={{
       background: `linear-gradient(135deg, ${color}3A 0%, ${color}14 100%)`,
@@ -40,11 +68,13 @@ function KpiCard({ label, value, sub, color = "#111827" }) {
       border: `1.5px solid ${color}55`,
       boxShadow: `0 6px 18px ${color}22, 0 1px 4px rgba(0,0,0,0.05)`,
       display: "flex", flexDirection: "column", gap: 8, minWidth: 0,
-      position: "relative", overflow: "hidden",
+      position: "relative",
     }}>
-      <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${color}20`, pointerEvents:"none" }}/>
-      <div style={{ fontSize: 10, fontWeight: 800, color, textTransform: "uppercase", letterSpacing: "0.09em" }}>
-        {label}
+      <div style={{ position:"absolute", inset:0, borderRadius:16, overflow:"hidden", pointerEvents:"none" }}>
+        <div style={{ position:"absolute", right:-14, top:-14, width:80, height:80, borderRadius:"50%", background:`${color}20` }}/>
+      </div>
+      <div style={{ fontSize: 10, fontWeight: 800, color, textTransform: "uppercase", letterSpacing: "0.09em", display: "flex", alignItems: "center" }}>
+        {label}{info && <InfoTip texto={info} abrirPraBaixo />}
       </div>
       <div style={{ fontSize: fitFontSize(value,26,14), fontWeight: 900, color:"#111827", lineHeight: 1.15, letterSpacing:"-0.5px", overflowWrap:"anywhere" }}>{value}</div>
       {sub && <div style={{ fontSize: 11, color:"#fff", fontWeight:700, background:color, borderRadius:6, padding:"2px 8px", display:"inline-block", alignSelf:"flex-start" }}>{sub}</div>}
@@ -80,7 +110,7 @@ function ThSort({ col, label, tip, sortCol, sortDir, onSort, align = "center" })
   );
 }
 
-const CORES_RECEP_HORARIO = { RDI: "#7C3AED", ROC: "#D97706", RCN: "#8B1A1A", RCI: "#059669" };
+const CORES_RECEP_HORARIO = { RDI: "#7C3AED", ROC: "#D97706", RCN: "#8B1A1A", RCI: "#059669", "57": "#2563EB" };
 
 function GraficoMediaPorHorario({ periodo }) {
   const [dados, setDados] = useState(null);
@@ -385,9 +415,13 @@ export default function Recepcao({ periodo = "30d" }) {
   const maxPac = Math.max(...ranking.map(r => r.total_pacientes || 0), 1);
 
   const totalPacientes = ranking.reduce((s, r) => s + (r.total_pacientes || 0), 0);
-  const validEsperas = ranking.filter(r => r.espera_media_min != null);
-  const esperaMedia = validEsperas.length
-    ? validEsperas.reduce((s, r) => s + r.espera_media_min, 0) / validEsperas.length
+  const validEsperas = ranking.filter(r => r.espera_media_min != null && r.total_pacientes > 0);
+  const pacientesComEspera = validEsperas.reduce((s, r) => s + r.total_pacientes, 0);
+  // Média ponderada pelo nº de pacientes de cada recepcionista — não a média
+  // simples das médias (que distorceria pra cima/baixo conforme o volume de
+  // cada uma, divergindo sem necessidade do número "por paciente" do Painel TV).
+  const esperaMedia = pacientesComEspera
+    ? validEsperas.reduce((s, r) => s + r.espera_media_min * r.total_pacientes, 0) / pacientesComEspera
     : null;
   const producaoTotal = ranking.reduce((s, r) => s + (r.producao_financeira || 0), 0);
 
@@ -475,7 +509,8 @@ Destaque pontos positivos, alertas de espera e sugestões para melhorar o fluxo.
       {/* KPI Cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 16 }}>
         <KpiCard label="Total de pacientes" value={num(totalPacientes)} color="#8B1A1A" />
-        <KpiCard label="Tempo médio de recepção" value={min(esperaMedia)} sub="Da senha até a chamada" color="#D97706" />
+        <KpiCard label="Tempo médio de recepção" value={min(esperaMedia)} sub="Da senha até a chamada" color="#D97706"
+          info="Da chegada (senha) até a chamada real (ou até a abertura da OS, quando não há chamada registrada). Média ponderada pelo nº de pacientes de cada recepcionista, no período selecionado no topo — por isso pode divergir do Painel TV, que mostra só hoje." />
         <KpiCard label="Produção financeira" value={brl(producaoTotal)} sub="Valor das OS abertas" color="#10B981" />
         <KpiCard label="Recepcionistas" value={num(ranking.length)} color="#7C3AED" />
       </div>

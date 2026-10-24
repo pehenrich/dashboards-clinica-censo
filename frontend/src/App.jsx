@@ -20,6 +20,10 @@ import Atendimento from "./Atendimento";
 import Faturamento from "./Faturamento";
 import LancarOS from "./LancarOS";
 import Coleta from "./Coleta";
+import Enfermagem from "./Enfermagem";
+import FluxoFilas from "./FluxoFilas";
+import Jarvis from "./Jarvis";
+import EnvioProntuarios from "./EnvioProntuarios";
 import AssistenteAgenda from "./AssistenteAgenda";
 import AlertaImportante from "./AlertaImportante";
 import StatusServicos from "./StatusServicos";
@@ -976,7 +980,7 @@ function GraficoProducaoAnual() {
 
 // ── PRODUÇÃO MENSAL ───────────────────────────────────────────────────────────
 
-const CORES_RECEPCAO = { RDI: "#0891B2", ROC: "#D97706", RCN: "#8B1A1A", RCI: "#7C3AED" };
+const CORES_RECEPCAO = { RDI: "#0891B2", ROC: "#D97706", RCN: "#8B1A1A", RCI: "#7C3AED", "57": "#2563EB" };
 
 function PainelPrevisaoHora() {
   const { data, loading } = useFetch("/api/financeiro/previsao-hora", {}, 60000); // atualiza a cada 60s
@@ -4004,6 +4008,7 @@ const Icon = ({ name, size=18, color="currentColor" }) => {
     clock:     "M12 22a10 10 0 100-20 10 10 0 000 20zM12 6v6l4 2",
     edit:      "M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z",
     droplet:   "M12 2.69l5.66 5.66a8 8 0 11-11.31 0z",
+    mic:       "M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zM19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8",
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -4581,6 +4586,7 @@ Destaque desempenho, alertas de queda e sugestões para aumentar a produção as
 
 // ── MÓDULO OCUPACIONAL ────────────────────────────────────────────────────────
 function SecaoModuloOcupacional({ periodo }) {
+  const [abaOcup, setAbaOcup] = useState("geral");
   const { data, loading, error } = useFetch("/api/modulo/ocupacional/resumo", { periodo });
   const fin = data?.financeiro || {};
   const op  = data?.operacional || {};
@@ -4616,6 +4622,24 @@ function SecaoModuloOcupacional({ periodo }) {
         ]}
       />
 
+      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+        {[
+          { id: "geral", label: "📊 Visão Geral" },
+          { id: "prontuarios", label: "📋 Envio de Prontuários" },
+        ].map(a => (
+          <button key={a.id} onClick={() => setAbaOcup(a.id)} style={{
+            padding: "9px 16px", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: "pointer",
+            border: abaOcup === a.id ? "1.5px solid #D97706" : "1.5px solid #E2E8F0",
+            background: abaOcup === a.id ? "#D9770615" : "#fff",
+            color: abaOcup === a.id ? "#92400E" : "#64748B",
+          }}>{a.label}</button>
+        ))}
+      </div>
+
+      {abaOcup === "prontuarios" ? (
+        <EnvioProntuarios/>
+      ) : (
+      <>
       <MetaModulo modulo="ocupacional" cor="#D97706" atual={fin.faturamento} periodo={periodo}/>
 
       <BriefingCard
@@ -4684,6 +4708,8 @@ Destaque tipos em crescimento, oportunidades de captação de empresas e alertas
 
       <CardTopEmpresas/>
       <CardVariacaoEmpresas/>
+      </>
+      )}
     </div>
   );
 }
@@ -5351,11 +5377,12 @@ const RECEPCOES_LAB = [
   { id: "RCI", nome: "Recepção Censo Imagem" },
   { id: "ROC", nome: "Recepção Ocupacional"  },
   { id: "RCN", nome: "Recepção Consultórios" },
+  { id: "57",  nome: "Recepção CMI"          },
   { id: "REX", nome: "Recepção Externa"      },
 ];
 
 const RECEPCAO_LAB_CORES = {
-  RDI: "#8B5CF6", RCI: "#10B981", ROC: "#F59E0B", RCN: "#3B82F6", REX: "#EF4444",
+  RDI: "#8B5CF6", RCI: "#10B981", ROC: "#F59E0B", RCN: "#3B82F6", "57": "#2563EB", REX: "#EF4444",
 };
 
 // Colunas fixas do card "Produção por Recepção" no módulo Laboratório
@@ -5364,6 +5391,7 @@ const RECEPCOES_LAB_PRODUCAO = [
   { cod: "RCN", nome: "Consultórios"  },
   { cod: "ROC", nome: "Ocupacional"   },
   { cod: "RCI", nome: "Censo Imagem"  },
+  { cod: "57",  nome: "CMI"           },
 ];
 
 function SecaoModuloLaboratorio({ periodo }) {
@@ -6567,7 +6595,7 @@ const PERIODOS_VALOR_HORA = [
   { value:"90d", label:"90 dias"  },
 ];
 
-function TabelaValorHora({ titulo, subtitulo, linhas, loading, colNome }) {
+function TabelaValorHora({ titulo, subtitulo, linhas, loading, colNome, mostrarOcupacao }) {
   return (
     <Card title={titulo} subtitle={subtitulo} accent="#10B981">
       {loading ? <Skeleton h={220} /> : !linhas?.length ? (
@@ -6584,6 +6612,8 @@ function TabelaValorHora({ titulo, subtitulo, linhas, loading, colNome }) {
                 <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Horas ocupadas</th>
                 <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Valor total</th>
                 <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Valor/hora</th>
+                {mostrarOcupacao && <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Rendimento/dia</th>}
+                {mostrarOcupacao && <th style={{ textAlign:"right", padding:"8px 10px", color:"#64748B" }}>Taxa de ocupação</th>}
               </tr>
             </thead>
             <tbody>
@@ -6596,6 +6626,16 @@ function TabelaValorHora({ titulo, subtitulo, linhas, loading, colNome }) {
                   <td style={{ padding:"8px 10px", textAlign:"right", color:"#64748B" }}>{r.horas_ocupadas}h</td>
                   <td style={{ padding:"8px 10px", textAlign:"right", color:"#334155" }}>{brl(r.valor_total)}</td>
                   <td style={{ padding:"8px 10px", textAlign:"right", fontWeight:800, color:"#10B981" }}>{brl(r.valor_hora)}</td>
+                  {mostrarOcupacao && <td style={{ padding:"8px 10px", textAlign:"right", color:"#334155" }}>{brl(r.valor_dia_medio)}</td>}
+                  {mostrarOcupacao && (
+                    <td style={{ padding:"8px 10px", textAlign:"right" }}>
+                      <span style={{
+                        fontWeight:800, padding:"2px 8px", borderRadius:99, fontSize:11.5,
+                        color: r.taxa_ocupacao >= 70 ? "#059669" : r.taxa_ocupacao >= 40 ? "#D97706" : "#DC2626",
+                        background: r.taxa_ocupacao >= 70 ? "#ECFDF5" : r.taxa_ocupacao >= 40 ? "#FFFBEB" : "#FEF2F2",
+                      }}>{r.taxa_ocupacao}%</span>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -6608,8 +6648,10 @@ function TabelaValorHora({ titulo, subtitulo, linhas, loading, colNome }) {
 
 function PainelValorHora() {
   const [periodo, setPeriodo] = useState("30d");
-  const { data: porMedico,      loading: lMed  } = useFetch("/api/agenda/medicos/valor-hora",      { periodo });
-  const { data: porConsultorio, loading: lCons } = useFetch("/api/agenda/consultorios/valor-hora",  { periodo });
+  const [horasExpediente, setHorasExpediente] = useState(10);
+  const { data: porMedico,   loading: lMed  } = useFetch("/api/agenda/medicos/valor-hora",      { periodo });
+  const { data: respConsultorio, loading: lCons } = useFetch("/api/agenda/consultorios/valor-hora",  { periodo, horas_expediente_dia: horasExpediente });
+  const porConsultorio = respConsultorio?.consultorios;
 
   return (
     <div>
@@ -6635,10 +6677,19 @@ function PainelValorHora() {
           subtitulo="Ordenado do maior pro menor rendimento por hora"
           linhas={porMedico} loading={lMed} colNome="Médico"
         />
+
+        <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:12, color:"#64748B" }}>
+          <span>Expediente considerado por dia útil (seg–sáb):</span>
+          <input type="number" min={1} max={24} value={horasExpediente}
+            onChange={e => setHorasExpediente(Number(e.target.value) || 10)}
+            style={{ width:56, padding:"4px 6px", borderRadius:6, border:"1.5px solid #E2E8F0", fontSize:12, textAlign:"center" }} />
+          <span>h/dia{respConsultorio ? ` · ${respConsultorio.dias_uteis} dias úteis no período` : ""}</span>
+        </div>
+
         <TabelaValorHora
-          titulo="Valor por Hora — Consultório"
-          subtitulo='Hoje a agenda usa quase só um registro genérico de sala ("Consultorio 01") — útil se no futuro passarem a distribuir os agendamentos entre salas diferentes'
-          linhas={porConsultorio} loading={lCons} colNome="Consultório"
+          titulo="Valor por Hora e Ocupação — Consultório"
+          subtitulo='⚠ Hoje a agenda usa quase só um registro genérico de sala ("Consultório 01") — a taxa de ocupação por sala reflete esse problema de cadastro, não necessariamente o uso real do espaço físico, até a recepção alinhar o preenchimento'
+          linhas={porConsultorio} loading={lCons} colNome="Consultório" mostrarOcupacao
         />
       </div>
     </div>
@@ -6660,7 +6711,9 @@ const NAV = [
   { id: "lancar_os",  label: "Lançar OS",       icon: "clock",        color: "#4F46E5", desc: "Abrir OS sem usar o Smart desktop (teste, grava em homologação)", grupo: "Clínico" },
   { id: "laboratorio",label: "Laboratório",     icon: "flask",        color: "#10B981", desc: "Exames · Diagnóstico · Ocupacional", grupo: "Clínico" },
   { id: "coleta",     label: "Coleta",          icon: "droplet",      color: "#0EA5E9", desc: "Fila de coleta, recebimento de amostra e impressão de etiqueta", grupo: "Clínico" },
+  { id: "enfermagem", label: "Enfermagem",      icon: "heart",        color: "#DB2777", desc: "Triagem ocupacional · fila, chamada de senha e sinais vitais", grupo: "Clínico" },
   { id: "recepcao",   label: "Recepção",        icon: "users",        color: "#D97706", desc: "Métricas por recepcionista", grupo: "Clínico" },
+  { id: "fluxo_filas",label: "Fluxo de Filas",  icon: "activity",     color: "#F97316", desc: "Pessoas aguardando agora e onde a fila está maior", grupo: "Clínico" },
 
   { id: "faturamento",label: "Faturamento",     icon: "dollar",       color: "#059669", desc: "Guias pendentes de faturamento", grupo: "Financeiro" },
   { id: "producao",   label: "Produção Mensal", icon: "money-trend",  color: "#0891B2", desc: "Meta e provisionamento", grupo: "Financeiro" },
@@ -6671,6 +6724,7 @@ const NAV = [
   { id: "gestao",     label: "Gestão",          icon: "grid",         color: "#4F46E5", desc: "Indicadores de gestão por setor", grupo: "Gestão" },
   { id: "painel_tv",  label: "Painel TV",       icon: "monitor",      color: "#7C3AED", desc: "Tempo real · para telão", grupo: "Gestão" },
   { id: "assistente_agenda", label: "Assistente & Chat", icon: "calendar", color: "#8B1A1A", desc: "Agenda por especialidade (IA) e chat interno entre setores", grupo: "Gestão" },
+  { id: "jarvis",     label: "CIA",             icon: "mic",          color: "#8B1A1A", desc: "Consulta por voz ou texto sobre produção e faturamento", grupo: "Gestão" },
 
   { id: "admin",      label: "Permissões",      icon: "settings",     color: "#374151", desc: "Gerenciar acessos", grupo: "Sistema" },
   { id: "status",     label: "Status",          icon: "wifi",         color: "#1E293B", desc: "Status dos serviços (backend, WhatsApp, NetMonitor...)", grupo: "Sistema" },
@@ -6712,6 +6766,9 @@ const RENDER_MAP = {
   editor_pdf:  ()  => <EditorPDF/>,
   lancar_os:   ()  => <LancarOS/>,
   coleta:      ()  => <Coleta/>,
+  enfermagem:  ()  => <Enfermagem/>,
+  fluxo_filas: ()  => <FluxoFilas/>,
+  jarvis:      ()  => <Jarvis/>,
 };
 
 

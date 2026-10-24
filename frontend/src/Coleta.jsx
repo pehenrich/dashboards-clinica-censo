@@ -26,11 +26,13 @@ function idade(nascimentoISO) {
   return anos >= 0 ? anos : null;
 }
 
-// Filas conhecidas com "dono" único e dominante em produção — mesmo padrão do
-// autofill de executante em LancarOS.jsx. Dá pra trocar buscando outro nome.
+// Filas fixas de coleta (psv_cod de cada "Coleta X" em produção). Pra qualquer
+// outra, usa a busca por nome (campo "Trocar fila" abaixo).
 const FILAS_PADRAO = [
-  { codigo: 9126, nome: "Jessica Oliveira Ferreira (Laboratório)" },
-  { codigo: 8541, nome: "Maria de Nazaré Martins Leão (Radiologia)" },
+  { codigo: 145841, nome: "Coleta Diagnóstico" },
+  { codigo: 351625, nome: "Coleta Censo Imagem" },
+  { codigo: 25871, nome: "Coleta Ocupacional" },
+  { codigo: 361626, nome: "Coleta CMI" },
 ];
 
 export default function Coleta() {
@@ -41,6 +43,8 @@ export default function Coleta() {
   const [buscaFila, setBuscaFila] = useState("");
   const [resultadosFila, setResultadosFila] = useState(null);
   const [mostrarColetados, setMostrarColetados] = useState(false);
+  const [buscaOs, setBuscaOs] = useState("");
+  const [resultadosOs, setResultadosOs] = useState(null);
 
   const [pacientes, setPacientes] = useState([]);
   const [carregandoFila, setCarregandoFila] = useState(false);
@@ -73,11 +77,25 @@ export default function Coleta() {
     return () => clearTimeout(t);
   }, [buscaFila]);
 
+  // Busca manual de OS — pra achar um atendimento que não apareceu sozinho na
+  // fila (ex.: paciente com mais de uma OS no dia e a desambiguação do
+  // backend escolheu a errada, ou que nem passou pela senha de recepção).
+  useEffect(() => {
+    if (!buscaOs.trim() || buscaOs.trim().length < 2) { setResultadosOs(null); return; }
+    const t = setTimeout(() => {
+      fetch(`${API}/api/coleta/buscar-os?q=${encodeURIComponent(buscaOs.trim())}`)
+        .then(r => r.json()).then(d => setResultadosOs(d.resultados || []))
+        .catch(() => setResultadosOs([]));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [buscaOs]);
+
   const abrirPaciente = (p) => {
     setSelecionado(p);
     setOsDetalhe(null);
     setErro(null);
     setAviso(null);
+    if (!p.os_serie) return;
     setCarregandoOs(true);
     fetch(`${API}/api/coleta/os/${p.os_serie}/${p.os_num}`)
       .then(r => r.json())
@@ -91,6 +109,16 @@ export default function Coleta() {
       .finally(() => setCarregandoOs(false));
   };
 
+  const abrirOsBuscada = (r) => {
+    abrirPaciente({
+      pac_reg: r.pac_reg, paciente: r.paciente, nascimento: r.nascimento,
+      os_serie: r.serie, os_num: r.num, chegada: null, preferencial: "N",
+      chamado: 0, chamado_em: null, coletado: 0, coletado_em: null,
+    });
+    setBuscaOs("");
+    setResultadosOs(null);
+  };
+
   const alternarItem = (num) => setItensMarcados(prev => ({ ...prev, [num]: !prev[num] }));
 
   const receberAmostra = async () => {
@@ -101,7 +129,10 @@ export default function Coleta() {
     try {
       const resp = await fetch(`${API}/api/coleta/receber`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serie: selecionado.os_serie, num: selecionado.os_num, itens, login }),
+        body: JSON.stringify({
+          serie: selecionado.os_serie, num: selecionado.os_num, itens, login,
+          fila_psv_cod: fila.codigo, pac_reg: selecionado.pac_reg,
+        }),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Erro ao registrar recebimento.");
@@ -115,9 +146,9 @@ export default function Coleta() {
     }
   };
 
-  const imprimirEtiqueta = () => {
+  const imprimirEtiqueta = (itensEspecificos) => {
     if (!selecionado) return;
-    const itens = Object.keys(itensMarcados).filter(n => itensMarcados[n]).map(Number);
+    const itens = itensEspecificos || Object.keys(itensMarcados).filter(n => itensMarcados[n]).map(Number);
     const qs = itens.length > 0 ? `?itens=${itens.join(",")}` : "";
     window.open(`${API}/api/coleta/etiqueta/${selecionado.os_serie}/${selecionado.os_num}${qs}`, "_blank");
   };
@@ -128,7 +159,7 @@ export default function Coleta() {
     try {
       const resp = await fetch(`${API}/api/coleta/chamar`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serie: selecionado.os_serie, num: selecionado.os_num, login }),
+        body: JSON.stringify({ fila_psv_cod: fila.codigo, pac_reg: selecionado.pac_reg, login }),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.detail || "Erro ao chamar paciente.");
@@ -166,6 +197,17 @@ export default function Coleta() {
             }}>⟳</button>
           </div>
 
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+            {FILAS_PADRAO.map(p => (
+              <button key={p.codigo} onClick={() => { setFila(p); setSelecionado(null); setOsDetalhe(null); }} style={{
+                padding: "6px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                border: fila?.codigo === p.codigo ? `1.5px solid ${COR}` : "1.5px solid #E2E8F0",
+                background: fila?.codigo === p.codigo ? `${COR}1A` : "#fff",
+                color: fila?.codigo === p.codigo ? COR2 : "#64748B",
+              }}>{p.nome}</button>
+            ))}
+          </div>
+
           <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, fontSize: 12, color: "#64748B", cursor: "pointer" }}>
             <input type="checkbox" checked={mostrarColetados} onChange={e => setMostrarColetados(e.target.checked)} />
             Mostrar já coletados hoje
@@ -173,7 +215,7 @@ export default function Coleta() {
 
           <div style={{ position: "relative", marginBottom: 12 }}>
             <input type="text" value={buscaFila} onChange={e => setBuscaFila(e.target.value)}
-              placeholder="Trocar fila (buscar por nome)..."
+              placeholder="+ Outra fila (buscar por nome)..."
               style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 12.5, boxSizing: "border-box" }} />
             {resultadosFila !== null && (
               <div style={{
@@ -183,7 +225,7 @@ export default function Coleta() {
                 {resultadosFila.length === 0 ? (
                   <div style={{ padding: 12, fontSize: 12, color: "#94A3B8", textAlign: "center" }}>Nada encontrado.</div>
                 ) : resultadosFila.map(r => (
-                  <div key={r.codigo} onClick={() => { setFila({ codigo: r.codigo, nome: r.nome }); setBuscaFila(""); setResultadosFila(null); }}
+                  <div key={r.codigo} onClick={() => { setFila({ codigo: r.codigo, nome: r.nome }); setBuscaFila(""); setResultadosFila(null); setSelecionado(null); setOsDetalhe(null); }}
                     style={{ padding: "8px 12px", cursor: "pointer", fontSize: 12.5 }}
                     onMouseEnter={e => e.currentTarget.style.background = "#EEF2FF"}
                     onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
@@ -201,11 +243,11 @@ export default function Coleta() {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {pacientes.map(p => (
-                <div key={`${p.os_serie}-${p.os_num}`} onClick={() => abrirPaciente(p)} style={{
+                <div key={p.pac_reg} onClick={() => abrirPaciente(p)} style={{
                   padding: "10px 12px", borderRadius: 10, cursor: "pointer",
                   opacity: p.coletado === 1 ? 0.6 : 1,
-                  border: selecionado?.os_serie === p.os_serie && selecionado?.os_num === p.os_num ? `2px solid ${COR}` : "1.5px solid #F1F5F9",
-                  background: selecionado?.os_serie === p.os_serie && selecionado?.os_num === p.os_num ? `${COR}0D` : p.coletado === 1 ? "#F8FAFC" : "#FAFBFC",
+                  border: selecionado?.pac_reg === p.pac_reg ? `2px solid ${COR}` : "1.5px solid #F1F5F9",
+                  background: selecionado?.pac_reg === p.pac_reg ? `${COR}0D` : p.coletado === 1 ? "#F8FAFC" : "#FAFBFC",
                 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ fontSize: 13, fontWeight: 700, color: "#0F172A" }}>{p.paciente}</span>
@@ -216,19 +258,59 @@ export default function Coleta() {
                     </div>
                   </div>
                   <div style={{ fontSize: 11, color: "#94A3B8" }}>
-                    OS {p.os_serie}-{p.os_num} · chegou {p.chegada}{idade(p.nascimento) != null ? ` · ${idade(p.nascimento)} anos` : ""}
+                    {p.os_serie ? `OS ${p.os_serie}-${p.os_num} · ` : "sem OS ainda · "}chegou {p.chegada}{idade(p.nascimento) != null ? ` · ${idade(p.nascimento)} anos` : ""}
                     {p.coletado === 1 && p.coletado_em ? ` · coletado ${p.coletado_em}` : (p.chamado === 1 && p.chamado_em ? ` · chamado ${p.chamado_em}` : "")}
                   </div>
                 </div>
               ))}
             </div>
           )}
+
+          <div style={{ position: "relative", marginTop: 14 }}>
+            <input type="text" value={buscaOs} onChange={e => setBuscaOs(e.target.value)}
+              placeholder="Buscar OS direto (nome ou serie-num)..."
+              style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1.5px solid #E2E8F0", fontSize: 12.5, boxSizing: "border-box" }} />
+            {resultadosOs !== null && (
+              <div style={{
+                position: "absolute", bottom: "100%", left: 0, right: 0, zIndex: 50, marginBottom: 4,
+                background: "#fff", border: "1px solid #E2E8F0", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,.15)", maxHeight: 220, overflowY: "auto",
+              }}>
+                {resultadosOs.length === 0 ? (
+                  <div style={{ padding: 12, fontSize: 12, color: "#94A3B8", textAlign: "center" }}>Nada encontrado.</div>
+                ) : resultadosOs.map(r => (
+                  <div key={`${r.serie}-${r.num}`} onClick={() => abrirOsBuscada(r)}
+                    style={{ padding: "8px 12px", cursor: "pointer", fontSize: 12.5 }}
+                    onMouseEnter={e => e.currentTarget.style.background = "#EEF2FF"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                    <div style={{ fontWeight: 700 }}>{r.paciente}</div>
+                    <div style={{ fontSize: 11, color: "#94A3B8" }}>OS {r.serie}-{r.num} · {r.os_dthr}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </Card>
 
         {/* Coluna direita: detalhe da OS */}
         <Card style={{ padding: 20, minHeight: 300 }}>
           {!selecionado ? (
             <div style={{ padding: 40, textAlign: "center", color: "#94A3B8", fontSize: 13 }}>Escolha um paciente na fila ao lado.</div>
+          ) : !selecionado.os_serie ? (
+            <div style={{ padding: 20 }}>
+              <div style={{ fontSize: 16, fontWeight: 900, color: "#0F172A", marginBottom: 6 }}>{selecionado.paciente}</div>
+              <div style={{ fontSize: 12.5, color: "#D97706", marginBottom: 16 }}>⚠ Esse paciente ainda não tem OS aberta — não dá pra receber amostra nem imprimir etiqueta até a OS existir. Ainda é possível chamar no painel.</div>
+              {erro && (
+                <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", color: "#DC2626", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, marginBottom: 12 }}>⚠ {erro}</div>
+              )}
+              {aviso && (
+                <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#059669", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, marginBottom: 12 }}>{aviso}</div>
+              )}
+              <button onClick={chamarPaciente} disabled={chamando || selecionado?.chamado === 1} style={{
+                padding: "9px 16px", borderRadius: 10, border: `1.5px solid ${COR}`,
+                background: selecionado?.chamado === 1 ? "#F1F5F9" : "#fff", color: selecionado?.chamado === 1 ? "#94A3B8" : COR2, fontWeight: 700, fontSize: 12.5,
+                cursor: (chamando || selecionado?.chamado === 1) ? "not-allowed" : "pointer",
+              }}>{selecionado?.chamado === 1 ? "📢 Já chamado" : chamando ? "Chamando..." : "📢 Chamar no painel"}</button>
+            </div>
           ) : carregandoOs ? (
             <div style={{ padding: 40, textAlign: "center", color: "#94A3B8", fontSize: 13 }}>Carregando OS...</div>
           ) : osDetalhe ? (
@@ -258,21 +340,26 @@ export default function Coleta() {
 
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
                 {osDetalhe.itens.map(it => (
-                  <label key={it.num} style={{
+                  <div key={it.num} style={{
                     display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
-                    background: "#FAFBFC", border: "1px solid #F1F5F9", borderRadius: 10, cursor: "pointer",
+                    background: "#FAFBFC", border: "1px solid #F1F5F9", borderRadius: 10,
                   }}>
-                    <input type="checkbox" checked={!!itensMarcados[it.num]} onChange={() => alternarItem(it.num)} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <span style={{ fontSize: 11, fontWeight: 800, color: COR }}>{it.cod}</span>
-                      <span style={{ fontSize: 12.5, color: "#334155", marginLeft: 8 }}>{it.nome}</span>
-                    </div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!itensMarcados[it.num]} onChange={() => alternarItem(it.num)} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: COR }}>{it.cod}</span>
+                        <span style={{ fontSize: 12.5, color: "#334155", marginLeft: 8 }}>{it.nome}</span>
+                      </div>
+                    </label>
                     {it.coleta_dthr ? (
                       <span style={{ fontSize: 10.5, fontWeight: 700, color: "#059669" }}>✓ coletado {it.coleta_dthr}</span>
                     ) : (
                       <span style={{ fontSize: 10.5, color: "#D97706" }}>aguardando</span>
                     )}
-                  </label>
+                    <button onClick={() => imprimirEtiqueta([it.num])} title="Imprimir só esta etiqueta" style={{
+                      border: "none", background: "transparent", cursor: "pointer", fontSize: 13, padding: "2px 4px",
+                    }}>🏷️</button>
+                  </div>
                 ))}
               </div>
 

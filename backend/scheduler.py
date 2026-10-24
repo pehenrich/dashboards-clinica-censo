@@ -244,6 +244,19 @@ def loop_scheduler():
                     log.error(f"Erro no relatorio semanal: {e}")
                     print(f"[Scheduler] Erro no relatorio semanal: {e}")
 
+        # ── Envio automático de prontuários via Nextcloud — vigia a pasta de
+        # rede a cada ciclo (leitura de diretório é barata; só processa de
+        # verdade quando há PDF novo) ────────────────────────────────────────
+        try:
+            from prontuarios_watcher import processar_pasta_prontuarios
+            resultado_prontuarios = _com_timeout(processar_pasta_prontuarios, 90, log)
+            if resultado_prontuarios.get("processados") or resultado_prontuarios.get("revisar"):
+                log.info(f"Prontuarios watcher: {resultado_prontuarios}")
+        except _FutureTimeoutError:
+            log.error("Erro no prontuarios_watcher: timeout (>90s)")
+        except Exception as e:
+            log.error(f"Erro no prontuarios_watcher: {e}")
+
         # ── Bot de agenda por especialidade (WhatsApp) — roda todo ciclo se
         # AGENDA_BOT_GRUPO_ID estiver configurado no .env ────────────────────
         grupo_agenda_bot = os.environ.get("AGENDA_BOT_GRUPO_ID", "").strip()

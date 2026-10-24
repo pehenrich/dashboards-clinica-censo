@@ -10,7 +10,7 @@ const brl = v => v != null
   ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(v)
   : "—";
 
-const CORES = { RDI: "#7C3AED", ROC: "#D97706", RCN: "#8B1A1A", RCI: "#059669" };
+const CORES = { RDI: "#7C3AED", ROC: "#D97706", RCN: "#8B1A1A", RCI: "#059669", "57": "#2563EB" };
 const MESES = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
 
 function Skeleton({ h = 260 }) {

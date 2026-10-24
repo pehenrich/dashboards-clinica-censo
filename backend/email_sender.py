@@ -50,7 +50,14 @@ def enviar_email(destinatarios, assunto, corpo_texto, anexo_path=None, timeout_m
                 if "login.microsoftonline.com" in page.url or "login.live.com" in page.url:
                     return {"ok": False, "erro": "Sessão expirada — precisa logar de novo (rode login_outlook_setup.py)"}
 
-                page.get_by_role("button", name="Novo email").click(timeout=timeout_ms)
+                # Outlook Web mudou o texto do botão de "Novo email" pra só "Novo"
+                # em algum momento antes de 23/09/2026 (confirmado inspecionando os
+                # botões da página) — tenta os dois nomes, do mais específico pro
+                # mais genérico, pra sobreviver a mudanças futuras de texto também.
+                botao_novo = page.get_by_role("button", name="Novo email")
+                if botao_novo.count() == 0:
+                    botao_novo = page.get_by_role("button", name="Novo", exact=True)
+                botao_novo.first.click(timeout=timeout_ms)
                 page.wait_for_timeout(1500)
 
                 campo_para = page.locator('div[aria-label="Para"]').first

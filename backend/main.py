@@ -11,7 +11,7 @@ Tabelas validadas contra dicionário oficial Pixeon:
           cnv_reg_ans, cnv_cgc, cnv_caixa_fatura
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, Request, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Request, BackgroundTasks, Body
 from fastapi.middleware.cors import CORSMiddleware
 
 # WhatsApp / Scheduler (importação opcional — não quebra se arquivos não existem)
@@ -32,7 +32,9 @@ except ImportError:
 import pyodbc
 import os
 import re as _re
+import unicodedata as _unicodedata
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 import httpx
 with open(r"C:\Dashboard\backend\.env", "r", encoding="utf-8-sig") as _f:
     for _line in _f:
@@ -67,8 +69,9 @@ app = FastAPI(title="Dashboard Clínica", version="1.1.0")
 
 # Rate limiting simples para endpoint público de resultados (CPF + nascimento).
 # Único processo (uvicorn --workers 1) -> dict em memória é suficiente, sem Redis.
-from collections import defaultdict
+from collections import defaultdict, Counter
 import time as _time
+import statistics
 
 _PUBLICO_TENTATIVAS = defaultdict(list)   # ip -> [timestamps de tentativas]
 _PUBLICO_JANELA_S   = 15 * 60             # 15 minutos
@@ -192,6 +195,117 @@ def inicializar_db_guias():
         print("[Faturamento] Banco guias.db OK")
     except Exception as e:
         print(f"[Faturamento] Erro ao criar guias.db: {e}")
+
+
+# ── Ocupacional (Envio de Prontuários) — SQLite próprio do Dashboard ──────────
+# Mesmo padrão do guias.db (Faturamento) — controle de workflow que não existe
+# no Smart, não uma tabela do ERP. SLA de 24h pra envio (pedido da enfermagem/
+# ocupacional em 22/09/2026): dthr_pendencia guarda data+hora exata (não só
+# data, como em guias_pendentes) pra dar pra calcular "atrasado" com precisão
+# de hora, não só de dia.
+PRONTUARIOS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prontuarios.db")
+
+def get_conn_prontuarios():
+    conn = sqlite3.connect(PRONTUARIOS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+def inicializar_db_prontuarios():
+    try:
+        conn = get_conn_prontuarios()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS prontuarios_pendentes (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                dthr_pendencia  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                paciente        TEXT    NOT NULL,
+                pac_reg         INTEGER,
+                empresa         TEXT,
+                status          TEXT    NOT NULL DEFAULT 'Pendente'
+                                CHECK (status IN ('Pendente','Enviado','Cancelado')),
+                dthr_envio      TEXT,
+                observacao      TEXT,
+                criado_em       TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                criado_por      TEXT,
+                atualizado_em   TEXT,
+                atualizado_por  TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_prontuarios_status ON prontuarios_pendentes(status)")
+
+        # Migração: origem da OS (pra sincronização automática não duplicar o
+        # mesmo atendimento) e data do atendimento (separada de dthr_pendencia
+        # pra filtrar a lista pela data do atendimento, não de quando foi
+        # sincronizado/criado — podem divergir se a sincronização rodar atrasada).
+        colunas = {r[1] for r in conn.execute("PRAGMA table_info(prontuarios_pendentes)").fetchall()}
+        if "os_serie" not in colunas:
+            conn.execute("ALTER TABLE prontuarios_pendentes ADD COLUMN os_serie INTEGER")
+        if "os_num" not in colunas:
+            conn.execute("ALTER TABLE prontuarios_pendentes ADD COLUMN os_num INTEGER")
+        if "data_atendimento" not in colunas:
+            conn.execute("ALTER TABLE prontuarios_pendentes ADD COLUMN data_atendimento TEXT")
+            conn.execute("UPDATE prontuarios_pendentes SET data_atendimento = date(dthr_pendencia) WHERE data_atendimento IS NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_prontuarios_data_atend ON prontuarios_pendentes(data_atendimento)")
+
+        # Um paciente pode ter várias OS ocupacionais no mesmo dia — a pendência
+        # de envio é por PACIENTE, não por OS (pedido em 22/09/2026), então a
+        # unicidade é (pac_reg, data_atendimento), não (os_serie, os_num) como
+        # na primeira versão. Descarta o índice antigo e deduplica linhas que
+        # já existiam da sincronização anterior (mantém a mais antiga de cada
+        # paciente/dia, apaga as repetidas).
+        conn.execute("DROP INDEX IF EXISTS ux_prontuarios_os")
+        conn.execute("""
+            DELETE FROM prontuarios_pendentes
+            WHERE pac_reg IS NOT NULL AND id NOT IN (
+                SELECT MIN(id) FROM prontuarios_pendentes
+                WHERE pac_reg IS NOT NULL
+                GROUP BY pac_reg, data_atendimento
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_prontuarios_pac_dia ON prontuarios_pendentes(pac_reg, data_atendimento) WHERE pac_reg IS NOT NULL")
+
+        # Motivo da pendência — a enfermagem marca de quem/o que depende pra
+        # resolver (pedido em 23/09/2026): pendência é dela mesma (falta
+        # lançar algo), do cliente/empresa (esperando confirmação/documento
+        # deles) ou inconsistência encontrada no ASO (precisa corrigir antes
+        # de enviar). Sem CHECK constraint pra não quebrar se a lista de
+        # motivos crescer depois — validado em Python (MOTIVOS_PRONTUARIO_VALIDOS).
+        if "motivo" not in colunas:
+            conn.execute("ALTER TABLE prontuarios_pendentes ADD COLUMN motivo TEXT")
+
+        # Envio automático via Nextcloud (pedido em 23/09/2026): pasta de
+        # rede vigiada por arquivo "Empresa_NomeDoPaciente.pdf" — quando casa
+        # com uma pendência, sobe pro Nextcloud na pasta da empresa, gera
+        # link público e manda por e-mail (ver prontuarios_watcher.py).
+        if "link_nextcloud" not in colunas:
+            conn.execute("ALTER TABLE prontuarios_pendentes ADD COLUMN link_nextcloud TEXT")
+        if "arquivo_nome" not in colunas:
+            conn.execute("ALTER TABLE prontuarios_pendentes ADD COLUMN arquivo_nome TEXT")
+
+        # E-mail e pasta no Nextcloud por empresa — cadastrado uma vez,
+        # reaproveitado em toda pendência dela (em vez de configurar toda
+        # vez). Chave é o texto da empresa tal como aparece no Smart (mesmo
+        # valor do campo `empresa` de prontuarios_pendentes). pasta_nextcloud
+        # é o nome exato da pasta lá — NÃO bate automaticamente com o nome
+        # da empresa no Smart (confirmado em produção em 23/09/2026), por
+        # isso precisa ser escolhido manualmente numa lista das pastas reais.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS empresa_contatos (
+                empresa         TEXT PRIMARY KEY,
+                email           TEXT,
+                pasta_nextcloud TEXT,
+                atualizado_em   TEXT
+            )
+        """)
+        colunas_ec = {r[1] for r in conn.execute("PRAGMA table_info(empresa_contatos)").fetchall()}
+        if "pasta_nextcloud" not in colunas_ec:
+            conn.execute("ALTER TABLE empresa_contatos ADD COLUMN pasta_nextcloud TEXT")
+
+        conn.commit()
+        conn.close()
+        print("[Ocupacional] Banco prontuarios.db OK")
+    except Exception as e:
+        print(f"[Ocupacional] Erro ao criar prontuarios.db: {e}")
 
 
 ORGANOGRAMA_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "organograma.db")
@@ -461,69 +575,67 @@ def home_resumo(periodo: str = "30d", setor: str = "todos"):
         """)
         return r[0] if r else {}
 
-    kpis_atual    = kpis_periodo(inicio, fim)
-    kpis_anterior = kpis_periodo(ant_inicio_str, ant_fim_str)
+    def consulta_por_dia():
+        rows = query(f"""
+            SELECT
+                CAST(osm.osm_dthr AS DATE)                         AS data,
+                COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+                ISNULL(SUM({vliq}), 0)                             AS producao
+            FROM osm
+            JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+            WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND osm.osm_atend IN {af}
+              AND smm.SMM_SFAT IN ('A','F','P')
+              {diag_filter}
+            GROUP BY CAST(osm.osm_dthr AS DATE)
+            ORDER BY data
+        """)
+        for r in rows:
+            if hasattr(r.get("data"), "strftime"):
+                r["data"] = r["data"].strftime("%Y-%m-%d")
+        return rows
 
-    # Produção por dia
-    por_dia = query(f"""
-        SELECT
-            CAST(osm.osm_dthr AS DATE)                         AS data,
-            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
-            ISNULL(SUM({vliq}), 0)                             AS producao
-        FROM osm
-        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
-        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
-          AND osm.osm_atend IN {af}
-          AND smm.SMM_SFAT IN ('A','F','P')
-          {diag_filter}
-        GROUP BY CAST(osm.osm_dthr AS DATE)
-        ORDER BY data
-    """)
-    for r in por_dia:
-        if hasattr(r.get("data"), "strftime"):
-            r["data"] = r["data"].strftime("%Y-%m-%d")
+    def consulta_top_convenios():
+        return query(f"""
+            SELECT TOP 8
+                RTRIM(cnv.cnv_nome)                                AS convenio,
+                COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+                COUNT(DISTINCT osm.osm_pac)                        AS pacientes,
+                ISNULL(SUM({vliq}), 0)                             AS producao
+            FROM osm
+            JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+            JOIN cnv ON cnv.cnv_cod=osm.osm_cnv
+            WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND osm.osm_atend IN {af}
+              AND smm.SMM_SFAT IN ('A','F','P')
+              {diag_filter}
+            GROUP BY RTRIM(cnv.cnv_nome)
+            ORDER BY producao DESC
+        """)
 
-    # Top convênios
-    top_convenios = query(f"""
-        SELECT TOP 8
-            RTRIM(cnv.cnv_nome)                                AS convenio,
-            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
-            COUNT(DISTINCT osm.osm_pac)                        AS pacientes,
-            ISNULL(SUM({vliq}), 0)                             AS producao
-        FROM osm
-        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
-        JOIN cnv ON cnv.cnv_cod=osm.osm_cnv
-        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
-          AND osm.osm_atend IN {af}
-          AND smm.SMM_SFAT IN ('A','F','P')
-          {diag_filter}
-        GROUP BY RTRIM(cnv.cnv_nome)
-        ORDER BY producao DESC
-    """)
+    def consulta_top_profissionais():
+        return query(f"""
+            SELECT TOP 10
+                RTRIM(psv.psv_apel)                                AS profissional,
+                RTRIM(psv.psv_nome)                                AS nome_completo,
+                COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+                COUNT(DISTINCT osm.osm_pac)                        AS pacientes,
+                ISNULL(SUM({vliq}), 0)                             AS producao
+            FROM osm
+            JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+            JOIN psv ON psv.psv_cod=osm.osm_mreq
+            WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND osm.osm_atend IN {af}
+              AND smm.SMM_SFAT IN ('A','F','P')
+              AND osm.osm_mreq IS NOT NULL
+              {diag_filter}
+            GROUP BY RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)
+            ORDER BY producao DESC
+        """)
 
-    # Top profissionais
-    top_profissionais = query(f"""
-        SELECT TOP 10
-            RTRIM(psv.psv_apel)                                AS profissional,
-            RTRIM(psv.psv_nome)                                AS nome_completo,
-            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
-            COUNT(DISTINCT osm.osm_pac)                        AS pacientes,
-            ISNULL(SUM({vliq}), 0)                             AS producao
-        FROM osm
-        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
-        JOIN psv ON psv.psv_cod=osm.osm_mreq
-        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
-          AND osm.osm_atend IN {af}
-          AND smm.SMM_SFAT IN ('A','F','P')
-          AND osm.osm_mreq IS NOT NULL
-          {diag_filter}
-        GROUP BY RTRIM(psv.psv_apel), RTRIM(psv.psv_nome)
-        ORDER BY producao DESC
-    """)
-
-    # Absenteísmo
-    absenteismo = {}
-    if setor in ("assistencial", "todos"):
+    def consulta_absenteismo():
+        if setor not in ("assistencial", "todos"):
+            return {}
         abs_data = query(f"""
             SELECT
                 SUM(CASE WHEN agm.agm_pac > 0 AND agm.agm_stat NOT IN ('C','B') THEN 1 ELSE 0 END) AS marcacoes,
@@ -533,43 +645,67 @@ def home_resumo(periodo: str = "30d", setor: str = "todos"):
             FROM agm
             WHERE agm.agm_hini BETWEEN '{inicio}' AND '{fim} 23:59:59'
         """)
-        absenteismo = abs_data[0] if abs_data else {}
+        return abs_data[0] if abs_data else {}
 
-    # KPIs por setor (sempre usa todos os setores para comparação)
-    setores_kpi = query(f"""
-        SELECT
-            CASE
+    def consulta_setores_kpi():
+        # sempre usa todos os setores para comparação
+        return query(f"""
+            SELECT
+                CASE
+                    WHEN osm.osm_atend IN ('ASS','EME','CRG','TAM')             THEN 'Assistencial'
+                    WHEN osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC') THEN 'Ocupacional'
+                    ELSE 'Outros'
+                END AS setor,
+                COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+                ISNULL(SUM({vliq}), 0)                             AS producao
+            FROM osm
+            JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+            WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND osm.osm_atend IN ('ASS','EME','CRG','TAM','ADM','PER','DEM','RTB','MDF','MOC')
+              AND smm.SMM_SFAT IN ('A','F','P')
+            GROUP BY CASE
                 WHEN osm.osm_atend IN ('ASS','EME','CRG','TAM')             THEN 'Assistencial'
                 WHEN osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC') THEN 'Ocupacional'
                 ELSE 'Outros'
-            END AS setor,
-            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
-            ISNULL(SUM({vliq}), 0)                             AS producao
-        FROM osm
-        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
-        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
-          AND osm.osm_atend IN ('ASS','EME','CRG','TAM','ADM','PER','DEM','RTB','MDF','MOC')
-          AND smm.SMM_SFAT IN ('A','F','P')
-        GROUP BY CASE
-            WHEN osm.osm_atend IN ('ASS','EME','CRG','TAM')             THEN 'Assistencial'
-            WHEN osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC') THEN 'Ocupacional'
-            ELSE 'Outros'
-        END
-        ORDER BY producao DESC
-    """)
+            END
+            ORDER BY producao DESC
+        """)
 
-    # KPI Diagnóstico separado
-    diag_kpi = query(f"""
-        SELECT
-            COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
-            ISNULL(SUM({vliq}), 0)                             AS producao
-        FROM osm
-        JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
-        WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
-          AND osm.osm_atend IN ('ASS','EME','CRG','TAM')
-          AND RTRIM(smm.SMM_ESP) = 'LAB'
-          AND smm.SMM_SFAT IN ('A','F','P')
-    """)
+    def consulta_diag_kpi():
+        return query(f"""
+            SELECT
+                COUNT(DISTINCT osm.osm_serie*1000000+osm.osm_num) AS os,
+                ISNULL(SUM({vliq}), 0)                             AS producao
+            FROM osm
+            JOIN smm ON smm.SMM_OSM_SERIE=osm.osm_serie AND smm.SMM_OSM=osm.osm_num
+            WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
+              AND osm.osm_atend IN ('ASS','EME','CRG','TAM')
+              AND RTRIM(smm.SMM_ESP) = 'LAB'
+              AND smm.SMM_SFAT IN ('A','F','P')
+        """)
+
+    # As 8 queries abaixo são independentes entre si (cada query() abre sua
+    # própria conexão pyodbc) — rodar em paralelo evita somar os tempos de
+    # scan do período inteiro 8x em sequência (period "ano" chegava a ~24s).
+    with ThreadPoolExecutor(max_workers=8) as _executor:
+        _fut_kpis_atual        = _executor.submit(kpis_periodo, inicio, fim)
+        _fut_kpis_anterior     = _executor.submit(kpis_periodo, ant_inicio_str, ant_fim_str)
+        _fut_por_dia           = _executor.submit(consulta_por_dia)
+        _fut_top_convenios     = _executor.submit(consulta_top_convenios)
+        _fut_top_profissionais = _executor.submit(consulta_top_profissionais)
+        _fut_absenteismo       = _executor.submit(consulta_absenteismo)
+        _fut_setores_kpi       = _executor.submit(consulta_setores_kpi)
+        _fut_diag_kpi          = _executor.submit(consulta_diag_kpi)
+
+        kpis_atual        = _fut_kpis_atual.result()
+        kpis_anterior     = _fut_kpis_anterior.result()
+        por_dia           = _fut_por_dia.result()
+        top_convenios     = _fut_top_convenios.result()
+        top_profissionais = _fut_top_profissionais.result()
+        absenteismo       = _fut_absenteismo.result()
+        setores_kpi       = _fut_setores_kpi.result()
+        diag_kpi          = _fut_diag_kpi.result()
+
     if diag_kpi:
         setores_kpi.append({"setor": "Diagnóstico", "os": diag_kpi[0]["os"], "producao": diag_kpi[0]["producao"]})
 
@@ -1157,6 +1293,7 @@ async def startup_event():
 
     inicializar_tabela_permissoes()
     inicializar_db_guias()
+    inicializar_db_prontuarios()
     inicializar_db_organograma()
     try:
         from agenda_bot import inicializar_db as inicializar_db_agenda_bot
@@ -1168,6 +1305,16 @@ async def startup_event():
         inicializar_db_chat()
     except Exception as e:
         print(f"[Startup] Erro ao iniciar DB do chat_interno: {e}")
+    try:
+        from jarvis import _inicializar_db_atas
+        _inicializar_db_atas()
+    except Exception as e:
+        print(f"[Startup] Erro ao iniciar DB de atas da CIA: {e}")
+    try:
+        from prontuario_eletronico import inicializar_db as inicializar_db_prontuario_eletronico
+        inicializar_db_prontuario_eletronico()
+    except Exception as e:
+        print(f"[Startup] Erro ao iniciar DB do prontuario_eletronico: {e}")
     try:
         from indicadores import inicializar_db as inicializar_db_indicadores, set_query_func as set_query_func_indicadores
         inicializar_db_indicadores()
@@ -2537,7 +2684,7 @@ def pacientes_aniversariantes(mes: int = None):
 
 @app.get("/api/financeiro/previsao-hora")
 def previsao_faturamento_hora():
-    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI"]
+    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI", "57"]
 
     real_rows = query("""
         SELECT DATEPART(hour, osm.osm_dthr) AS hora,
@@ -2547,7 +2694,7 @@ def previsao_faturamento_hora():
         JOIN osm ON osm.osm_serie=smm.SMM_OSM_SERIE AND osm.osm_num=smm.SMM_OSM
         WHERE smm.SMM_SFAT IN ('A','F','P')
           AND CAST(osm.osm_dthr AS DATE) = CAST(GETDATE() AS DATE)
-          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI')
+          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI','57')
         GROUP BY DATEPART(hour, osm.osm_dthr), CASE WHEN RTRIM(osm.osm_str)='PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END
     """)
 
@@ -2580,7 +2727,7 @@ def previsao_faturamento_hora():
           AND osm.osm_dthr >= DATEADD(day, -120, CAST(GETDATE() AS DATE))
           AND osm.osm_dthr < CAST(GETDATE() AS DATE)
           AND DATEPART(weekday, osm.osm_dthr) = DATEPART(weekday, GETDATE())
-          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI')
+          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI','57')
         GROUP BY DATEPART(hour, osm.osm_dthr), CASE WHEN RTRIM(osm.osm_str)='PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END
     """)
 
@@ -4308,7 +4455,7 @@ def estudo_novo_ponto_coleta(ano: int = None, setor: str = "RCN", mes_inicio_ope
 
 
 @app.get("/api/financeiro/previsao-anual")
-def previsao_anual(ano: int = None, anos_historico: int = 4):
+def previsao_anual(ano: int = None, anos_historico: int = 4, setor: str = None):
     """
     Previsão de produção pros meses restantes do ano, baseada no PADRÃO
     SAZONAL histórico (não numa média simples) — alguns meses historicamente
@@ -4325,9 +4472,14 @@ def previsao_anual(ano: int = None, anos_historico: int = 4):
        efeito sazonal, isolando só o crescimento/queda real do ano).
     3. Previsão de cada mês restante = nível de tendência × índice sazonal
        daquele mês.
+
+    setor (opcional): filtra por um setor de recepção (osm_str: RDI/ROC/RCN/
+    RCI/57) em vez do total geral da clínica — usado pelo Jarvis pra
+    segregar a previsão por recepção sem duplicar essa lógica de sazonalidade.
     """
     now = datetime.now()
     if not ano: ano = now.year
+    filtro_setor = f"AND RTRIM(osm.osm_str) = '{setor.strip().upper()}'" if setor else ""
 
     rows = query(f"""
         SELECT YEAR(osm.osm_dthr) AS ano, MONTH(osm.osm_dthr) AS mes,
@@ -4336,6 +4488,7 @@ def previsao_anual(ano: int = None, anos_historico: int = 4):
         JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
         WHERE osm.osm_dthr >= DATEADD(year, -{anos_historico + 1}, GETDATE())
           AND smm.SMM_SFAT IN ('A','F','P')
+          {filtro_setor}
         GROUP BY YEAR(osm.osm_dthr), MONTH(osm.osm_dthr)
         ORDER BY ano, mes
     """)
@@ -4391,6 +4544,7 @@ def previsao_anual(ano: int = None, anos_historico: int = 4):
 
     return {
         "ano": ano,
+        "setor": setor,
         "mes_atual": mes_atual,
         "meses": meses_detalhe,
         "indice_sazonal": indices_detalhe,
@@ -4460,7 +4614,7 @@ def financeiro_recordes():
             melhor_ano = {"ano": ano, "total": total}
 
     def _por_recepcao(ini: str, fim: str) -> dict:
-        """Total líquido no período, aberto por recepção (RDI/ROC/RCN/RCI) —
+        """Total líquido no período, aberto por recepção (RDI/ROC/RCN/RCI/57-CMI) —
         mesmo agrupamento usado na mensagem de fechamento do WhatsApp."""
         rows = query(f"""
             SELECT RTRIM(osm.osm_str) AS recepcao, SUM({vliq}) AS total
@@ -4468,7 +4622,7 @@ def financeiro_recordes():
             JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
             WHERE smm.SMM_SFAT IN ('A', 'F', 'P')
               AND osm.osm_dthr BETWEEN '{ini}' AND '{fim}'
-              AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI')
+              AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','57')
             GROUP BY RTRIM(osm.osm_str)
         """)
         return {RECEPCOES.get(r["recepcao"], r["recepcao"]): r["total"] or 0 for r in rows if (r["total"] or 0) > 0}
@@ -4501,8 +4655,8 @@ def producao_diaria_recepcao(ano: int = None, mes: int = None):
     """
     Produção líquida diária, aberta por ponto de recepção (osm_str), pro
     gráfico de Home/Produção Mensal. Mesma fórmula de valor líquido e o
-    mesmo mapeamento RDI/ROC/RCN/RCI usado no módulo Recepção — PSI soma
-    dentro de RCN (mesmo critério do Painel de Senhas).
+    mesmo mapeamento RDI/ROC/RCN/RCI/57(CMI) usado no módulo Recepção — PSI
+    soma dentro de RCN (mesmo critério do Painel de Senhas).
     """
     now = datetime.now()
     if not ano: ano = now.year
@@ -4513,7 +4667,7 @@ def producao_diaria_recepcao(ano: int = None, mes: int = None):
     inicio = f"{ano}-{mes:02d}-01"
     fim    = f"{ano}-{mes:02d}-{ultimo_dia}"
 
-    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI"]
+    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI", "57"]
 
     rows = query(f"""
         SELECT
@@ -4525,7 +4679,7 @@ def producao_diaria_recepcao(ano: int = None, mes: int = None):
                 AND osm.osm_num   = smm.SMM_OSM
         WHERE osm.osm_dthr BETWEEN '{inicio}' AND '{fim} 23:59:59'
           AND smm.SMM_SFAT IN ('A', 'F', 'P')
-          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI')
+          AND RTRIM(osm.osm_str) IN ('RDI','ROC','RCN','RCI','PSI','57')
         GROUP BY CAST(osm.osm_dthr AS DATE),
                  CASE WHEN RTRIM(osm.osm_str) = 'PSI' THEN 'RCN' ELSE RTRIM(osm.osm_str) END
         ORDER BY data
@@ -5331,15 +5485,39 @@ def agenda_semanal_por_medico_pdf(inicio: str = None, background_tasks: Backgrou
     )
 
 
+def _dias_uteis_periodo(inicio: str, fim: str) -> int:
+    """Conta dias úteis (segunda a sábado, exclui domingo) entre duas datas
+    'YYYY-MM-DD' inclusive — usado como base de expediente disponível pra
+    taxa de ocupação por consultório."""
+    d0 = datetime.strptime(inicio[:10], "%Y-%m-%d")
+    d1 = datetime.strptime(fim[:10], "%Y-%m-%d")
+    dias, d = 0, d0
+    while d <= d1:
+        if d.weekday() != 6:  # 6 = domingo
+            dias += 1
+        d += timedelta(days=1)
+    return max(dias, 1)
+
+
 @app.get("/api/agenda/consultorios/valor-hora")
-def consultorios_valor_hora(periodo: str = "30d"):
+def consultorios_valor_hora(periodo: str = "30d", horas_expediente_dia: float = 10):
     """
-    Valor gerado por hora ocupada, por consultório/sala (LOC) — só considera
-    atendimentos EFETIVADOS (agm_stat='E'), já que é o único status em que o
-    horário realmente ocorreu e o valor foi de fato gerado. agm_valor é o
-    valor do agendamento em si (não é o mesmo dado de recebimento real usado
-    em /api/financeiro — é a melhor granularidade disponível por sala, já
-    que smm/fat não guardam local de forma confiável).
+    Valor gerado por hora ocupada + taxa de ocupação, por consultório/sala
+    (LOC) — só considera atendimentos EFETIVADOS (agm_stat='E'), já que é o
+    único status em que o horário realmente ocorreu e o valor foi de fato
+    gerado. agm_valor é o valor do agendamento em si (não é o mesmo dado de
+    recebimento real usado em /api/financeiro — é a melhor granularidade
+    disponível por sala, já que smm/fat não guardam local de forma confiável).
+
+    ATENÇÃO (confirmado com dado real, set/2026): o campo de sala da agenda
+    (agm_loc) hoje é preenchido de forma inconsistente — ~90% dos
+    agendamentos caem em "Consultório 01" independente de onde o atendimento
+    realmente aconteceu. A taxa de ocupação por sala reflete esse problema de
+    cadastro, não necessariamente o uso real do espaço físico (mantido assim
+    a pedido da gestão, que vai alinhar o preenchimento na recepção).
+
+    `horas_expediente_dia`: expediente considerado por dia útil (padrão 10h),
+    usado só como denominador da taxa de ocupação — ajustável pela tela.
     """
     inicio, fim = periodo_datas(periodo)
     rows = query("""
@@ -5348,7 +5526,8 @@ def consultorios_valor_hora(periodo: str = "30d"):
             RTRIM(loc.loc_nome)                                             AS nome,
             COUNT(*)                                                        AS qtd_atendimentos,
             SUM(DATEDIFF(MINUTE, agm.agm_hini, agm.agm_hfim)) / 60.0        AS horas_ocupadas,
-            ISNULL(SUM(agm.agm_valor), 0)                                   AS valor_total
+            ISNULL(SUM(agm.agm_valor), 0)                                   AS valor_total,
+            COUNT(DISTINCT CAST(agm.agm_hini AS DATE))                      AS dias_com_atendimento
         FROM agm
         JOIN loc ON loc.loc_cod = agm.agm_loc
         WHERE agm.agm_stat = 'E'
@@ -5359,13 +5538,18 @@ def consultorios_valor_hora(periodo: str = "30d"):
         ORDER BY 5 DESC
     """, (inicio, fim))
 
+    dias_uteis = _dias_uteis_periodo(inicio, fim)
+    horas_disponiveis = dias_uteis * horas_expediente_dia
+
     for r in rows:
-        r["horas_ocupadas"] = round(r["horas_ocupadas"], 1)
-        r["valor_total"] = round(r["valor_total"], 2)
+        r["horas_ocupadas"] = round(float(r["horas_ocupadas"]), 1)
+        r["valor_total"] = round(float(r["valor_total"]), 2)
         r["valor_hora"] = round(r["valor_total"] / r["horas_ocupadas"], 2) if r["horas_ocupadas"] else 0
+        r["valor_dia_medio"] = round(r["valor_total"] / r["dias_com_atendimento"], 2) if r["dias_com_atendimento"] else 0
+        r["taxa_ocupacao"] = round(min(r["horas_ocupadas"] / horas_disponiveis * 100, 100), 1) if horas_disponiveis else 0
 
     rows.sort(key=lambda r: r["valor_hora"], reverse=True)
-    return rows
+    return {"dias_uteis": dias_uteis, "horas_expediente_dia": horas_expediente_dia, "consultorios": rows}
 
 
 @app.get("/api/agenda/medicos/valor-hora")
@@ -8435,13 +8619,13 @@ def painel_resumo_hoje(meta_diaria: float = None, setor: str = ""):
 
 
 # Único filtro de setor exibido no Painel TV: Consultórios, Diagnóstico,
-# Ocupacional e Censo Imagem — Psicologia (PSI) soma dentro de Consultórios
+# Ocupacional, Censo Imagem e CMI — Psicologia (PSI) soma dentro de Consultórios
 # (RCN) e qualquer outro código (Laboratório, salas avulsas etc.) fica de fora.
-SETORES_PAINEL_PERMITIDOS = ["RCN", "RDI", "ROC", "RCI"]
+SETORES_PAINEL_PERMITIDOS = ["RCN", "RDI", "ROC", "RCI", "57"]
 
 @app.get("/api/painel/setores")
 def painel_setores():
-    """Setores ativos hoje — restrito a Consultórios/Diagnóstico/Ocupacional/Censo Imagem."""
+    """Setores ativos hoje — restrito a Consultórios/Diagnóstico/Ocupacional/Censo Imagem/CMI."""
     hoje = datetime.now().strftime("%Y-%m-%d")
     permitidos_sql = ",".join(f"'{c}'" for c in SETORES_PAINEL_PERMITIDOS)
     rows = query(f"""
@@ -11431,6 +11615,319 @@ def painel_fila_status_pacientes():
     """)
     return rows
 
+# A senha emitida no totem vem sempre com FLE_STR_COD='RPS' ("Recepção Pró
+# Saúde"), não importa pra qual setor real ela é — RPS é um totem físico
+# compartilhado por Ocupacional, Diagnóstico e Consultórios ao mesmo tempo.
+# Remapear todo RPS pra 'ROC' (como faz _SETOR_COD_FLE_DISPLAY, usado no
+# módulo Recepção) é válido lá porque aquele contexto já exige um OS real
+# casado por paciente+dia+SETOR (_EXISTE_OS_MESMO_SETOR_DIA), então o setor
+# final sai certo mesmo a senha sendo RPS. Aqui no Fluxo de Filas, porém, a
+# senha ainda está NA FILA (sem OS aberta ainda na maioria dos casos), então
+# não dá pra usar esse casamento direto — precisamos de uma estimativa por
+# FILA (psv_cod): qual setor as senhas dessa mesma fila historicamente
+# acabam tendo OS aberta. Confirmado com dado real: sob o filtro "Só Totem",
+# filas como "CONSULTAS MEDICAS"/"ULTRASSONOGRAFIA"/"PRIOR DIAGNOSTICO"
+# resolvem pra RCN/RDI na prática (não ROC) — só "PRIOR OCUPACIONAL"/"VALE"/
+# "PARTICULAR" de fato resolvem pra ROC. Sem essa correção, o dashboard
+# jogava TODAS as filas de totem (inclusive Consultórios/Diagnóstico) dentro
+# de "Recepção Ocupacional".
+#
+# Essa classificação é calculada por uma consulta histórica (60 dias) que,
+# embutida direto na query do polling (CTE correlacionado por request), media
+# na casa de MINUTOS por causa de um plano de execução ruim do SQL Server pra
+# CTE+GROUP BY combinados (confirmado: a mesma consulta isolada roda em ~6s,
+# mas inline dentro da query de hoje trava >2min) — e isso rodava a cada 20s
+# de polling por tela aberta. Por isso o resultado fica em cache em memória
+# (TTL de 30 min, só ~15-60 filas distintas no total) e a query "ao vivo" do
+# Fluxo de Filas só faz um JOIN com uma tabela VALUES estática (barato).
+_SETOR_HIST_FILA_CACHE = {"mapa": {}, "ts": 0.0}
+_SETOR_HIST_FILA_TTL = 1800  # 30 min
+
+def _mapa_setor_hist_fila() -> dict:
+    agora = _time.time()
+    if agora - _SETOR_HIST_FILA_CACHE["ts"] > _SETOR_HIST_FILA_TTL:
+        try:
+            rows = query("""
+                SELECT psv_cod, setor_real FROM (
+                    SELECT psv_cod, setor_real,
+                           ROW_NUMBER() OVER (PARTITION BY psv_cod ORDER BY qtd DESC) AS rn
+                    FROM (
+                        SELECT fle_h.FLE_PSV_COD AS psv_cod, RTRIM(osme.osm_str) AS setor_real, COUNT(*) AS qtd
+                        FROM fle fle_h
+                        JOIN osm osme
+                          ON osme.osm_pac = fle_h.FLE_PAC_REG
+                         AND CAST(osme.osm_dthr AS DATE) = CAST(fle_h.FLE_DTHR_CHEGADA AS DATE)
+                        WHERE RTRIM(fle_h.FLE_STR_COD) = 'RPS'
+                          AND fle_h.FLE_DTHR_CHEGADA >= DATEADD(day, -60, GETDATE())
+                        GROUP BY fle_h.FLE_PSV_COD, RTRIM(osme.osm_str)
+                    ) contagem
+                ) ranked
+                WHERE rn = 1
+            """)
+            _SETOR_HIST_FILA_CACHE["mapa"] = {int(r["psv_cod"]): r["setor_real"] for r in rows}
+            _SETOR_HIST_FILA_CACHE["ts"] = agora
+        except Exception as e:
+            print(f"[FluxoFilas] Erro ao atualizar cache de setor historico por fila: {e}")
+    return _SETOR_HIST_FILA_CACHE["mapa"]
+
+def _join_mapa_setor_hist_fila() -> str:
+    """JOIN estático (tabela VALUES) com o cache psv_cod->setor_real — barato,
+    ao contrário de recalcular o histórico a cada request (ver acima)."""
+    mapa = _mapa_setor_hist_fila()
+    if not mapa:
+        return "LEFT JOIN (SELECT CAST(NULL AS INT) AS psv_cod, CAST(NULL AS CHAR(3)) AS setor_real WHERE 1=0) mapa_setor ON mapa_setor.psv_cod = fle.FLE_PSV_COD"
+    values = ",".join(f"({k},'{v}')" for k, v in mapa.items())
+    return f"LEFT JOIN (VALUES {values}) AS mapa_setor(psv_cod, setor_real) ON mapa_setor.psv_cod = fle.FLE_PSV_COD"
+
+# "RPS" sem nenhum histórico de OS nos últimos 60 dias (fila nova ou rara)
+# fica sem classificação — mostrado como setor "RPS" mesmo (rótulo em
+# RECEPCOES abaixo), em vez de arriscar um ROC errado.
+_SETOR_COD_FILA_HIST_EXPR = (
+    "CASE WHEN RTRIM(fle.FLE_STR_COD) = 'RPS' THEN ISNULL(mapa_setor.setor_real, 'RPS') "
+    "ELSE RTRIM(fle.FLE_STR_COD) END"
+)
+
+@app.get("/api/fila/resumo")
+def fila_resumo(origem: str = ""):
+    """
+    Fluxo de filas em tempo real — quantas senhas aguardando agora, por fila
+    de senha (fle.FLE_PSV_COD/psv_apel — mesma fila escolhida no painel de TV
+    em /api/painel-fila/prestadores), pra identificar onde a fila está maior.
+    Mesma definição de "aguardando" usada no Painel de Senhas: FLE_STATUS='A'
+    (chegou/emitiu senha) e FLE_DTHR_ATENDIMENTO IS NULL (ainda não chamado).
+    Exige FLE_BIP (senha impressa) — sem isso não é fila de senha de verdade
+    (ex.: as filas de recepção "Coleta X" usadas no módulo de Coleta não
+    emitem senha e não entram aqui).
+    origem='totem' filtra só senha emitida no totem (FLE_USR_LOGIN='TOTEM') —
+    exclui senha registrada manualmente pela recepção no balcão.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    filtro_origem = "AND RTRIM(fle.FLE_USR_LOGIN) = 'TOTEM'" if origem == "totem" else ""
+    rows = query(f"""
+        SELECT
+            fle.FLE_PSV_COD                                              AS fila_cod,
+            RTRIM(psv.psv_apel)                                          AS fila_nome,
+            {_SETOR_COD_FILA_HIST_EXPR}                                  AS setor_cod,
+            COUNT(*)                                                     AS aguardando,
+            SUM(CASE WHEN fle.FLE_PREFERENCIAL = 'S' THEN 1 ELSE 0 END)  AS preferenciais,
+            AVG(DATEDIFF(minute, fle.FLE_DTHR_CHEGADA, GETDATE()))       AS espera_media_min,
+            MAX(DATEDIFF(minute, fle.FLE_DTHR_CHEGADA, GETDATE()))       AS espera_max_min
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        {_join_mapa_setor_hist_fila()}
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+          AND fle.FLE_STATUS = 'A'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NULL
+          AND fle.FLE_BIP IS NOT NULL
+          AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+          {filtro_origem}
+        GROUP BY fle.FLE_PSV_COD, RTRIM(psv.psv_apel), {_SETOR_COD_FILA_HIST_EXPR}
+        ORDER BY aguardando DESC
+    """)
+    for r in rows:
+        r["espera_media_min"] = float(r.get("espera_media_min") or 0)
+        r["espera_max_min"] = int(r.get("espera_max_min") or 0)
+        r["setor_nome"] = RECEPCOES.get(r["setor_cod"], "Recepção (totem, não classificado)" if r["setor_cod"] == "RPS" else r["setor_cod"])
+    return {
+        "total_aguardando": sum(r["aguardando"] for r in rows),
+        "filas": rows,
+        "hora_atual": datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+@app.get("/api/fila/por-setor")
+def fila_por_setor(origem: str = ""):
+    """
+    Mesmo "aguardando agora" do /api/fila/resumo, mas agrupado por SETOR de
+    recepção (não por prestador individual) — visão mais alta pra comparar
+    recepções entre si. Três métricas de tempo por setor:
+    - espera_media_min: chegada (senha) até AGORA, só de quem AINDA está
+      esperando (snapshot ao vivo, tende a subir ao longo do dia mesmo que o
+      atendimento esteja indo bem, já que só reflete quem ficou pra trás).
+    - abertura_os_media_min: chegada até a OS ser aberta, pra quem já tem OS
+      aberta mesmo sem a senha ter sido chamada ainda (mesma lógica de
+      de-para ROC/RPS e casamento por setor já usada no módulo Recepção) —
+      serve pra enxergar se o gargalo é abrir a OS ou chamar a senha.
+    - espera_total_media_min: média de espera do DIA TODO nesse setor (chegada
+      até o atendimento ser chamado — ou até a OS abrir, se a senha nunca foi
+      chamada — igual à lógica de "espera real" usada no ranking de
+      recepcionistas em /api/recepcao/ranking), incluindo quem já foi
+      atendido E quem ainda está na fila. Essa é a métrica "de verdade" do
+      dia; as outras duas são só o retrato de quem está parado agora.
+    """
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    filtro_origem = "AND RTRIM(fle.FLE_USR_LOGIN) = 'TOTEM'" if origem == "totem" else ""
+    rows = query(f"""
+        WITH base_dia AS (
+            SELECT
+                fle.FLE_PAC_REG, fle.FLE_DTHR_CHEGADA, fle.FLE_DTHR_ATENDIMENTO, fle.FLE_STATUS,
+                {_SETOR_COD_FILA_HIST_EXPR}         AS setor_cod,
+                CAST(fle.FLE_DTHR_CHEGADA AS DATE)  AS data_cheg
+            FROM fle
+            {_join_mapa_setor_hist_fila()}
+            WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = '{hoje}'
+              AND fle.FLE_BIP IS NOT NULL
+              AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+              {filtro_origem}
+        )
+        SELECT
+            b.setor_cod,
+            COUNT(CASE WHEN b.FLE_STATUS = 'A' AND b.FLE_DTHR_ATENDIMENTO IS NULL THEN 1 END) AS aguardando,
+            AVG(CASE WHEN b.FLE_STATUS = 'A' AND b.FLE_DTHR_ATENDIMENTO IS NULL
+                     THEN DATEDIFF(minute, b.FLE_DTHR_CHEGADA, GETDATE()) END)                 AS espera_media_min,
+            AVG(CASE WHEN b.FLE_STATUS = 'A' AND b.FLE_DTHR_ATENDIMENTO IS NULL
+                     THEN DATEDIFF(minute, b.FLE_DTHR_CHEGADA, os.osm_dthr) END)                AS abertura_os_media_min,
+            COUNT(CASE WHEN b.FLE_STATUS = 'A' AND b.FLE_DTHR_ATENDIMENTO IS NULL
+                       AND os.osm_dthr IS NOT NULL THEN 1 END)                                  AS com_os_aberta,
+            AVG(CASE WHEN DATEDIFF(minute, b.FLE_DTHR_CHEGADA, COALESCE(b.FLE_DTHR_ATENDIMENTO, os.osm_dthr)) BETWEEN 0 AND 120
+                     THEN DATEDIFF(minute, b.FLE_DTHR_CHEGADA, COALESCE(b.FLE_DTHR_ATENDIMENTO, os.osm_dthr)) END) AS espera_total_media_min,
+            COUNT(CASE WHEN DATEDIFF(minute, b.FLE_DTHR_CHEGADA, COALESCE(b.FLE_DTHR_ATENDIMENTO, os.osm_dthr)) BETWEEN 0 AND 120
+                       THEN 1 END)                                                              AS total_dia_considerado
+        FROM base_dia b
+        OUTER APPLY (
+            SELECT TOP 1 o.osm_dthr
+            FROM osm o
+            WHERE o.osm_pac = b.FLE_PAC_REG
+              AND CAST(o.osm_dthr AS DATE) = b.data_cheg
+              AND o.osm_dthr >= b.FLE_DTHR_CHEGADA
+              AND RTRIM(o.osm_str) = b.setor_cod
+            ORDER BY o.osm_dthr ASC
+        ) os
+        GROUP BY b.setor_cod
+        ORDER BY aguardando DESC
+    """)
+    for r in rows:
+        r["setor_nome"] = RECEPCOES.get(r["setor_cod"], "Recepção (totem, não classificado)" if r["setor_cod"] == "RPS" else r["setor_cod"])
+        r["espera_media_min"] = float(r.get("espera_media_min") or 0)
+        r["abertura_os_media_min"] = float(r["abertura_os_media_min"]) if r.get("abertura_os_media_min") is not None else None
+        r["espera_total_media_min"] = float(r["espera_total_media_min"]) if r.get("espera_total_media_min") is not None else None
+    return {"setores": rows, "hora_atual": datetime.now().strftime("%H:%M:%S")}
+
+
+@app.get("/api/fila/detalhe")
+def fila_detalhe(fila: int, origem: str = ""):
+    """Lista nominal de quem está aguardando agora numa fila de senha (drill-down do resumo)."""
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    filtro_origem = "AND RTRIM(fle.FLE_USR_LOGIN) = 'TOTEM'" if origem == "totem" else ""
+    rows = query(f"""
+        SELECT
+            RTRIM(ISNULL(fle.FLE_BIP, ''))                              AS senha,
+            RTRIM(ISNULL(fle.fle_pac_nome,
+                   RTRIM(ISNULL(pac.pac_nome,''))))                     AS paciente,
+            RTRIM(psv.psv_apel)                                         AS prestador,
+            RTRIM(ISNULL(esp.esp_nome,''))                              AS especialidade,
+            CONVERT(VARCHAR(5), fle.FLE_DTHR_CHEGADA, 108)              AS chegada,
+            DATEDIFF(minute, fle.FLE_DTHR_CHEGADA, GETDATE())           AS espera_min,
+            fle.FLE_PREFERENCIAL                                        AS preferencial
+        FROM fle
+        JOIN psv ON psv.psv_cod = fle.FLE_PSV_COD
+        LEFT JOIN esp ON esp.esp_cod = psv.psv_esp_cod
+        LEFT JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
+        WHERE CAST(fle.FLE_DTHR_CHEGADA AS DATE) = ?
+          AND fle.FLE_STATUS = 'A'
+          AND fle.FLE_DTHR_ATENDIMENTO IS NULL
+          AND fle.FLE_BIP IS NOT NULL AND LTRIM(RTRIM(fle.FLE_BIP)) <> ''
+          AND fle.FLE_PSV_COD = ?
+          {filtro_origem}
+        ORDER BY fle.FLE_PREFERENCIAL DESC, fle.FLE_DTHR_CHEGADA ASC
+    """, (hoje, fila))
+    for r in rows:
+        if r.get("paciente"):
+            r["paciente"] = str(r["paciente"]).strip().title()
+    return {"fila_cod": fila, "total": len(rows), "fila": rows}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JARVIS — assistente de consulta por voz/texto (Fase 1: consulta sob demanda)
+# Lógica real em jarvis.py — aqui só os endpoints, seguindo o mesmo padrão de
+# import tardio já usado por chat_interno.py/agenda_bot.py.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/jarvis/perguntar")
+def jarvis_perguntar(payload: dict):
+    from jarvis import responder
+    pergunta = (payload.get("pergunta") or "").strip()
+    if not pergunta:
+        raise HTTPException(400, "Pergunta vazia")
+    return responder(pergunta, payload.get("historico"), payload.get("usuario_nome"))
+
+
+@app.post("/api/jarvis/pdf")
+def jarvis_pdf(payload: dict):
+    from jarvis import gerar_pdf_e_enviar
+    destinatario = (payload.get("destinatario") or "").strip()
+    if not destinatario:
+        raise HTTPException(400, "Informe o e-mail de destino")
+    return gerar_pdf_e_enviar(
+        payload.get("pergunta", ""),
+        payload.get("resposta_texto", ""),
+        payload.get("dados"),
+        destinatario,
+    )
+
+
+@app.post("/api/jarvis/pdf/baixar")
+def jarvis_pdf_baixar(payload: dict, background_tasks: BackgroundTasks):
+    from jarvis import _gerar_pdf
+    pdf_path = _gerar_pdf(
+        payload.get("pergunta", ""),
+        payload.get("resposta_texto", ""),
+        payload.get("dados"),
+    )
+    background_tasks.add_task(os.remove, pdf_path)
+    return FileResponse(pdf_path, media_type="application/pdf", filename="CIA_consulta.pdf", background=background_tasks)
+
+
+@app.post("/api/jarvis/reuniao/finalizar")
+def jarvis_reuniao_finalizar(payload: dict):
+    """Fase 2 (modo reuniao) -- transcricao inteira (sem diarizacao, decisao
+    explicita do usuario de deixar isso pra depois) -> gera a ata. Gravacao e
+    transcricao em si acontecem no navegador (Web Speech API), igual o modo
+    de consulta."""
+    from jarvis import gerar_ata
+    transcricao = (payload.get("transcricao") or "").strip()
+    if not transcricao:
+        raise HTTPException(400, "Transcricao vazia")
+    return gerar_ata(
+        transcricao,
+        payload.get("duracao_min") or 0,
+        payload.get("participantes") or "",
+        payload.get("data_inicio") or "",
+    )
+
+
+@app.post("/api/jarvis/reuniao/pdf")
+def jarvis_reuniao_pdf(payload: dict):
+    from jarvis import gerar_pdf_ata_e_enviar
+    destinatario = (payload.get("destinatario") or "").strip()
+    if not destinatario:
+        raise HTTPException(400, "Informe o e-mail de destino")
+    return gerar_pdf_ata_e_enviar(payload.get("ata") or {}, destinatario)
+
+
+@app.post("/api/jarvis/reuniao/pdf/baixar")
+def jarvis_reuniao_pdf_baixar(payload: dict, background_tasks: BackgroundTasks):
+    from jarvis import _gerar_pdf_ata
+    pdf_path = _gerar_pdf_ata(payload.get("ata") or {})
+    background_tasks.add_task(os.remove, pdf_path)
+    return FileResponse(pdf_path, media_type="application/pdf", filename="CIA_ata_reuniao.pdf", background=background_tasks)
+
+
+@app.get("/api/jarvis/reuniao/historico")
+def jarvis_reuniao_historico():
+    from jarvis import listar_atas_historico
+    return {"atas": listar_atas_historico()}
+
+
+@app.get("/api/jarvis/reuniao/{ata_id}")
+def jarvis_reuniao_obter(ata_id: int):
+    from jarvis import obter_ata_por_id
+    ata = obter_ata_por_id(ata_id)
+    if not ata:
+        raise HTTPException(404, "Ata não encontrada")
+    return ata
+
+
 @app.get("/api/atendimento/fila")
 def atendimento_fila(medico: int):
     """
@@ -11467,6 +11964,53 @@ def atendimento_fila(medico: int):
         if r.get("servico") is not None:
             r["servico"] = str(r["servico"]).strip()
     return {"medico": medico, "data": hoje, "total": len(rows), "fila": rows}
+
+
+@app.get("/api/atendimento/agenda")
+def atendimento_agenda(medico: int, data: str = None):
+    """
+    Agenda do dia do médico (tabela agm) — visão do profissional sobre os
+    próprios agendamentos marcados, diferente da Fila (fle, só quem já
+    chegou/checkou na recepção): aqui aparece TODO horário marcado no dia,
+    incluindo quem ainda não chegou. `chegou`/`chegada` cruza com fle (mesmo
+    médico+paciente+dia) pra indicar quem já fez check-in na recepção.
+    """
+    dia = data or datetime.now().strftime("%Y-%m-%d")
+    rows = query("""
+        SELECT
+            agm.AGM_HINI                                        AS hora_inicio,
+            agm.AGM_HFIM                                        AS hora_fim,
+            agm.AGM_PAC                                         AS pac_reg,
+            RTRIM(pac.pac_nome)                                 AS paciente,
+            CONVERT(varchar, pac.PAC_NASC, 23)                  AS nascimento,
+            RTRIM(agm.AGM_STAT)                                 AS status,
+            RTRIM(ISNULL(agm.AGM_SMK, ''))                      AS servico,
+            CASE WHEN fle.FLE_PAC_REG IS NOT NULL THEN 1 ELSE 0 END AS chegou,
+            fle.FLE_DTHR_CHEGADA                                AS chegada
+        FROM agm
+        JOIN pac ON pac.pac_reg = agm.AGM_PAC
+        OUTER APPLY (
+            SELECT TOP 1 f.FLE_PAC_REG, f.FLE_DTHR_CHEGADA
+            FROM fle f
+            WHERE f.FLE_PSV_COD = agm.AGM_MED AND f.FLE_PAC_REG = agm.AGM_PAC
+              AND CAST(f.FLE_DTHR_CHEGADA AS DATE) = CAST(agm.AGM_HINI AS DATE)
+            ORDER BY f.FLE_DTHR_CHEGADA DESC
+        ) fle
+        WHERE agm.AGM_MED = ? AND CAST(agm.AGM_HINI AS DATE) = ?
+          AND agm.AGM_STAT != 'B'
+        ORDER BY agm.AGM_HINI ASC
+    """, (medico, dia))
+
+    for r in rows:
+        if hasattr(r.get("hora_inicio"), "strftime"):
+            r["hora_inicio"] = r["hora_inicio"].strftime("%H:%M")
+        if hasattr(r.get("hora_fim"), "strftime"):
+            r["hora_fim"] = r["hora_fim"].strftime("%H:%M")
+        if hasattr(r.get("chegada"), "strftime"):
+            r["chegada"] = r["chegada"].strftime("%H:%M")
+
+    return {"medico": medico, "data": dia, "total": len(rows), "agenda": rows}
+
 
 # ─── Registro Clínico (RCL) — labels e templates de formulário ────────────────
 # Ver "Pixeon Smart - Mapeamento Registro Clinico.txt" (Desktop) para o
@@ -11599,6 +12143,19 @@ def atendimento_buscar_cid(q: str, limite: int = 15):
         r["nome"] = r["nome"].split("|")[0].strip()[:120]
     return {"total": len(rows), "resultados": rows}
 
+@app.get("/api/atendimento/buscar-medicamento")
+def atendimento_buscar_medicamento(q: str = "", medico_login: str = "", limite: int = 15):
+    """
+    Autocomplete de medicamento pra Prescrição — busca por nome comercial OU
+    princípio ativo na base oficial de dados abertos da ANVISA (importada
+    localmente, sem API externa em produção). Prioriza o que aquele médico já
+    prescreveu de verdade pelo sistema, e devolve a posologia/quantidade da
+    última vez que ele prescreveu aquele item — pro frontend carregar
+    automaticamente ao escolher da lista.
+    """
+    from medicamentos import buscar
+    return {"resultados": buscar(q, medico_login or None, limite)}
+
 @app.get("/api/atendimento/buscar-paciente")
 def atendimento_buscar_paciente(q: str, limite: int = 15):
     """Busca no cadastro (produção) por nome, nº de registro ou CPF — usado
@@ -11643,6 +12200,7 @@ def atendimento_paciente(pac_reg: int):
             RTRIM(pac.pac_nome)                             AS nome,
             CONVERT(varchar, pac.PAC_NASC, 23)               AS nascimento,
             RTRIM(ISNULL(pac.PAC_SEXO,''))                  AS sexo,
+            RTRIM(ISNULL(pac.PAC_NOME_MAE,''))               AS nome_mae,
             RTRIM(ISNULL(pac.PAC_CELULAR, pac.PAC_FONE))     AS telefone,
             RTRIM(ISNULL(pac.PAC_CNV,''))                   AS convenio_cod,
             RTRIM(ISNULL(cnv.CNV_NOME,''))                  AS convenio_nome,
@@ -11658,15 +12216,25 @@ def atendimento_paciente(pac_reg: int):
 
 @app.get("/api/atendimento/clinica")
 def atendimento_clinica():
-    """Dados da clínica (CNES/CNPJ) para o cabeçalho da guia SP/SADT."""
+    """
+    Dados da clínica (CNES/CNPJ/endereço/contato) pro cabeçalho/rodapé dos
+    documentos. EMP_END="H" é o nome de rua mesmo (comum em Parauapebas ter
+    rua só com letra) — não é cadastro incompleto.
+    """
     rows = query("""
         SELECT TOP 1
             RTRIM(ISNULL(EMP_NOME_FANTASIA,''))  AS nome,
             RTRIM(ISNULL(EMP_CNES,''))           AS cnes,
-            RTRIM(ISNULL(EMP_CGC,''))            AS cnpj
+            RTRIM(ISNULL(EMP_CGC,''))            AS cnpj,
+            RTRIM(ISNULL(EMP_END,''))            AS rua,
+            RTRIM(ISNULL(EMP_END_NUM,''))        AS numero,
+            RTRIM(ISNULL(EMP_FONE,''))           AS telefone,
+            RTRIM(ISNULL(EMP_EMAIL,''))          AS email,
+            RTRIM(ISNULL(EMP_COMP,''))           AS bairro,
+            RTRIM(ISNULL(EMP_CEP,''))            AS cep
         FROM EMP WHERE EMP_COD = 1
     """)
-    return rows[0] if rows else {"nome": "", "cnes": "", "cnpj": ""}
+    return rows[0] if rows else {"nome": "", "cnes": "", "cnpj": "", "rua": "", "numero": "", "telefone": "", "email": "", "bairro": "", "cep": ""}
 
 @app.get("/api/atendimento/buscar-convenio")
 def atendimento_buscar_convenio(q: str, limite: int = 15):
@@ -11933,6 +12501,178 @@ def atendimento_salvar(req: AtendimentoSalvarRequest):
     return {"ok": True, "ambiente": "smart_hml", "servico": servico, "rcl_txt": rcl_txt}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PRONTUÁRIO ELETRÔNICO DE CONSULTAS — banco local (prontuario_eletronico.py),
+# separado do Smart por decisão explícita (mais fácil iterar no formato sem
+# depender de homologação no ERP). Layout de referência: tela de Atendimento
+# Médico de outro sistema (vídeo enviado), com 3 colunas — registro/CID/alergia
+# à esquerda, pedidos/prescrições/atestados/encaminhamentos no meio, cronômetro
+# + dados do paciente + finalizar à direita.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ProntuarioIniciarRequest(BaseModel):
+    pac_reg: int
+    paciente_nome: str
+    medico_psv_cod: int
+    medico_nome: str = ""
+    medico_login: str = ""
+    modelo_atendimento: str = "livre"
+
+@app.post("/api/prontuario/iniciar")
+def prontuario_iniciar(req: ProntuarioIniciarRequest):
+    """Retoma a consulta já aberta pro mesmo paciente/médico, ou cria uma nova."""
+    from prontuario_eletronico import iniciar_consulta
+    return iniciar_consulta(req.pac_reg, req.paciente_nome, req.medico_psv_cod,
+                             req.medico_nome, req.medico_login, req.modelo_atendimento)
+
+@app.get("/api/prontuario/grupos-medicamentos")
+def prontuario_listar_grupos(medico_login: str):
+    from prontuario_eletronico import listar_grupos_medicamentos
+    return {"grupos": listar_grupos_medicamentos(medico_login)}
+
+class GrupoMedicamentoItem(BaseModel):
+    medicamento: str
+    posologia: str = ""
+    quantidade: str = ""
+    uso_continuo: bool = False
+
+class GrupoMedicamentosRequest(BaseModel):
+    medico_login: str
+    nome: str
+    compartilhado: bool = False
+    itens: list[GrupoMedicamentoItem]
+
+@app.post("/api/prontuario/grupos-medicamentos")
+def prontuario_criar_grupo(req: GrupoMedicamentosRequest):
+    from prontuario_eletronico import criar_grupo_medicamentos, listar_grupos_medicamentos
+    if not req.itens:
+        raise HTTPException(400, "O grupo precisa ter pelo menos um medicamento.")
+    criar_grupo_medicamentos(req.medico_login, req.nome.strip(), req.compartilhado,
+                              [i.model_dump() for i in req.itens])
+    return {"grupos": listar_grupos_medicamentos(req.medico_login)}
+
+@app.delete("/api/prontuario/grupos-medicamentos/{grupo_id}")
+def prontuario_remover_grupo(grupo_id: int, medico_login: str):
+    from prontuario_eletronico import remover_grupo_medicamentos, listar_grupos_medicamentos
+    remover_grupo_medicamentos(grupo_id, medico_login)
+    return {"grupos": listar_grupos_medicamentos(medico_login)}
+
+# IMPORTANTE: rotas com segmento fixo (ex.: /grupos-medicamentos) têm que vir
+# ANTES desta rota genérica /{consulta_id} — senão o FastAPI casa o segmento
+# fixo como se fosse o :consulta_id e quebra com erro de parsing de int (bug
+# real: aconteceu exatamente isso na primeira versão).
+@app.get("/api/prontuario/{consulta_id}")
+def prontuario_obter(consulta_id: int):
+    from prontuario_eletronico import obter_consulta
+    d = obter_consulta(consulta_id)
+    if not d:
+        raise HTTPException(404, "Consulta não encontrada.")
+    return d
+
+class ProntuarioAtualizarRequest(BaseModel):
+    modelo_atendimento: str | None = None
+    registro_texto: str | None = None
+    possui_alergia: str | None = None
+    alergia_detalhe: str | None = None
+    hipotese_texto: str | None = None
+
+@app.put("/api/prontuario/{consulta_id}")
+def prontuario_atualizar(consulta_id: int, req: ProntuarioAtualizarRequest):
+    from prontuario_eletronico import atualizar_consulta
+    campos = {k: v for k, v in req.model_dump().items() if v is not None}
+    d = atualizar_consulta(consulta_id, campos)
+    if not d:
+        raise HTTPException(404, "Consulta não encontrada.")
+    return d
+
+class ProntuarioCidRequest(BaseModel):
+    cid_cod: str
+    cid_desc: str = ""
+
+@app.post("/api/prontuario/{consulta_id}/cid")
+def prontuario_add_cid(consulta_id: int, req: ProntuarioCidRequest):
+    from prontuario_eletronico import adicionar_cid, obter_consulta
+    adicionar_cid(consulta_id, req.cid_cod, req.cid_desc)
+    return obter_consulta(consulta_id)
+
+@app.delete("/api/prontuario/{consulta_id}/cid/{cid_id}")
+def prontuario_del_cid(consulta_id: int, cid_id: int):
+    from prontuario_eletronico import remover_cid, obter_consulta
+    remover_cid(consulta_id, cid_id)
+    return obter_consulta(consulta_id)
+
+class ProntuarioPrescricaoRequest(BaseModel):
+    medicamento: str
+    posologia: str = ""
+    quantidade: str = ""
+    uso_continuo: bool = False
+
+@app.post("/api/prontuario/{consulta_id}/prescricao")
+def prontuario_add_prescricao(consulta_id: int, req: ProntuarioPrescricaoRequest):
+    from prontuario_eletronico import adicionar_prescricao, obter_consulta
+    adicionar_prescricao(consulta_id, req.medicamento, req.posologia, req.quantidade, req.uso_continuo)
+    return obter_consulta(consulta_id)
+
+@app.delete("/api/prontuario/{consulta_id}/prescricao/{item_id}")
+def prontuario_del_prescricao(consulta_id: int, item_id: int):
+    from prontuario_eletronico import remover_prescricao, obter_consulta
+    remover_prescricao(consulta_id, item_id)
+    return obter_consulta(consulta_id)
+
+class ProntuarioAtestadoRequest(BaseModel):
+    texto: str
+    dias: int | None = None
+    data_inicio: str = ""
+    cid_cod: str = ""
+
+@app.post("/api/prontuario/{consulta_id}/atestado")
+def prontuario_add_atestado(consulta_id: int, req: ProntuarioAtestadoRequest):
+    from prontuario_eletronico import adicionar_atestado, obter_consulta
+    adicionar_atestado(consulta_id, req.texto, req.dias, req.data_inicio, req.cid_cod)
+    return obter_consulta(consulta_id)
+
+@app.delete("/api/prontuario/{consulta_id}/atestado/{item_id}")
+def prontuario_del_atestado(consulta_id: int, item_id: int):
+    from prontuario_eletronico import remover_atestado, obter_consulta
+    remover_atestado(consulta_id, item_id)
+    return obter_consulta(consulta_id)
+
+class ProntuarioEncaminhamentoRequest(BaseModel):
+    especialidade: str
+    texto: str = ""
+
+@app.post("/api/prontuario/{consulta_id}/encaminhamento")
+def prontuario_add_encaminhamento(consulta_id: int, req: ProntuarioEncaminhamentoRequest):
+    from prontuario_eletronico import adicionar_encaminhamento, obter_consulta
+    adicionar_encaminhamento(consulta_id, req.especialidade, req.texto)
+    return obter_consulta(consulta_id)
+
+@app.delete("/api/prontuario/{consulta_id}/encaminhamento/{item_id}")
+def prontuario_del_encaminhamento(consulta_id: int, item_id: int):
+    from prontuario_eletronico import remover_encaminhamento, obter_consulta
+    remover_encaminhamento(consulta_id, item_id)
+    return obter_consulta(consulta_id)
+
+class ProntuarioFinalizarRequest(BaseModel):
+    retorno_necessario: str  # 'S' | 'N'
+    retorno_quando: str = ""
+    assinar: bool = False
+    assinado_por: str = ""
+
+@app.post("/api/prontuario/{consulta_id}/finalizar")
+def prontuario_finalizar(consulta_id: int, req: ProntuarioFinalizarRequest):
+    from prontuario_eletronico import finalizar_consulta
+    d = finalizar_consulta(consulta_id, req.retorno_necessario, req.retorno_quando, req.assinar, req.assinado_por)
+    if not d:
+        raise HTTPException(404, "Consulta não encontrada.")
+    return d
+
+@app.get("/api/prontuario/paciente/{pac_reg}/historico")
+def prontuario_historico(pac_reg: int, limite: int = 15):
+    from prontuario_eletronico import historico_paciente
+    return {"historico": historico_paciente(pac_reg, limite)}
+
+
 # ── LANÇAMENTO DE OS (PROVA DE CONCEITO) — SOMENTE smart_hml ─────────────────
 # Investigação (não documentada em docs/ ainda): osm/smm não têm stored
 # procedures nem triggers — toda numeração/preço é feita pelo app desktop
@@ -11950,6 +12690,17 @@ def atendimento_salvar(req: AtendimentoSalvarRequest):
 # ex. "LAB"/"RAD" — diferente do setor de recepção da OS, osm_str).
 # Setor de execução não é adivinhado aqui de propósito (mapear isso corretamente
 # por tipo de exame é o próximo passo, não coberto por esta prova de conceito).
+# OSM_ATEND ocupacional (ver SETOR_MAP mais acima) — usado tanto pra decidir
+# o default de OSM_CID_COD quanto o de OSM_TISS_TIPO_ATENDE.
+ATEND_OCUPACIONAL = {"ADM", "PER", "DEM", "RTB", "MDF", "MOC"}
+
+# OSM_TISS_TIPO_ATENDE dominante por tipo de atendimento ocupacional —
+# confirmado em 20 OS reais do convênio MILPLAN: PER=16 (9/9 amostras),
+# DEM=15 (4/5), ADM=05 (3/4). RTB/MDF/MOC sem amostra suficiente pra
+# confiar (ficam sem default, só se informado manualmente).
+TISS_TIPO_ATENDE_OCUPACIONAL = {"ADM": "05", "PER": "16", "DEM": "15"}
+
+
 class ItemLancarOS(BaseModel):
     tipo: str            # SMM_TPCOD (ex: "S")
     cod: str             # código do procedimento/exame (smk)
@@ -11972,7 +12723,9 @@ class LancarOSTesteRequest(BaseModel):
     # default único confiável (ver comentário abaixo). Ficam None até serem
     # informados por quem chama; None gera aviso, não erro.
     tiss_tipo_saida: str = "5"          # osm_tiss_tipo_saida — dominante em RDI/RCN/RCI (>90%); raro em ROC
-    tiss_tipo_atende: str | None = None # osm_tiss_tipo_atende — varia bastante (05/23/04/14/16...), sem moda clara
+    tiss_tipo_atende: str | None = None # osm_tiss_tipo_atende — varia bastante em geral (05/23/04/14/16...), sem
+                                          # moda clara fora do ocupacional; dentro do ocupacional TEM moda clara por
+                                          # tipo (ver TISS_TIPO_ATENDE_OCUPACIONAL), usada como default se None.
     regime_atend: str | None = None     # osm_regime_atend — só ~18% das OS preenchem; concentrado em Hapvida/AMS
     osm_w_senha: str | None = None       # senha de autorização — grava em SMM_SENHA do 1º item (não em OSM),
                                           # ~71% das OS TISS preenchem no primeiro item; opcional nos demais
@@ -11988,6 +12741,37 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
     resumo da investigação. Itens sem preço cadastrado na tabela do convênio
     voltam com valor R$0,00 e aviso pra conferência manual, em vez de um
     valor chutado.
+
+    Campos extras preenchidos após comparar com OS reais lançadas pelo
+    desktop (15 OS ocupacionais reais do convênio MILPLAN, tipos ADM/PER/DEM/
+    MOC): OSM_ASO_MES_REF (mês/ano da OS, formato MMAAAA), OSM_LEG_COD
+    (constante '01'), SMM_HON_SEQ (lookup por SMM_COD em produção — confirmado
+    fixo por código, ex. AUDTV=80/EXCLIN=107, não chutado), SMM_ESP ('MED' —
+    assume médico executante; varia por especialidade do executor em dado
+    real, mas essa prova de conceito sempre usa o mesmo médico fixo),
+    SMM_HORA_ESP ('N'), SMM_QT_FRAC (= SMM_QT),
+    SMM_PERC_REDUC_VLR_BASE/smm_vlr_sem_reduc (= valor, sem redução aplicada),
+    SMM_COD_AMOSTRA (padrão serie+num+índice do item). SMM_GR_SES_ID
+    propositalmente NÃO preenchido — dado real mostra que é um agrupamento de
+    sessão/atendimento controlado por contador interno do desktop, às vezes
+    compartilhado entre OS diferentes; não há origem segura pra replicar.
+    SMM_ITEM_CONFERIDO também não é preenchido — existe em produção mas NÃO
+    existe na tabela smm de smart_hml (defasagem de schema, não só de dados;
+    confirmado via SELECT * comparando as duas bases).
+
+    Segunda rodada de ajustes, também confirmados por amostragem real
+    (20 OS do convênio MILPLAN, tipos ADM/PER/DEM/MOC/MDF):
+    - OSM_CID_COD='Z000' (CID-10 "exame médico geral") — sem exceção nas 20
+      amostras; só aplicado quando tipo_atendimento é ocupacional.
+    - OSM_TISS_TIPO_ATENDE — default por tipo quando não informado
+      (ver TISS_TIPO_ATENDE_OCUPACIONAL: PER=16, DEM=15, ADM=05).
+    - SMM_EXEC/SMM_SFAT='C'/'C' em vez do 'A'/'F' anterior — o 'F' sem uma
+      fatura real (SMM_FAT_SERIE/SMM_FAT) por trás é inconsistente; 'C'/'C'
+      é o estado real de "concluído, aguardando faturamento" (confirmado:
+      toda OS recente sem fatura real mostra esse par).
+    - PAC_LTA_COD ("lotação") INVESTIGADO e descartado aqui de propósito —
+      pertence ao cadastro do paciente (tabela pac), não à OS; cada pessoa
+      tem o seu, definido no cadastro, não no lançamento.
     """
     if req.setor not in RECEPCOES:
         raise HTTPException(400, f"Setor inválido: {req.setor}. Use um de {list(RECEPCOES)}.")
@@ -12004,6 +12788,16 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
         conn.close()
         raise HTTPException(400, f"Convênio '{convenio}' não encontrado ou sem tabela de preço (CNV_TAB) cadastrada.")
     tabela, exige_tiss = row[0], (row[1] == 'S')
+
+    # Setor existe na lista oficial (RECEPCOES) mas pode não ter sido
+    # sincronizado pra smart_hml ainda (aconteceu na prática com o setor "57"/
+    # CMI, cadastrado em produção mas ausente da tabela STR de homologação) —
+    # confere antes do INSERT pra dar um erro claro em vez do FK cru do SQL Server.
+    cur.execute("SELECT 1 FROM str WHERE RTRIM(str_cod)=?", (req.setor,))
+    if cur.fetchone() is None:
+        conn.close()
+        raise HTTPException(400, f"Setor '{req.setor}' ({RECEPCOES.get(req.setor, '?')}) existe em produção mas não "
+                                  "em smart_hml — essa tela só grava em homologação. Escolha outro pra testar.")
 
     # Médico requisitante/executante são buscados em produção (/buscar-medico),
     # mas a gravação é sempre em smart_hml — como é só um snapshot, pode não ter
@@ -12046,8 +12840,28 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
         itens_computados.append({"tipo": tipo, "cod": cod, "qt": it.qt,
                                   "setor_execucao": it.setor_execucao.strip().upper(), "valor": valor})
 
+    hon_seq_por_cod = {}
+    for item in itens_computados:
+        if item["cod"] in hon_seq_por_cod:
+            continue
+        rows = query("""
+            SELECT TOP 1 SMM_HON_SEQ AS hon_seq FROM smm
+            WHERE RTRIM(SMM_COD)=? AND SMM_HON_SEQ IS NOT NULL
+            GROUP BY SMM_HON_SEQ ORDER BY COUNT(*) DESC
+        """, (item["cod"],))
+        hon_seq_por_cod[item["cod"]] = rows[0]["hon_seq"] if rows else None
+        if hon_seq_por_cod[item["cod"]] is None:
+            avisos.append(f"{item['cod']}: sem histórico de SMM_HON_SEQ em produção — campo ficou em branco, confira manualmente.")
+
+    tipo_atendimento = req.tipo_atendimento.strip().upper()
+    tiss_tipo_atende = req.tiss_tipo_atende or TISS_TIPO_ATENDE_OCUPACIONAL.get(tipo_atendimento)
+    # OSM_CID_COD='Z000' (CID-10: exame médico geral) — confirmado em 20 OS
+    # ocupacionais reais (ADM/PER/DEM/MOC/MDF), sem exceção. Só vale pro
+    # ocupacional — não chuta isso pra atendimento assistencial comum.
+    cid_cod = 'Z000' if tipo_atendimento in ATEND_OCUPACIONAL else None
+
     if exige_tiss:
-        if not req.tiss_tipo_atende:
+        if not tiss_tipo_atende:
             avisos.append(f"Convênio '{convenio}' exige TISS (CNV_IND_TISS=S) e osm_tiss_tipo_atende não foi "
                            "informado — não há valor dominante confiável pra chutar, preencha manualmente.")
         if not req.regime_atend:
@@ -12066,16 +12880,16 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
                                   OSM_USR_LOGIN_CAD, OSM_MREQ_IND_SLINE, osm_ind_gestante,
                                   osm_ind_lactante, OSM_OBS, OSM_TISS_TIPO_SAIDA,
                                   OSM_TISS_TIPO_ATENDE, osm_regime_atend, osm_sus_ind_prog_transp,
-                                  osm_dt_solic)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                  osm_dt_solic, OSM_ASO_MES_REF, OSM_LEG_COD, OSM_CID_COD)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 serie, candidato, req.paciente, agora, convenio, 'A',
                 req.medico_requisitante, req.setor, 'S' if req.urgente else 'N',
                 agora + timedelta(days=req.dias_previsao_resultado), req.tipo_atendimento,
                 req.login, 'S', 'N', 'N',
                 req.observacao or "Lançado via Dashboard (teste smart_hml)",
-                req.tiss_tipo_saida, req.tiss_tipo_atende, req.regime_atend, 'N',
-                agora,
+                req.tiss_tipo_saida, tiss_tipo_atende, req.regime_atend, 'N',
+                agora, agora.strftime("%m%Y"), '01', cid_cod,
             ))
             num = candidato
             break
@@ -12097,16 +12911,31 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
 
     try:
         for i, item in enumerate(itens_computados, start=1):
+            # SMM_COD_AMOSTRA segue o padrão observado em dado real:
+            # {serie 3 díg}{num 6 díg}{índice do item na OS, 3 díg, começa em 000}.
+            cod_amostra = f"{serie:03d}{num:06d}{(i - 1):03d}"
             cur.execute("""
                 INSERT INTO smm (SMM_OSM_SERIE, SMM_OSM, SMM_NUM, SMM_TPCOD, SMM_COD, SMM_QT,
                                   SMM_EXEC, SMM_SFAT, SMM_REP, SMM_STR, SMM_MED, SMM_VLCH, SMM_VLR,
                                   SMM_TAB_COD, SMM_USR_LOGIN_LANC, SMM_DTHR_LANC, SMM_DTHR_EXEC,
                                   SMM_DTHR_ALTER, SMM_MREQ_1, SMM_MREQ_2, SMM_MREQ_3, SMM_PAC_REG,
-                                  SMM_TIPO_FATURA, SMM_IND_RESULT_PARCIAL, SMM_IND_URG, SMM_SENHA)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                  SMM_TIPO_FATURA, SMM_IND_RESULT_PARCIAL, SMM_IND_URG, SMM_SENHA,
+                                  SMM_HON_SEQ, SMM_ESP, SMM_HORA_ESP,
+                                  SMM_QT_FRAC, SMM_PERC_REDUC_VLR_BASE, smm_vlr_sem_reduc,
+                                  SMM_COD_AMOSTRA)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 serie, num, i, item["tipo"], item["cod"], item["qt"],
-                'A', 'F', req.login, item["setor_execucao"], req.medico_executante,
+                # SMM_EXEC/SMM_SFAT='A'/'A' — CORRIGIDO (ver investigação real):
+                # 'C'/'C' NÃO é "concluído", é CANCELADO — confirmado cruzando com
+                # SMM_CANC_MOT_TIPO em amostra de produção (13/13 linhas com
+                # EXEC=C,SFAT=C tinham motivo de cancelamento preenchido, 100%).
+                # 'A'/'A' é o estado "aberto" normal — dominante em dado real
+                # (277/500 amostras, 55%, 0% com motivo de cancelamento) e usado
+                # aqui como default honesto de "lançado, aguardando execução/
+                # faturamento real". O par 'A'/'F' usado antes fingia faturado
+                # sem nota fiscal de verdade (SMM_FAT_SERIE/SMM_FAT nulos).
+                'A', 'A', req.login, item["setor_execucao"], req.medico_executante,
                 item["valor"], item["valor"],
                 tabela, req.login, agora, agora,
                 agora, 'S', 'S', 'S', req.paciente,
@@ -12115,6 +12944,9 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
                 # em SMM_SENHA do primeiro item (~71% preenchido), não em OSM_W_SENHA
                 # (praticamente sempre vazio quando SMM_SENHA existe).
                 req.osm_w_senha if i == 1 else None,
+                hon_seq_por_cod.get(item["cod"]), 'MED', 'N',
+                item["qt"], item["valor"], item["valor"],
+                cod_amostra,
             ))
         conn.commit()
     except pyodbc.Error as e:
@@ -12168,6 +13000,157 @@ def faturamento_lancar_os_teste(req: LancarOSTesteRequest):
         "ok": True, "ambiente": "smart_hml", "os": f"{serie}-{num}",
         "tabela_preco_usada": tabela, "convenio_exige_tiss": exige_tiss,
         "itens": itens_computados, "avisos": avisos, "fila": fila_info,
+    }
+
+
+class LancarOSProducaoRequest(BaseModel):
+    """Igual LancarOSTesteRequest, mas pra PRODUÇÃO — por isso usa cpf em vez de
+    pac_reg (o paciente precisa já existir em produção; essa rota nunca cria
+    paciente novo lá, só em homologação) e sempre exige dry_run=True nesta
+    primeira entrega (ver faturamento_lancar_os_producao)."""
+    cpf: str
+    convenio: str
+    setor: str
+    medico_requisitante: int
+    medico_executante: int
+    login: str
+    itens: list[ItemLancarOS]
+    tipo_atendimento: str = "ASS"
+    urgente: bool = False
+    dias_previsao_resultado: int = 7
+    observacao: str | None = None
+    tiss_tipo_saida: str = "5"
+    tiss_tipo_atende: str | None = None
+    regime_atend: str | None = None
+    osm_w_senha: str | None = None
+    fila_destino_psv_cod: int | None = None
+    adicionar_fila: bool = False
+    dry_run: bool = True
+
+
+@app.post("/api/faturamento/lancar-os-producao")
+def faturamento_lancar_os_producao(req: LancarOSProducaoRequest):
+    """
+    Lançamento de OS em PRODUÇÃO — rota separada de /lancar-os-teste de
+    propósito (nunca reaproveita o endpoint de homologação, pra produção
+    nunca herdar um bug/default pensado pra ambiente de teste).
+
+    Nesta primeira entrega SÓ dry_run=True é aceito: resolve paciente (por
+    CPF, em produção — nunca cria paciente novo aqui), roda a checagem de
+    duplicidade (já existe OS recente desse paciente nesse convênio? a
+    recepção pode já ter lançado manualmente) e monta o preview completo
+    (preço por item, avisos) SEM gravar nada. dry_run=False é rejeitado até
+    o fluxo ser validado e liberado de verdade (ver plano da sessão de
+    14/10/2026).
+    """
+    if not req.dry_run:
+        raise HTTPException(501, "Lançamento real em produção ainda não habilitado — essa rota só aceita dry_run=True por enquanto.")
+    if req.setor not in RECEPCOES:
+        raise HTTPException(400, f"Setor inválido: {req.setor}. Use um de {list(RECEPCOES)}.")
+    if not req.itens:
+        raise HTTPException(400, "Informe ao menos um item.")
+
+    conn = get_conn()  # PRODUÇÃO — de propósito, essa é a rota que não é hml
+    cur = conn.cursor()
+
+    convenio = req.convenio.strip().upper()
+    cur.execute("SELECT RTRIM(ISNULL(CNV_TAB,'')), RTRIM(ISNULL(CNV_IND_TISS,'')) FROM cnv WHERE RTRIM(cnv_cod)=?", (convenio,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        conn.close()
+        raise HTTPException(400, f"Convênio '{convenio}' não encontrado ou sem tabela de preço (CNV_TAB) cadastrada.")
+    tabela, exige_tiss = row[0], (row[1] == 'S')
+
+    cur.execute("SELECT 1 FROM str WHERE RTRIM(str_cod)=?", (req.setor,))
+    if cur.fetchone() is None:
+        conn.close()
+        raise HTTPException(400, f"Setor '{req.setor}' ({RECEPCOES.get(req.setor, '?')}) não encontrado em produção.")
+
+    checagens_psv = [("requisitante", req.medico_requisitante), ("executante", req.medico_executante)]
+    if req.fila_destino_psv_cod is not None:
+        checagens_psv.append(("da fila", req.fila_destino_psv_cod))
+    for label, cod in checagens_psv:
+        cur.execute("SELECT 1 FROM psv WHERE psv_cod=?", (cod,))
+        if cur.fetchone() is None:
+            conn.close()
+            raise HTTPException(400, f"Prestador {label} (código {cod}) não encontrado em produção.")
+
+    # Paciente por CPF em produção — essa rota nunca cria paciente novo (isso
+    # só acontece no fluxo de homologação); sem paciente já cadastrado lá, não
+    # há o que lançar.
+    cpf_digitos = _re.sub(r"\D", "", req.cpf)
+    cur.execute("SELECT TOP 1 pac_reg FROM pac WHERE REPLACE(REPLACE(REPLACE(ISNULL(PAC_NUMCPF,''),'.',''),'-',''),'/','')=?", (cpf_digitos,))
+    pac_row = cur.fetchone()
+    if not pac_row:
+        conn.close()
+        raise HTTPException(400, f"CPF {req.cpf} não encontrado em produção — essa rota não cria paciente novo lá.")
+    pac_reg = pac_row[0]
+
+    # Checagem de duplicidade — o motivo de essa rota existir com tanto
+    # cuidado: a recepção pode já ter lançado manualmente a OS desse
+    # atendimento no Smart. Busca qualquer OS desse paciente+convênio numa
+    # janela de alguns dias ao redor de agora (a sincronização SOC->CensoFlow
+    # roda poucos dias depois do atendimento real, nunca meses).
+    cur.execute("""
+        SELECT TOP 5 osm_serie, osm_num, osm_dthr FROM osm
+        WHERE osm_pac=? AND osm_cnv=?
+          AND osm_dthr BETWEEN DATEADD(day,-3,GETDATE()) AND DATEADD(day,3,GETDATE())
+        ORDER BY osm_dthr DESC
+    """, (pac_reg, convenio))
+    existentes_rows = cur.fetchall()
+    if existentes_rows:
+        conn.close()
+        os_serie, os_num, os_dthr = existentes_rows[0][0], existentes_rows[0][1], existentes_rows[0][2]
+        return {
+            "ok": False, "status": "ja_existe_producao", "dry_run": True,
+            "os_serie": os_serie, "os_num": os_num, "os_dthr": os_dthr.isoformat() if os_dthr else None,
+            "detalhe": f"Já existe OS {os_serie}-{os_num} ({os_dthr}) pra esse paciente+convênio em produção "
+                       f"nos últimos/próximos 3 dias — provavelmente já lançada pela recepção. Não lancei de novo.",
+        }
+
+    avisos = []
+    itens_computados = []
+    vistos = set()
+    for it in req.itens:
+        cod = it.cod.strip().upper()
+        tipo = it.tipo.strip().upper()
+        chave = (tipo, cod)
+        cur.execute(
+            "SELECT preco1 FROM V_TAB_PRECOS WHERE tabela=? AND RTRIM(tipo)=? AND RTRIM(codigo)=?",
+            (tabela, tipo, cod),
+        )
+        preco_row = cur.fetchone()
+        if chave in vistos:
+            valor = 0.0
+            avisos.append(f"{cod}: item duplicado na mesma OS — lançado com R$0,00 (regra de pacote).")
+        elif preco_row is None:
+            valor = 0.0
+            avisos.append(f"{cod}: não encontrado na tabela '{tabela}' do convênio — lançado com R$0,00, confira manualmente.")
+        else:
+            valor = float(preco_row[0])
+        vistos.add(chave)
+        itens_computados.append({"tipo": tipo, "cod": cod, "qt": it.qt,
+                                  "setor_execucao": it.setor_execucao.strip().upper(), "valor": valor})
+
+    tipo_atendimento = req.tipo_atendimento.strip().upper()
+    tiss_tipo_atende = req.tiss_tipo_atende or TISS_TIPO_ATENDE_OCUPACIONAL.get(tipo_atendimento)
+    if exige_tiss and not tiss_tipo_atende:
+        avisos.append(f"Convênio '{convenio}' exige TISS (CNV_IND_TISS=S) e osm_tiss_tipo_atende não foi informado.")
+
+    # Só informativo — nunca reserva/grava nada. O número real seria definido
+    # no momento do lançamento de verdade (ainda não habilitado nesta rota).
+    cur.execute("""
+        SELECT TOP 1 osm_serie FROM osm WHERE osm_cnv=? AND osm_atend=? ORDER BY osm_dthr DESC
+    """, (convenio, tipo_atendimento))
+    serie_row = cur.fetchone()
+    serie_sugerida = serie_row[0] if serie_row else None
+
+    conn.close()
+    return {
+        "ok": True, "status": "preview", "dry_run": True, "ambiente": "producao",
+        "paciente_pac_reg": pac_reg, "tabela_preco_usada": tabela, "convenio_exige_tiss": exige_tiss,
+        "serie_sugerida_pelo_uso_real": serie_sugerida,
+        "itens": itens_computados, "avisos": avisos,
     }
 
 
@@ -12255,6 +13238,40 @@ def faturamento_adicionar_fila_senha_teste(req: AdicionarFilaSenhaRequest):
 # inclusive as lançadas pelo Smart desktop (não só as de teste do Dashboard).
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _resolver_os_sem_vinculo(pac_regs: list[int], hoje: str) -> dict[int, dict]:
+    """
+    Pra filas de recepção tipo "Coleta Diagnóstico/Censo Imagem/Ocupacional/
+    CMI" (psv só da senha de chegada — confirmado com dado real: FLE_OSM_SERIE
+    sempre NULL nessas), não dá pra achar a OS pelo vínculo direto do `fle`.
+    Desambigua escolhendo, por paciente, a OS do dia com mais itens de sangue
+    ainda pendentes (empate: a mais recente) — se nenhuma tiver pendência,
+    cai pra mais recente mesmo (paciente já coletado, só pra exibição).
+    """
+    if not pac_regs:
+        return {}
+    placeholders = ",".join("?" for _ in pac_regs)
+    rows = query(f"""
+        SELECT osm.osm_pac AS pac_reg, osm.osm_serie AS serie, osm.osm_num AS num,
+               osm.osm_dthr AS os_dthr,
+               SUM(CASE WHEN RTRIM(ISNULL(smm.SMM_ETI_COD_AMOSTRA, ISNULL(smk.SMK_ETI_COD, ''))) <> ''
+                         AND smm.SMM_DTHR_COLETA IS NULL THEN 1 ELSE 0 END) AS pendentes
+        FROM osm
+        JOIN smm ON smm.SMM_OSM_SERIE = osm.osm_serie AND smm.SMM_OSM = osm.osm_num
+        LEFT JOIN smk ON RTRIM(smk.SMK_TIPO) = RTRIM(smm.SMM_TPCOD) AND RTRIM(smk.SMK_COD) = RTRIM(smm.SMM_COD)
+        WHERE osm.osm_pac IN ({placeholders}) AND CAST(osm.osm_dthr AS DATE) = ?
+        GROUP BY osm.osm_pac, osm.osm_serie, osm.osm_num, osm.osm_dthr
+    """, (*pac_regs, hoje))
+    por_paciente: dict[int, list] = {}
+    for r in rows:
+        por_paciente.setdefault(r["pac_reg"], []).append(r)
+    melhor = {}
+    for pac_reg, candidatos in por_paciente.items():
+        candidatos.sort(key=lambda r: (r["pendentes"], r["os_dthr"]), reverse=True)
+        escolhida = candidatos[0]
+        melhor[pac_reg] = {"serie": escolhida["serie"], "num": escolhida["num"]}
+    return melhor
+
+
 @app.get("/api/coleta/fila")
 def coleta_fila(fila_psv_cod: int = 9126, mostrar_coletados: bool = False):
     """
@@ -12267,6 +13284,8 @@ def coleta_fila(fila_psv_cod: int = 9126, mostrar_coletados: bool = False):
     finalizado hoje (FLE_STATUS='Z') — pra dar noção de quem já foi coletado,
     já que esse status some da fila normal (senão ficaria misturado com quem
     ainda está esperando).
+    Um mesmo paciente pode ter mais de uma linha de `fle` no mesmo dia/fila
+    (dado real confirmado) — agrupa por paciente pra não duplicar na tela.
     """
     hoje = datetime.now().strftime("%Y-%m-%d")
     status_sql = "('A', 'X', 'Z')" if mostrar_coletados else "('A', 'X')"
@@ -12276,29 +13295,57 @@ def coleta_fila(fila_psv_cod: int = 9126, mostrar_coletados: bool = False):
             fle.FLE_PAC_REG AS pac_reg, RTRIM(pac.pac_nome) AS paciente,
             CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
             fle.FLE_DTHR_CHEGADA AS chegada, fle.FLE_PREFERENCIAL AS preferencial,
-            CAST(fle.FLE_ORDEM AS INT) AS ordem,
-            CASE WHEN fle.FLE_STATUS = 'X' THEN 1 ELSE 0 END AS chamado,
-            CONVERT(VARCHAR(5), fle.FLE_DTHR_ATENDIMENTO, 108) AS chamado_em,
-            CASE WHEN fle.FLE_STATUS = 'Z' THEN 1 ELSE 0 END AS coletado,
-            CONVERT(VARCHAR(5), fle.FLE_DTHR_FINAL, 108) AS coletado_em
+            CAST(fle.FLE_ORDEM AS INT) AS ordem, fle.FLE_STATUS AS status,
+            fle.FLE_DTHR_ATENDIMENTO AS atendimento_dthr, fle.FLE_DTHR_FINAL AS final_dthr
         FROM fle
         JOIN pac ON pac.pac_reg = fle.FLE_PAC_REG
         WHERE fle.FLE_PSV_COD = ?
           AND CAST(fle.FLE_DTHR_CHEGADA AS DATE) = ?
           AND fle.FLE_STATUS IN {status_sql}
-          AND fle.FLE_OSM_SERIE IS NOT NULL
-        ORDER BY CASE WHEN fle.FLE_STATUS = 'Z' THEN 1 ELSE 0 END ASC,
-                 fle.FLE_PREFERENCIAL DESC, fle.FLE_ORDEM ASC
     """, (fila_psv_cod, hoje))
+
+    por_paciente: dict[int, dict] = {}
     for r in rows:
-        if hasattr(r.get("chegada"), "strftime"):
-            r["chegada"] = r["chegada"].strftime("%H:%M")
-    return rows
+        grupo = por_paciente.setdefault(r["pac_reg"], {
+            "pac_reg": r["pac_reg"], "paciente": r["paciente"], "nascimento": r["nascimento"],
+            "chegada": r["chegada"], "preferencial": "N", "ordem": r["ordem"],
+            "chamado": 0, "chamado_em": None, "coletado": 1, "coletado_em": None,
+            "os_serie": None, "os_num": None,
+        })
+        grupo["chegada"] = min(grupo["chegada"], r["chegada"])
+        grupo["ordem"] = min(grupo["ordem"], r["ordem"])
+        if r["preferencial"] == "S":
+            grupo["preferencial"] = "S"
+        if r["status"] == "X":
+            grupo["chamado"] = 1
+            if r["atendimento_dthr"] and (not grupo["chamado_em"] or r["atendimento_dthr"] > grupo["chamado_em"]):
+                grupo["chamado_em"] = r["atendimento_dthr"]
+        if r["status"] != "Z":
+            grupo["coletado"] = 0
+        elif r["final_dthr"] and (not grupo["coletado_em"] or r["final_dthr"] > grupo["coletado_em"]):
+            grupo["coletado_em"] = r["final_dthr"]
+        if r["os_serie"] is not None and grupo["os_serie"] is None:
+            grupo["os_serie"], grupo["os_num"] = r["os_serie"], r["os_num"]
+
+    sem_vinculo = [pr for pr, g in por_paciente.items() if g["os_serie"] is None]
+    resolvidos = _resolver_os_sem_vinculo(sem_vinculo, hoje)
+    for pac_reg, g in por_paciente.items():
+        if g["os_serie"] is None and pac_reg in resolvidos:
+            g["os_serie"] = resolvidos[pac_reg]["serie"]
+            g["os_num"] = resolvidos[pac_reg]["num"]
+
+    resultado = list(por_paciente.values())
+    for g in resultado:
+        g["chamado_em"] = g["chamado_em"].strftime("%H:%M") if g["chamado_em"] else None
+        g["coletado_em"] = g["coletado_em"].strftime("%H:%M") if g["coletado_em"] else None
+        g["chegada"] = g["chegada"].strftime("%H:%M") if hasattr(g["chegada"], "strftime") else g["chegada"]
+    resultado.sort(key=lambda g: (g["coletado"], 0 if g["preferencial"] == "S" else 1, g["ordem"]))
+    return resultado
 
 
 class ChamarPacienteRequest(BaseModel):
-    serie: int
-    num: int
+    fila_psv_cod: int
+    pac_reg: int
     login: str
 
 
@@ -12308,15 +13355,19 @@ def coleta_chamar_paciente(req: ChamarPacienteRequest):
     Chama o paciente — mesmo mecanismo de "médico chama pelo Smart"
     (FLE_STATUS='A'->'X', FLE_DTHR_ATENDIMENTO=agora), que já é lido pelo
     Painel TV em /api/painel-fila/pacientes. Grava em PRODUÇÃO.
+    Casa por fila+paciente+dia (não por OS) porque nas filas de recepção
+    (Coleta Diagnóstico/Censo Imagem/Ocupacional/CMI) o `fle` não tem OS
+    vinculada — ver `_resolver_os_sem_vinculo`.
     """
+    hoje = datetime.now().strftime("%Y-%m-%d")
     conn = get_conn()
     cur = conn.cursor()
     agora = datetime.now()
     try:
         cur.execute("""
             UPDATE fle SET FLE_STATUS='X', FLE_DTHR_ATENDIMENTO=?, FLE_USR_ATENDIMENTO=?
-            WHERE FLE_OSM_SERIE=? AND FLE_OSM_NUM=? AND FLE_STATUS='A'
-        """, (agora, req.login, req.serie, req.num))
+            WHERE FLE_PSV_COD=? AND FLE_PAC_REG=? AND CAST(FLE_DTHR_CHEGADA AS DATE)=? AND FLE_STATUS='A'
+        """, (agora, req.login, req.fila_psv_cod, req.pac_reg, hoje))
         atualizados = cur.rowcount
         conn.commit()
     except pyodbc.Error as e:
@@ -12327,11 +13378,49 @@ def coleta_chamar_paciente(req: ChamarPacienteRequest):
     return {"ok": True, "itens_atualizados": atualizados}
 
 
+@app.get("/api/coleta/buscar-os")
+def coleta_buscar_os(q: str, limite: int = 15):
+    """
+    Busca manual de OS (nome do paciente ou "serie-num") pra achar um
+    atendimento que não apareceu sozinho na fila automática — ex.: a
+    desambiguação de `_resolver_os_sem_vinculo` escolheu a OS errada, ou o
+    paciente nem passou pela senha de recepção. Olha só o dia de hoje.
+    """
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "resultados": []}
+    hoje = datetime.now().strftime("%Y-%m-%d")
+
+    if "-" in termo and all(p.strip().isdigit() for p in termo.split("-", 1)):
+        serie_s, num_s = termo.split("-", 1)
+        rows = query("""
+            SELECT TOP 1 osm.osm_serie AS serie, osm.osm_num AS num, osm.osm_pac AS pac_reg,
+                   RTRIM(pac.pac_nome) AS paciente, CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
+                   osm.osm_dthr AS os_dthr
+            FROM osm JOIN pac ON pac.pac_reg = osm.osm_pac
+            WHERE osm.osm_serie = ? AND osm.osm_num = ?
+        """, (int(serie_s), int(num_s)))
+    else:
+        rows = query(f"""
+            SELECT TOP {limite} osm.osm_serie AS serie, osm.osm_num AS num, osm.osm_pac AS pac_reg,
+                   RTRIM(pac.pac_nome) AS paciente, CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
+                   osm.osm_dthr AS os_dthr
+            FROM osm JOIN pac ON pac.pac_reg = osm.osm_pac
+            WHERE pac.pac_nome LIKE ? AND CAST(osm.osm_dthr AS DATE) = ?
+            ORDER BY osm.osm_dthr DESC
+        """, (f"%{termo}%", hoje))
+    for r in rows:
+        if hasattr(r.get("os_dthr"), "strftime"):
+            r["os_dthr"] = r["os_dthr"].strftime("%d/%m %H:%M")
+    return {"total": len(rows), "resultados": rows}
+
+
 @app.get("/api/coleta/os/{serie}/{num}")
 def coleta_os_detalhe(serie: int, num: int):
     """Itens da OS (produção) pra tela de recebimento — já mostra o que já foi coletado antes."""
     pac_rows = query("""
-        SELECT RTRIM(pac.pac_nome) AS paciente, CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
+        SELECT osm.osm_pac AS pac_reg, RTRIM(pac.pac_nome) AS paciente,
+               CONVERT(varchar, pac.PAC_NASC, 23) AS nascimento,
                RTRIM(ISNULL(cnv.cnv_nome, osm.osm_cnv)) AS convenio
         FROM osm
         JOIN pac ON pac.pac_reg = osm.osm_pac
@@ -12359,7 +13448,8 @@ def coleta_os_detalhe(serie: int, num: int):
             it["coleta_dthr"] = it["coleta_dthr"].strftime("%d/%m/%Y %H:%M")
 
     p = pac_rows[0]
-    return {"paciente": p["paciente"], "nascimento": p["nascimento"], "convenio": p["convenio"], "itens": itens}
+    return {"pac_reg": p["pac_reg"], "paciente": p["paciente"], "nascimento": p["nascimento"],
+            "convenio": p["convenio"], "itens": itens}
 
 
 class ReceberAmostraRequest(BaseModel):
@@ -12367,6 +13457,8 @@ class ReceberAmostraRequest(BaseModel):
     num: int
     itens: list[int]  # SMM_NUM dos itens recebidos
     login: str
+    fila_psv_cod: int
+    pac_reg: int
 
 
 @app.post("/api/coleta/receber")
@@ -12374,9 +13466,13 @@ def coleta_receber_amostra(req: ReceberAmostraRequest):
     """
     Marca os itens como coletados (SMM_DTHR_COLETA) e encerra a espera na
     fila (FLE_STATUS 'A' ou 'X' -> 'Z'). Grava em PRODUÇÃO.
+    O encerramento da fila casa por fila+paciente+dia (não por OS) porque nas
+    filas de recepção (Coleta Diagnóstico/Censo Imagem/Ocupacional/CMI) o
+    `fle` não tem OS vinculada — ver `_resolver_os_sem_vinculo`.
     """
     if not req.itens:
         raise HTTPException(400, "Informe ao menos um item.")
+    hoje = datetime.now().strftime("%Y-%m-%d")
     conn = get_conn()
     cur = conn.cursor()
     agora = datetime.now()
@@ -12397,8 +13493,8 @@ def coleta_receber_amostra(req: ReceberAmostraRequest):
         # não tem relação com coleta de amostra.
         cur.execute("""
             UPDATE fle SET FLE_STATUS='Z', FLE_DTHR_FINAL=?, FLE_USR_FINAL=?
-            WHERE FLE_OSM_SERIE=? AND FLE_OSM_NUM=? AND FLE_STATUS IN ('A', 'X')
-        """, (agora, req.login, req.serie, req.num))
+            WHERE FLE_PSV_COD=? AND FLE_PAC_REG=? AND CAST(FLE_DTHR_CHEGADA AS DATE)=? AND FLE_STATUS IN ('A', 'X')
+        """, (agora, req.login, req.fila_psv_cod, req.pac_reg, hoje))
         conn.commit()
     except pyodbc.Error as e:
         conn.rollback()
@@ -12406,6 +13502,65 @@ def coleta_receber_amostra(req: ReceberAmostraRequest):
         raise HTTPException(400, f"Erro ao gravar recebimento: {e}")
     conn.close()
     return {"ok": True, "itens_atualizados": atualizados}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENFERMAGEM — fila de triagem dos atendimentos ocupacionais
+# Lógica de negócio em enfermagem.py (import tardio, mesmo padrão de
+# chat_interno.py/agenda_bot.py) — ver docstring do módulo pra entender por
+# que "chamar" aqui não mexe em FLE_STATUS (diferente da Coleta) e por que
+# sinais vitais gravam em RCL_COD='NOTASENF'.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/enfermagem/filas")
+def enfermagem_filas(dias: int = 30):
+    from enfermagem import listar_filas_disponiveis
+    return listar_filas_disponiveis(dias)
+
+
+@app.get("/api/enfermagem/fila")
+def enfermagem_fila(fila_codigos: str = "", mostrar_chamados: bool = False):
+    from enfermagem import listar_fila
+    return listar_fila(fila_codigos, mostrar_chamados)
+
+
+class ChamarTriagemRequest(BaseModel):
+    chegada_raw: str
+    categoria_codigo: int
+    login: str
+
+
+@app.post("/api/enfermagem/chamar")
+def enfermagem_chamar(req: ChamarTriagemRequest):
+    from enfermagem import chamar
+    try:
+        return chamar(req.chegada_raw, req.categoria_codigo, req.login)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+class SalvarTriagemRequest(BaseModel):
+    paciente: int
+    medico: int
+    login: str
+    campos: dict
+
+
+@app.post("/api/enfermagem/salvar-triagem")
+def enfermagem_salvar_triagem(req: SalvarTriagemRequest):
+    from enfermagem import salvar_triagem
+    try:
+        return salvar_triagem(req.paciente, req.medico, req.campos, req.login)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/enfermagem/historico")
+def enfermagem_historico(paciente: int, limite: int = 20):
+    from enfermagem import historico
+    return historico(paciente, limite)
 
 
 # Nome amigável da recepção — mesmo texto usado no Painel de Senhas
@@ -12576,6 +13731,981 @@ def faturamento_buscar_medico(q: str, limite: int = 15):
     return {"total": len(rows), "resultados": rows}
 
 
+@app.get("/api/faturamento/buscar-convenio-por-cnpj")
+def faturamento_buscar_convenio_por_cnpj(cnpj: str):
+    """Busca convênio (cnv) pelo CNPJ (cnv_cgc) — usado pela integração CensoFlow/SOC
+    pra achar o convênio da empresa-cliente (cada empresa ocupacional é seu próprio
+    convênio, cnv_tipo='MC'). Lê produção (só leitura). Compara só dígitos porque
+    cnv_cgc pode estar formatado ou não."""
+    so_digitos = _re.sub(r"\D", "", cnpj)
+    if len(so_digitos) != 14:
+        raise HTTPException(400, "CNPJ inválido (precisa ter 14 dígitos).")
+    rows = query("""
+        SELECT RTRIM(cnv_cod) AS codigo, RTRIM(cnv_nome) AS nome, RTRIM(ISNULL(cnv_cgc,'')) AS cnpj
+        FROM cnv
+        WHERE REPLACE(REPLACE(REPLACE(ISNULL(cnv_cgc,''),'.',''),'/',''),'-','') = ?
+    """, (so_digitos,))
+    if not rows:
+        return {"encontrado": False}
+    return {"encontrado": True, **rows[0]}
+
+
+@app.get("/api/faturamento/buscar-convenio")
+def faturamento_buscar_convenio(q: str, limite: int = 15):
+    """Busca convênio (cnv) por nome — usado quando a busca por CNPJ não acha nada
+    (ex: convênio ainda não cadastrado com CNPJ, ou cadastrado com CNPJ diferente) e
+    pra conferência manual. Lê produção (só leitura)."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "resultados": []}
+    rows = query(f"""
+        SELECT TOP {limite}
+            RTRIM(cnv_cod) AS codigo, RTRIM(cnv_nome) AS nome,
+            RTRIM(ISNULL(cnv_cgc,'')) AS cnpj, cnv_tipo AS tipo, cnv_stat AS status
+        FROM cnv
+        WHERE cnv_nome LIKE ?
+        ORDER BY LEN(cnv_nome), cnv_nome
+    """, (f"%{termo}%",))
+    return {"total": len(rows), "resultados": rows}
+
+
+@app.get("/api/faturamento/convenio-tabela-preco-hml")
+def faturamento_convenio_tabela_preco_hml(cod: str):
+    """Confere se um convênio tem CNV_TAB cadastrada em smart_hml — mesma
+    checagem que /api/faturamento/lancar-os-teste faz antes de gravar, usada
+    pra diagnosticar de antemão por que um código específico está sendo
+    recusado (a tabela de preço pode existir em produção e não existir no
+    snapshot de homologação, que não é atualizado em tempo real)."""
+    conn = get_conn_hml()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT RTRIM(cnv_cod), RTRIM(ISNULL(cnv_nome,'')), RTRIM(ISNULL(CNV_TAB,'')) FROM cnv WHERE RTRIM(cnv_cod)=?",
+        (cod.strip().upper(),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {"encontrado": False}
+    return {"encontrado": True, "codigo": row[0], "nome": row[1], "tem_tabela_preco": bool(row[2]), "cnv_tab": row[2]}
+
+
+@app.get("/api/faturamento/setor-execucao-usual")
+def faturamento_setor_execucao_usual(cod: str, limite: int = 5):
+    """Setores de execução (SMM_STR) mais usados historicamente pra um código de
+    item (SMM_COD) — usado pra preencher a tela de mapeamento de exame sem chutar
+    (o setor de execução varia por tipo de exame, ex. LAB pra laboratório, RAD pra
+    raio-X). Lê produção (só leitura)."""
+    rows = query(f"""
+        SELECT TOP {limite} RTRIM(SMM_STR) AS setor, COUNT(*) AS total
+        FROM smm
+        WHERE RTRIM(SMM_COD) = ?
+        GROUP BY SMM_STR
+        ORDER BY COUNT(*) DESC
+    """, (cod.strip().upper(),))
+    return {"resultados": rows}
+
+
+@app.get("/api/faturamento/hon-seq-usual")
+def faturamento_hon_seq_usual(codigos: str):
+    """SMM_HON_SEQ dominante por código de procedimento (smm_cod) — confirmado
+    por amostragem que é fixo por código, não por OS (ex.: AUDTV sempre 80,
+    EXCLIN sempre 107 em 15 OS reais checadas). Usado pra preencher esse campo
+    na prova de conceito de lançamento de OS sem chutar. Lê produção (só
+    leitura). `codigos` = lista separada por vírgula."""
+    lista = [c.strip().upper() for c in codigos.split(",") if c.strip()]
+    if not lista:
+        return {"resultados": []}
+    resultados = []
+    for cod in lista:
+        rows = query("""
+            SELECT TOP 1 SMM_HON_SEQ AS hon_seq, COUNT(*) AS ocorrencias
+            FROM smm
+            WHERE RTRIM(SMM_COD)=? AND SMM_HON_SEQ IS NOT NULL
+            GROUP BY SMM_HON_SEQ
+            ORDER BY COUNT(*) DESC
+        """, (cod,))
+        resultados.append({
+            "codigo": cod,
+            "hon_seq": rows[0]["hon_seq"] if rows else None,
+            "ocorrencias": rows[0]["ocorrencias"] if rows else 0,
+        })
+    return {"resultados": resultados}
+
+
+@app.get("/api/faturamento/contar-os-por-convenio")
+def faturamento_contar_os_por_convenio(codigos: str):
+    """Conta quantas OS (osm) existem por código de convênio — usado pra desempatar
+    entre convênios duplicados/candidatos (o com mais OS é o realmente em uso).
+    `codigos` = lista separada por vírgula. Lê produção (só leitura)."""
+    lista = [c.strip().upper() for c in codigos.split(",") if c.strip()]
+    if not lista:
+        return {"resultados": []}
+    resultados = []
+    for cod in lista:
+        rows = query("SELECT COUNT(*) AS total, MAX(osm_dthr) AS ultima_os FROM osm WHERE RTRIM(osm_cnv)=?", (cod,))
+        resultados.append({"codigo": cod, "total_os": rows[0]["total"], "ultima_os": rows[0]["ultima_os"]})
+    resultados.sort(key=lambda r: r["total_os"], reverse=True)
+    return {"resultados": resultados}
+
+
+@app.get("/api/faturamento/ultima-os-convenio")
+def faturamento_ultima_os_convenio(codigo: str, limite: int = 3):
+    """OS mais recentes (serie+num) de um convênio em produção — usado pra achar
+    uma OS lançada pelo desktop (padrão real) pra comparar campo a campo com uma
+    lançada pela integração. Só leitura."""
+    rows = query(
+        f"SELECT TOP {limite} osm_serie, osm_num, osm_dthr FROM osm WHERE RTRIM(osm_cnv)=? ORDER BY osm_dthr DESC",
+        (codigo.strip().upper(),),
+    )
+    return {"resultados": rows}
+
+
+class CriarPacienteRequest(BaseModel):
+    nome: str
+    convenio: str              # pac_cnv
+    cpf: str | None = None
+    nascimento: str | None = None   # "YYYY-MM-DD"
+    sexo: str | None = None         # "M" ou "F" — já normalizado por quem chama
+    nome_mae: str | None = None
+    rg: str | None = None
+    telefone: str | None = None
+    celular: str | None = None
+    endereco: str | None = None
+    endereco_numero: int | None = None
+    cep: str | None = None
+    uf: str | None = None
+
+
+@app.post("/api/faturamento/criar-paciente-teste")
+def faturamento_criar_paciente_teste(req: CriarPacienteRequest):
+    """
+    Prova de conceito de cadastro de paciente — SOMENTE smart_hml, nunca
+    produção. Preenche só as 4 colunas realmente obrigatórias (PAC_REG,
+    PAC_DREG, PAC_NOME, PAC_CNV — confirmado via INFORMATION_SCHEMA, só essas
+    4 não têm default) mais os campos opcionais informados. PAC_REG não é
+    identity (confirmado via schema) — mesma lógica de MAX+1 com retry em
+    conflito de PK usada em /lancar-os-teste pra osm_serie/osm_num.
+    """
+    conn = get_conn_hml()
+    cur = conn.cursor()
+
+    nascimento = None
+    if req.nascimento:
+        try:
+            nascimento = datetime.strptime(req.nascimento, "%Y-%m-%d")
+        except ValueError:
+            conn.close()
+            raise HTTPException(400, "nascimento deve ser 'YYYY-MM-DD'.")
+
+    agora = datetime.now()
+    novo_reg = None
+    for _tentativa in range(5):
+        cur.execute("SELECT ISNULL(MAX(pac_reg),0)+1 FROM pac")
+        candidato = cur.fetchone()[0]
+        try:
+            cur.execute("""
+                INSERT INTO pac (PAC_REG, PAC_DREG, PAC_NOME, PAC_CNV, PAC_NUMCPF, PAC_NASC,
+                                  PAC_SEXO, PAC_NOME_MAE, PAC_NUMRG, PAC_FONE, PAC_CELULAR,
+                                  PAC_END, PAC_END_NUM, PAC_CEP, PAC_UF)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                candidato, agora, req.nome.strip().upper(), req.convenio.strip().upper(),
+                req.cpf, nascimento, req.sexo, req.nome_mae, req.rg, req.telefone,
+                req.celular, req.endereco, req.endereco_numero, req.cep, req.uf,
+            ))
+            novo_reg = candidato
+            break
+        except pyodbc.IntegrityError as e:
+            conn.rollback()
+            if "FOREIGN KEY constraint" in str(e):
+                conn.close()
+                raise HTTPException(400, f"Erro ao gravar paciente em smart_hml (dado referenciado não existe nessa base): {e}")
+            continue
+    if novo_reg is None:
+        conn.close()
+        raise HTTPException(409, "Não foi possível obter um pac_reg livre após 5 tentativas.")
+    conn.commit()
+    conn.close()
+    return {"ok": True, "ambiente": "smart_hml", "pac_reg": novo_reg}
+
+
+@app.get("/api/faturamento/smm-status-significado")
+def faturamento_smm_status_significado():
+    """Investiga o que SMM_EXEC/SMM_SFAT='C' realmente significa — cruza com
+    SMM_MOTIVO_CANCELA e SMM_CANC_MOT_TIPO/COD (campos de cancelamento reais)
+    pra confirmar se é 'Concluído' ou 'Cancelado'. Lê produção (só leitura)."""
+    rows = query("""
+        SELECT TOP 500
+            smm.SMM_EXEC, smm.SMM_SFAT,
+            CASE WHEN smm.SMM_MOTIVO_CANCELA IS NOT NULL AND RTRIM(smm.SMM_MOTIVO_CANCELA) != '' THEN 1 ELSE 0 END AS tem_motivo_cancela,
+            CASE WHEN smm.SMM_CANC_MOT_TIPO IS NOT NULL THEN 1 ELSE 0 END AS tem_canc_mot_tipo,
+            osm.OSM_DTHR
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        WHERE osm.osm_dthr >= DATEADD(day, -60, GETDATE())
+        ORDER BY osm.osm_dthr DESC
+    """)
+    resumo = {}
+    for r in rows:
+        chave = f"EXEC={r['SMM_EXEC']},SFAT={r['SMM_SFAT']}"
+        if chave not in resumo:
+            resumo[chave] = {"total": 0, "com_motivo_cancela": 0, "com_canc_mot_tipo": 0}
+        resumo[chave]["total"] += 1
+        resumo[chave]["com_motivo_cancela"] += r["tem_motivo_cancela"]
+        resumo[chave]["com_canc_mot_tipo"] += r["tem_canc_mot_tipo"]
+    return {"resumo_por_combinacao": resumo, "total_linhas_amostradas": len(rows)}
+
+
+@app.get("/api/faturamento/contar-convenio-com-cnpj")
+def faturamento_contar_convenio_com_cnpj():
+    """Conta quantos convênios (cnv) têm CNV_CGC preenchido vs total — só pra
+    saber a escala do problema (CNPJ não é viável pra casar convênio
+    automaticamente). Lê produção (só leitura)."""
+    rows = query("""
+        SELECT
+            COUNT(*) AS total_convenios,
+            SUM(CASE WHEN CNV_CGC IS NOT NULL AND RTRIM(CNV_CGC) != '' THEN 1 ELSE 0 END) AS com_cnpj,
+            SUM(CASE WHEN cnv_stat = 'A' THEN 1 ELSE 0 END) AS total_ativos,
+            SUM(CASE WHEN cnv_stat = 'A' AND CNV_CGC IS NOT NULL AND RTRIM(CNV_CGC) != '' THEN 1 ELSE 0 END) AS ativos_com_cnpj
+        FROM cnv
+    """)
+    return rows[0]
+
+
+@app.get("/api/faturamento/tabelas-com-cnpj")
+def faturamento_tabelas_com_cnpj():
+    """Lista tabelas de produção que tem alguma coluna parecida com CNPJ
+    (CGC/CNPJ no nome) e quantas linhas tem valor preenchido — pra ver se
+    tem alguma fonte de CNPJ mais confiável que cnv.CNV_CGC. Só leitura."""
+    colunas = query("""
+        SELECT c.TABLE_NAME, c.COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.COLUMN_NAME LIKE '%CGC%' OR c.COLUMN_NAME LIKE '%CNPJ%'
+        ORDER BY c.TABLE_NAME
+    """)
+    resultado = []
+    for col in colunas:
+        tabela = col["TABLE_NAME"]
+        coluna = col["COLUMN_NAME"]
+        try:
+            r = query(f"""
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN {coluna} IS NOT NULL AND RTRIM(CAST({coluna} AS varchar(50))) != '' THEN 1 ELSE 0 END) AS preenchidos
+                FROM {tabela}
+            """)
+            resultado.append({"tabela": tabela, "coluna": coluna, "total": r[0]["total"], "preenchidos": r[0]["preenchidos"]})
+        except Exception as e:
+            resultado.append({"tabela": tabela, "coluna": coluna, "erro": str(e)[:200]})
+    return {"resultados": resultado}
+
+
+_TABELAS_INVESTIGAR_PERMITIDAS = {
+    "EMP": "EMP_CGC",
+    "V_S4_CONTRATO": "v_cnpj",
+}
+
+
+@app.get("/api/faturamento/comparar-emp-cnv")
+def faturamento_comparar_emp_cnv(emp_cod: int, cnv_cod: str):
+    """Pega o registro completo de EMP (por EMP_COD) e de CNV (por cnv_cod) e
+    acha quais campos de um tem valor igual a algum campo do outro — pra
+    descobrir qual coluna liga os dois de verdade, já que EMP_CNV_COD está
+    sempre vazio. Só leitura, produção."""
+    emp_rows = query("SELECT * FROM EMP WHERE EMP_COD = ?", (emp_cod,))
+    cnv_rows = query("SELECT * FROM cnv WHERE RTRIM(cnv_cod) = ?", (cnv_cod.strip().upper(),))
+    if not emp_rows or not cnv_rows:
+        raise HTTPException(404, "EMP_COD ou cnv_cod não encontrado.")
+    emp_row, cnv_row = emp_rows[0], cnv_rows[0]
+
+    def _norm(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s else None
+
+    emp_valores = {k: _norm(v) for k, v in emp_row.items() if _norm(v) is not None}
+    cnv_valores = {k: _norm(v) for k, v in cnv_row.items() if _norm(v) is not None}
+
+    coincidencias = []
+    for ek, ev in emp_valores.items():
+        for ck, cv in cnv_valores.items():
+            if ev == cv:
+                coincidencias.append({"campo_emp": ek, "campo_cnv": ck, "valor": ev})
+            elif ev.lstrip("0") == cv.lstrip("0") and ev.lstrip("0") != "":
+                coincidencias.append({"campo_emp": ek, "campo_cnv": ck, "valor_emp": ev, "valor_cnv": cv, "obs": "igual sem zeros a esquerda"})
+
+    return {"emp": emp_row, "cnv": cnv_row, "coincidencias": coincidencias}
+
+
+@app.get("/api/faturamento/investigar-tabela")
+def faturamento_investigar_tabela(tabela: str, cnpj: str = None):
+    """Lista colunas de uma tabela/view de produção + até 3 linhas de
+    amostra (ou a linha de um CNPJ específico, se informado) — pra entender
+    se EMP/V_S4_CONTRATO linkam CNPJ a convênio. Só leitura. `tabela`
+    restrito a uma lista fixa (nunca interpola nome de tabela arbitrário do
+    caller numa query — essa é a única superfície de risco real aqui)."""
+    if tabela not in _TABELAS_INVESTIGAR_PERMITIDAS:
+        raise HTTPException(400, f"Tabela não permitida. Use uma de: {list(_TABELAS_INVESTIGAR_PERMITIDAS)}")
+    coluna_cnpj = _TABELAS_INVESTIGAR_PERMITIDAS[tabela]
+    colunas = query("""
+        SELECT c.COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.TABLE_NAME = ? ORDER BY c.ORDINAL_POSITION
+    """, (tabela,))
+    nomes_colunas = [c["COLUMN_NAME"] for c in colunas]
+    if cnpj:
+        so_digitos = _re.sub(r"\D", "", cnpj)
+        rows = query(f"""
+            SELECT TOP 3 * FROM {tabela}
+            WHERE REPLACE(REPLACE(REPLACE(ISNULL(CAST({coluna_cnpj} AS varchar(30)),''),'.',''),'/',''),'-','') = ?
+        """, (so_digitos,))
+    else:
+        rows = query(f"SELECT TOP 3 * FROM {tabela}")
+    return {"tabela": tabela, "colunas": nomes_colunas, "amostra": rows}
+
+
+@app.get("/api/faturamento/contar-emp-cnv-cod")
+def faturamento_contar_emp_cnv_cod():
+    """Conta quantas linhas de EMP tem EMP_CNV_COD preenchido — pra saber se
+    esse campo realmente liga EMP a um convênio em algum caso, ou se é
+    sempre vazio. Só leitura."""
+    rows = query("""
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN EMP_CNV_COD IS NOT NULL THEN 1 ELSE 0 END) AS com_cnv_cod,
+               SUM(CASE WHEN EMP_CGC IS NOT NULL AND RTRIM(EMP_CGC) != '' THEN 1 ELSE 0 END) AS com_cgc
+        FROM EMP
+    """)
+    return rows[0]
+
+
+@app.get("/api/faturamento/cobertura-cnv-emp-cod")
+def faturamento_cobertura_cnv_emp_cod():
+    """Mede a cobertura real do link cnv.CNV_EMP_COD -> EMP.EMP_COD -> EMP_CGC
+    (achado via /comparar-emp-cnv: CNV_EMP_COD é o FK real pra EMP, não
+    EMP_CNV_COD que está sempre vazio). Serve pra saber se vale a pena usar
+    esse caminho pra auto-mapear convênio a partir do CNPJ da empresa. Só
+    leitura, produção."""
+    total_ativos = query("SELECT COUNT(*) AS n FROM cnv WHERE CNV_STAT='A'")[0]["n"]
+    com_emp_cod = query("""
+        SELECT COUNT(*) AS n FROM cnv WHERE CNV_STAT='A' AND CNV_EMP_COD IS NOT NULL
+    """)[0]["n"]
+    com_emp_e_cgc = query("""
+        SELECT COUNT(*) AS n
+        FROM cnv c
+        JOIN EMP e ON e.EMP_COD = c.CNV_EMP_COD
+        WHERE c.CNV_STAT = 'A' AND e.EMP_CGC IS NOT NULL AND RTRIM(e.EMP_CGC) != ''
+    """)[0]["n"]
+    amostra = query("""
+        SELECT TOP 5 c.cnv_cod, c.CNV_RSOC, c.CNV_EMP_COD, e.EMP_CGC, e.EMP_RAZ_SOC
+        FROM cnv c
+        JOIN EMP e ON e.EMP_COD = c.CNV_EMP_COD
+        WHERE c.CNV_STAT = 'A' AND e.EMP_CGC IS NOT NULL AND RTRIM(e.EMP_CGC) != ''
+    """)
+    return {
+        "convenios_ativos": total_ativos,
+        "com_cnv_emp_cod_preenchido": com_emp_cod,
+        "com_emp_e_cnpj_via_join": com_emp_e_cgc,
+        "amostra": amostra,
+    }
+
+
+def _normalizar_nome_empresa(nome: str) -> str:
+    """Upper-case, sem acento, sem pontuação, espaços colapsados — pra
+    comparar nome de empresa entre SOC e EMP/cnv sem depender de collation
+    do SQL Server."""
+    if not nome:
+        return ""
+    sem_acento = _unicodedata.normalize("NFKD", nome).encode("ascii", "ignore").decode("ascii")
+    so_alfanum = _re.sub(r"[^A-Za-z0-9 ]", " ", sem_acento.upper())
+    return _re.sub(r"\s+", " ", so_alfanum).strip()
+
+
+@app.post("/api/faturamento/mapear-convenios-por-nome")
+def faturamento_mapear_convenios_por_nome(payload: dict = Body(...)):
+    """Pra cada nome de empresa recebido, tenta achar exatamente 1 convênio
+    ativo em produção via EMP (EMP_RAZ_SOC/EMP_RAZ_SOC_EXTENDIDA/
+    EMP_NOME_FANTASIA, casamento exato normalizado) -> EMP_COD ->
+    cnv.CNV_EMP_COD (link achado em /comparar-emp-cnv). Só retorna match
+    quando é único e sem ambiguidade — caso contrário marca como ambíguo ou
+    sem match, pra nunca popular convênio errado. Só leitura, produção."""
+    nomes = payload.get("nomes") or []
+    if not isinstance(nomes, list) or not nomes:
+        raise HTTPException(400, "Informe 'nomes': lista de nomes de empresa.")
+
+    emp_rows = query("""
+        SELECT EMP_COD, EMP_RAZ_SOC, EMP_RAZ_SOC_EXTENDIDA, EMP_NOME_FANTASIA
+        FROM EMP WHERE EMP_STATUS = 'A'
+    """)
+    cnv_rows = query("""
+        SELECT RTRIM(cnv_cod) AS cnv_cod, CNV_RSOC, CNV_EMP_COD
+        FROM cnv WHERE CNV_STAT = 'A' AND CNV_EMP_COD IS NOT NULL
+    """)
+
+    nome_para_emp_cods: dict[str, set] = {}
+    for row in emp_rows:
+        for campo in ("EMP_RAZ_SOC", "EMP_RAZ_SOC_EXTENDIDA", "EMP_NOME_FANTASIA"):
+            nome_norm = _normalizar_nome_empresa(row.get(campo))
+            if nome_norm:
+                nome_para_emp_cods.setdefault(nome_norm, set()).add(row["EMP_COD"])
+
+    emp_cod_para_cnvs: dict[int, list] = {}
+    for row in cnv_rows:
+        emp_cod_para_cnvs.setdefault(row["CNV_EMP_COD"], []).append(
+            {"cnv_cod": row["cnv_cod"], "cnv_nome": row["CNV_RSOC"]}
+        )
+
+    resultado = {}
+    for nome_original in nomes:
+        nome_norm = _normalizar_nome_empresa(nome_original)
+        tentativas = [nome_norm]
+        if " - " in nome_norm:
+            tentativas.append(nome_norm.split(" - ", 1)[1].strip())
+
+        emp_cods_batidos = set()
+        for tentativa in tentativas:
+            emp_cods_batidos |= nome_para_emp_cods.get(tentativa, set())
+
+        candidatos = []
+        vistos = set()
+        for emp_cod in emp_cods_batidos:
+            for c in emp_cod_para_cnvs.get(emp_cod, []):
+                if c["cnv_cod"] not in vistos:
+                    vistos.add(c["cnv_cod"])
+                    candidatos.append(c)
+
+        if len(candidatos) == 1:
+            resultado[nome_original] = {"status": "ok", **candidatos[0]}
+        elif len(candidatos) == 0:
+            resultado[nome_original] = {"status": "sem_match"}
+        else:
+            resultado[nome_original] = {"status": "ambiguo", "candidatos": candidatos}
+
+    return resultado
+
+
+@app.get("/api/faturamento/debug-mapear-convenio-por-nome")
+def faturamento_debug_mapear_convenio_por_nome(nome: str):
+    """Mesma lógica de /mapear-convenios-por-nome mas devolve o passo a passo
+    (EMP_COD batido, linha EMP completa, linhas cnv encontradas) — só pra
+    depurar um caso específico. Só leitura, produção."""
+    nome_norm = _normalizar_nome_empresa(nome)
+    tentativas = [nome_norm]
+    if " - " in nome_norm:
+        tentativas.append(nome_norm.split(" - ", 1)[1].strip())
+
+    emp_rows = query("""
+        SELECT EMP_COD, EMP_CGC, EMP_RAZ_SOC, EMP_RAZ_SOC_EXTENDIDA, EMP_NOME_FANTASIA
+        FROM EMP WHERE EMP_STATUS = 'A'
+    """)
+    emp_batidos = []
+    for row in emp_rows:
+        for campo in ("EMP_RAZ_SOC", "EMP_RAZ_SOC_EXTENDIDA", "EMP_NOME_FANTASIA"):
+            if _normalizar_nome_empresa(row.get(campo)) in tentativas:
+                emp_batidos.append({"emp_cod_batido_via": campo, **row})
+                break
+
+    cnvs = []
+    for eb in emp_batidos:
+        cnvs += query("""
+            SELECT RTRIM(cnv_cod) AS cnv_cod, CNV_RSOC, CNV_EMP_COD, CNV_STAT
+            FROM cnv WHERE CNV_EMP_COD = ?
+        """, (eb["EMP_COD"],))
+
+    return {"nome_normalizado": nome_norm, "tentativas": tentativas, "emp_batidos": emp_batidos, "cnv_encontrados": cnvs}
+
+
+@app.post("/api/faturamento/mapear-convenios-por-cnpj")
+def faturamento_mapear_convenios_por_cnpj(payload: dict = Body(...)):
+    """Igual /mapear-convenios-por-nome, mas casando por CNPJ (EMP_CGC) em vez
+    de nome — mais confiável, usado quando o chamador já tem o CNPJ real da
+    empresa (ex.: SOC "Cadastro de Unidades"). Só retorna match único e sem
+    ambiguidade. Só leitura, produção."""
+    cnpjs = payload.get("cnpjs") or {}
+    if not isinstance(cnpjs, dict) or not cnpjs:
+        raise HTTPException(400, "Informe 'cnpjs': {chave_do_chamador: cnpj}.")
+
+    emp_rows = query("SELECT EMP_COD, EMP_CGC FROM EMP WHERE EMP_STATUS = 'A'")
+    cnv_rows = query("""
+        SELECT RTRIM(cnv_cod) AS cnv_cod, CNV_RSOC, CNV_EMP_COD
+        FROM cnv WHERE CNV_STAT = 'A' AND CNV_EMP_COD IS NOT NULL
+    """)
+
+    cgc_para_emp_cods: dict[str, set] = {}
+    for row in emp_rows:
+        cgc_digitos = _re.sub(r"\D", "", row.get("EMP_CGC") or "")
+        if cgc_digitos:
+            cgc_para_emp_cods.setdefault(cgc_digitos, set()).add(row["EMP_COD"])
+
+    emp_cod_para_cnvs: dict[int, list] = {}
+    for row in cnv_rows:
+        emp_cod_para_cnvs.setdefault(row["CNV_EMP_COD"], []).append(
+            {"cnv_cod": row["cnv_cod"], "cnv_nome": row["CNV_RSOC"]}
+        )
+
+    resultado = {}
+    for chave, cnpj_original in cnpjs.items():
+        cnpj_digitos = _re.sub(r"\D", "", cnpj_original or "")
+        emp_cods_batidos = cgc_para_emp_cods.get(cnpj_digitos, set()) if cnpj_digitos else set()
+
+        candidatos = []
+        vistos = set()
+        for emp_cod in emp_cods_batidos:
+            for c in emp_cod_para_cnvs.get(emp_cod, []):
+                if c["cnv_cod"] not in vistos:
+                    vistos.add(c["cnv_cod"])
+                    candidatos.append(c)
+
+        if len(candidatos) == 1:
+            resultado[chave] = {"status": "ok", **candidatos[0]}
+        elif len(candidatos) == 0:
+            resultado[chave] = {"status": "sem_match"}
+        else:
+            resultado[chave] = {"status": "ambiguo", "candidatos": candidatos}
+
+    return resultado
+
+
+@app.post("/api/faturamento/cnpj-por-convenio")
+def faturamento_cnpj_por_convenio(payload: dict = Body(...)):
+    """Pra cada cnv_cod recebido, devolve o CNPJ (EMP_CGC) da empresa ligada
+    via cnv.CNV_EMP_COD -> EMP. Usado pra auditar mapeamentos já gravados
+    (confirma se o convênio batido de fato corresponde ao CNPJ real da
+    empresa). Só leitura, produção."""
+    cnv_cods = payload.get("cnv_cods") or []
+    if not isinstance(cnv_cods, list) or not cnv_cods:
+        raise HTTPException(400, "Informe 'cnv_cods': lista de códigos de convênio.")
+
+    cnv_cods_norm = [c.strip().upper() for c in cnv_cods]
+    cnv_rows = query("""
+        SELECT RTRIM(cnv_cod) AS cnv_cod, CNV_EMP_COD, CNV_RSOC
+        FROM cnv WHERE RTRIM(cnv_cod) IN ({})
+    """.format(",".join("?" * len(cnv_cods_norm))), tuple(cnv_cods_norm))
+    emp_cods = {r["CNV_EMP_COD"] for r in cnv_rows if r["CNV_EMP_COD"] is not None}
+    emp_rows = []
+    if emp_cods:
+        emp_cods_list = list(emp_cods)
+        emp_rows = query("""
+            SELECT EMP_COD, EMP_CGC, EMP_RAZ_SOC FROM EMP
+            WHERE EMP_COD IN ({})
+        """.format(",".join("?" * len(emp_cods_list))), tuple(emp_cods_list))
+    emp_por_cod = {r["EMP_COD"]: r for r in emp_rows}
+
+    resultado = {}
+    for row in cnv_rows:
+        emp = emp_por_cod.get(row["CNV_EMP_COD"])
+        resultado[row["cnv_cod"]] = {
+            "cnpj": _re.sub(r"\D", "", emp["EMP_CGC"]) if emp and emp.get("EMP_CGC") else None,
+            "emp_cod": row["CNV_EMP_COD"],
+            "emp_razao_social": emp["EMP_RAZ_SOC"] if emp else None,
+            "cnv_nome": row["CNV_RSOC"],
+        }
+    return resultado
+
+
+@app.get("/api/faturamento/indices-tabela")
+def faturamento_indices_tabela(tabelas: str = "osm,smm,agm"):
+    """Lista índices e colunas das tabelas informadas — diagnóstico de
+    performance (ex.: confirmar se osm_dthr tem índice antes de otimizar
+    queries lentas do Dashboard). Só leitura, produção."""
+    nomes = [t.strip() for t in tabelas.split(",") if t.strip()]
+    if not nomes or not all(_re.match(r"^\w+$", n) for n in nomes):
+        raise HTTPException(400, "Nomes de tabela inválidos.")
+    placeholders = ",".join(f"OBJECT_ID('{n}')" for n in nomes)
+    rows = query(f"""
+        SELECT OBJECT_NAME(i.object_id) AS tabela, i.name AS indice, i.type_desc,
+               c.name AS coluna, ic.key_ordinal, ic.is_included_column
+        FROM sys.indexes i
+        JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+        JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+        WHERE i.object_id IN ({placeholders})
+        ORDER BY tabela, indice, ic.key_ordinal
+    """)
+    return rows
+
+
+@app.get("/api/faturamento/pac-comparar-ambientes")
+def faturamento_pac_comparar_ambientes():
+    """Compara MAX(pac_reg)/COUNT(*)/último PAC_DREG entre produção e
+    smart_hml — pra saber se `pac` é um snapshot congelado (como osm/smm,
+    confirmado) ou replicada quase em tempo real entre as duas bases."""
+    resultado = {}
+    for ambiente, conn_fn in [("producao", get_conn), ("hml", get_conn_hml)]:
+        conn = conn_fn()
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(pac_reg), COUNT(*), MAX(PAC_DREG) FROM pac")
+        row = cur.fetchone()
+        conn.close()
+        resultado[ambiente] = {"max_pac_reg": row[0], "total_linhas": row[1],
+                                "ultimo_pac_dreg": row[2].isoformat() if row[2] else None}
+    return resultado
+
+
+@app.get("/api/faturamento/pac-diagnostico")
+def faturamento_pac_diagnostico(pac_reg: int, ambiente: str = "hml"):
+    """Diagnóstico: lista constraints de chave/unicidade da tabela pac, conta
+    quantas linhas existem com esse pac_reg, procura sequences/triggers/
+    tabelas de controle de numeração associadas a pac. Só leitura."""
+    conn = get_conn() if ambiente == "producao" else get_conn_hml()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT tc.CONSTRAINT_TYPE, kcu.COLUMN_NAME, tc.CONSTRAINT_NAME
+        FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+        WHERE tc.TABLE_NAME = 'pac'
+    """)
+    cols = [c[0] for c in cur.description]
+    constraints = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    cur.execute("SELECT COUNT(*) FROM pac WHERE pac_reg=?", (pac_reg,))
+    total_linhas = cur.fetchone()[0]
+
+    cur.execute("SELECT name, type_desc, is_ms_shipped FROM sys.triggers WHERE parent_id = OBJECT_ID('pac')")
+    cols2 = [c[0] for c in cur.description]
+    triggers = [dict(zip(cols2, r)) for r in cur.fetchall()]
+
+    cur.execute("SELECT name, type_desc FROM sys.sequences WHERE name LIKE '%PAC%'")
+    cols3 = [c[0] for c in cur.description]
+    sequences = [dict(zip(cols3, r)) for r in cur.fetchall()]
+
+    cur.execute("""
+        SELECT c.name, COLUMNPROPERTY(c.object_id, c.name, 'IsIdentity') AS is_identity
+        FROM sys.columns c WHERE c.object_id = OBJECT_ID('pac') AND c.name = 'PAC_REG'
+    """)
+    cols4 = [c[0] for c in cur.description]
+    identity_check = [dict(zip(cols4, r)) for r in cur.fetchall()]
+
+    cur.execute("SELECT name FROM sys.tables WHERE name LIKE '%CTR%' OR name LIKE '%CONTROLE%' OR name LIKE '%PROX%'")
+    tabelas_controle = [r[0] for r in cur.fetchall()]
+
+    conn.close()
+    return {
+        "ambiente": ambiente,
+        "constraints": constraints,
+        "pac_reg_consultado": pac_reg,
+        "total_linhas_com_esse_pac_reg": total_linhas,
+        "triggers_em_pac": triggers,
+        "sequences_relacionadas": sequences,
+        "identity_check": identity_check,
+        "tabelas_controle_candidatas": tabelas_controle,
+    }
+
+
+@app.get("/api/faturamento/buscar-paciente-hml")
+def faturamento_buscar_paciente_hml(q: str, limite: int = 15):
+    """Mesma busca de /api/atendimento/buscar-paciente, mas em smart_hml —
+    usado pela integração CensoFlow/SOC pra achar (pelo CPF) um paciente que
+    só existe em homologação (ex.: criado via /criar-paciente-teste), já que
+    a busca em produção nunca vai achar esses."""
+    termo = q.strip()
+    if len(termo) < 2:
+        return {"total": 0, "pacientes": []}
+    conn = get_conn_hml()
+    cur = conn.cursor()
+    so_digitos = _re.sub(r"\D", "", termo)
+    if so_digitos and len(so_digitos) >= 5:
+        pac_reg_val = int(so_digitos) if int(so_digitos) <= 2147483647 else -1
+        cur.execute(f"""
+            SELECT TOP {limite} pac_reg, RTRIM(pac_nome), CONVERT(varchar, PAC_NASC, 23),
+                   RTRIM(ISNULL(PAC_NUMCPF,''))
+            FROM pac
+            WHERE pac_reg = ? OR REPLACE(REPLACE(ISNULL(PAC_NUMCPF,''),'.',''),'-','') LIKE ?
+            ORDER BY pac_nome
+        """, (pac_reg_val, f"%{so_digitos}%"))
+    else:
+        cur.execute(f"""
+            SELECT TOP {limite} pac_reg, RTRIM(pac_nome), CONVERT(varchar, PAC_NASC, 23),
+                   RTRIM(ISNULL(PAC_NUMCPF,''))
+            FROM pac WHERE pac_nome LIKE ? ORDER BY pac_nome
+        """, (f"%{termo}%",))
+    rows = [{"pac_reg": r[0], "nome": r[1], "nascimento": r[2], "cpf": r[3]} for r in cur.fetchall()]
+    conn.close()
+    return {"total": len(rows), "pacientes": rows}
+
+
+@app.get("/api/faturamento/lta-schema")
+def faturamento_lta_schema(convenio: str, ambiente: str = "producao"):
+    """Lista colunas + amostra de registros reais da tabela lta (lotação) pra
+    um convênio — pra entender o padrão de código (ex. '407-8') antes de
+    preencher isso em paciente criado via API. Só leitura."""
+    conn = get_conn() if ambiente == "producao" else get_conn_hml()
+    cur = conn.cursor()
+    cur.execute("SELECT c.name FROM sys.columns c WHERE c.object_id = OBJECT_ID('lta') ORDER BY c.column_id")
+    colunas = [r[0] for r in cur.fetchall()]
+    cur.execute(f"SELECT TOP 20 * FROM lta WHERE RTRIM(LTA_COD) LIKE ?", (f"{convenio}-%",))
+    cols = [c[0] for c in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    conn.close()
+
+    def _conv(v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return v
+
+    rows = [{k: _conv(v) for k, v in row.items()} for row in rows]
+    return {"ambiente": ambiente, "colunas_tabela": colunas, "registros": rows}
+
+
+@app.get("/api/faturamento/pac-schema")
+def faturamento_pac_schema(ambiente: str = "hml"):
+    """Lista colunas da tabela pac (nome, tipo, se aceita NULL, se tem
+    default, se é identity) — investigação de schema antes de implementar
+    criação de paciente, como manda o padrão do projeto. Só leitura."""
+    if ambiente not in ("producao", "hml"):
+        raise HTTPException(400, "ambiente deve ser 'producao' ou 'hml'.")
+    conn = get_conn() if ambiente == "producao" else get_conn_hml()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.CHARACTER_MAXIMUM_LENGTH,
+               c.COLUMN_DEFAULT, COLUMNPROPERTY(OBJECT_ID('pac'), c.COLUMN_NAME, 'IsIdentity') AS is_identity
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.TABLE_NAME = 'pac'
+        ORDER BY c.ORDINAL_POSITION
+    """)
+    cols = [c[0] for c in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    conn.close()
+    return {"ambiente": ambiente, "colunas": rows, "total": len(rows)}
+
+
+@app.get("/api/faturamento/paciente-detalhe")
+def faturamento_paciente_detalhe(pac_reg: int, ambiente: str = "producao"):
+    """Devolve TODAS as colunas do cadastro (pac) de um paciente — usado pra
+    investigar onde fica gravada a lotação/setor/cargo do colaborador num
+    atendimento ocupacional, sem chutar nome de coluna. ambiente=producao|hml
+    (default produção, igual sempre foi — passe hml pra conferir paciente de
+    teste criado em smart_hml, nunca existente em produção)."""
+    if ambiente not in ("producao", "hml"):
+        raise HTTPException(400, "ambiente deve ser 'producao' ou 'hml'.")
+    conn = get_conn() if ambiente == "producao" else get_conn_hml()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM pac WHERE pac_reg=?", (pac_reg,))
+    cols = [c[0] for c in cur.description]
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, f"Paciente {pac_reg} não encontrado.")
+
+    def _conv(v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return v
+
+    return {k: _conv(v) for k, v in zip(cols, row)}
+
+
+class CorrecaoAtendItem(BaseModel):
+    os_serie: int
+    os_num: int
+    atend_correto: str
+    tiss_tipo_atende: str | None = None
+
+
+@app.post("/api/faturamento/corrigir-atend-retroativo")
+def faturamento_corrigir_atend_retroativo(itens: list[CorrecaoAtendItem], confirmar: bool = False):
+    """Correção pontual única — corrige OSM_ATEND (e OSM_TISS_TIPO_ATENDE/
+    OSM_CID_COD junto) nas OS lançadas pela integração CensoFlow/SOC com o
+    valor errado 'ASS' (fallback usado antes do TIPOFICHA do SOC ser mapeado
+    corretamente). Só atualiza linha onde OSM_ATEND ainda é 'ASS' (nunca
+    sobrescreve um valor que já não seja o fallback). confirmar=false só
+    mostra o que seria alterado. Só smart_hml."""
+    if not itens:
+        raise HTTPException(400, "Informe ao menos um item.")
+    conn = get_conn_hml()
+    cur = conn.cursor()
+    preview = []
+    for it in itens:
+        cur.execute(
+            "SELECT RTRIM(OSM_ATEND), RTRIM(ISNULL(OSM_CID_COD,'')) FROM osm WHERE osm_serie=? AND osm_num=?",
+            (it.os_serie, it.os_num),
+        )
+        row = cur.fetchone()
+        atual = row[0] if row else None
+        preview.append({
+            "os": f"{it.os_serie}-{it.os_num}",
+            "atend_atual": atual,
+            "atend_novo": it.atend_correto,
+            "sera_corrigido": atual == "ASS",
+        })
+    if not confirmar:
+        conn.close()
+        return {"confirmar": False, "total_informado": len(itens),
+                "total_que_seria_corrigido": sum(1 for p in preview if p["sera_corrigido"]),
+                "preview": preview}
+
+    corrigidas = 0
+    for it in itens:
+        cur.execute(
+            "UPDATE osm SET OSM_ATEND=?, OSM_TISS_TIPO_ATENDE=COALESCE(?, OSM_TISS_TIPO_ATENDE), OSM_CID_COD='Z000' "
+            "WHERE osm_serie=? AND osm_num=? AND RTRIM(OSM_ATEND)='ASS'",
+            (it.atend_correto, it.tiss_tipo_atende, it.os_serie, it.os_num),
+        )
+        corrigidas += cur.rowcount
+    conn.commit()
+    conn.close()
+    return {"confirmar": True, "total_corrigido": corrigidas}
+
+
+@app.get("/api/faturamento/contar-cancelado-hml")
+def faturamento_contar_cancelado_hml(serie: int = 126):
+    """Conta quantas linhas smm ainda têm EXEC=C,SFAT=C (cancelado) numa série
+    inteira de smart_hml — pra achar órfãos que escaparam da correção
+    retroativa pontual. Só leitura, só smart_hml."""
+    conn = get_conn_hml()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT SMM_OSM, COUNT(*) FROM smm WHERE SMM_OSM_SERIE=? AND RTRIM(SMM_EXEC)='C' AND RTRIM(SMM_SFAT)='C' GROUP BY SMM_OSM ORDER BY SMM_OSM",
+        (serie,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return {"serie": serie, "os_ainda_canceladas": [{"num": r[0], "itens": r[1]} for r in rows]}
+
+
+@app.post("/api/faturamento/corrigir-cancelado-retroativo")
+def faturamento_corrigir_cancelado_retroativo(serie: int, nums: str, confirmar: bool = False):
+    """Correção pontual única — desfaz o cancelamento acidental (SMM_EXEC/
+    SMM_SFAT='C'/'C', na verdade CANCELADO) causado por um bug anterior desta
+    prova de conceito, trocando pra 'A'/'A' (aberto, estado honesto real).
+    Só toca linhas onde SMM_EXEC='C' E SMM_SFAT='C' E o serie+num está na
+    lista informada (nunca lotes inteiros por engano). confirmar=false só
+    conta. Só smart_hml."""
+    lista_nums = [int(n.strip()) for n in nums.split(",") if n.strip()]
+    if not lista_nums:
+        raise HTTPException(400, "Informe ao menos um número de OS.")
+    conn = get_conn_hml()
+    cur = conn.cursor()
+    placeholders = ",".join("?" for _ in lista_nums)
+    where = f"SMM_OSM_SERIE=? AND SMM_OSM IN ({placeholders}) AND RTRIM(SMM_EXEC)='C' AND RTRIM(SMM_SFAT)='C'"
+    cur.execute(f"SELECT COUNT(*) FROM smm WHERE {where}", (serie, *lista_nums))
+    total = cur.fetchone()[0]
+    if not confirmar:
+        conn.close()
+        return {"confirmar": False, "total_que_seria_corrigido": total, "total_informado": len(lista_nums)}
+    cur.execute(f"UPDATE smm SET SMM_EXEC='A', SMM_SFAT='A' WHERE {where}", (serie, *lista_nums))
+    afetadas = cur.rowcount
+    conn.commit()
+    conn.close()
+    return {"confirmar": True, "total_corrigido": afetadas}
+
+
+@app.post("/api/faturamento/corrigir-cid-retroativo")
+def faturamento_corrigir_cid_retroativo(serie: int, nums: str, confirmar: bool = False):
+    """Correção pontual única — preenche OSM_CID_COD='Z000' nas OS ocupacionais
+    lançadas pela integração CensoFlow/SOC ANTES desse campo existir no código
+    (confirmar=false faz só a contagem, pra validar antes de gravar — nunca
+    direto pro UPDATE). Filtra pela PK real (osm_serie+osm_num, lista explícita)
+    + só ocupacional + só onde CID ainda está vazio, nunca sobrescreve um CID
+    já preenchido. Só smart_hml."""
+    lista_nums = [int(n.strip()) for n in nums.split(",") if n.strip()]
+    if not lista_nums:
+        raise HTTPException(400, "Informe ao menos um número de OS.")
+    conn = get_conn_hml()
+    cur = conn.cursor()
+    placeholders = ",".join("?" for _ in lista_nums)
+    where = f"""
+        osm_serie=? AND osm_num IN ({placeholders})
+        AND (OSM_CID_COD IS NULL OR RTRIM(OSM_CID_COD)='')
+        AND RTRIM(OSM_ATEND) IN ('ADM','PER','DEM','RTB','MDF','MOC')
+    """
+    cur.execute(f"SELECT COUNT(*) FROM osm WHERE {where}", (serie, *lista_nums))
+    total = cur.fetchone()[0]
+    if not confirmar:
+        conn.close()
+        return {"confirmar": False, "total_que_seria_corrigido": total, "total_informado": len(lista_nums)}
+    cur.execute(f"UPDATE osm SET OSM_CID_COD='Z000' WHERE {where}", (serie, *lista_nums))
+    afetadas = cur.rowcount
+    conn.commit()
+    conn.close()
+    return {"confirmar": True, "total_corrigido": afetadas}
+
+
+@app.get("/api/faturamento/verificar-os-existem")
+def faturamento_verificar_os_existem(serie: int, nums: str, ambiente: str = "hml"):
+    """Confere, em lote, quais OS (osm_serie+osm_num) realmente existem no banco —
+    usado pra validar que um status "lancado" registrado no CensoFlow corresponde
+    de verdade a uma linha gravada em smart_hml, não só a um registro local. Só
+    leitura. `nums` = lista separada por vírgula."""
+    if ambiente not in ("producao", "hml"):
+        raise HTTPException(400, "ambiente deve ser 'producao' ou 'hml'.")
+    lista_nums = [int(n.strip()) for n in nums.split(",") if n.strip()]
+    if not lista_nums:
+        return {"existem": [], "faltando": lista_nums}
+    conn = get_conn() if ambiente == "producao" else get_conn_hml()
+    cur = conn.cursor()
+    placeholders = ",".join("?" for _ in lista_nums)
+    cur.execute(f"SELECT osm_num FROM osm WHERE osm_serie=? AND osm_num IN ({placeholders})", (serie, *lista_nums))
+    existentes = {r[0] for r in cur.fetchall()}
+    conn.close()
+    faltando = [n for n in lista_nums if n not in existentes]
+    return {"ambiente": ambiente, "total_checado": len(lista_nums), "existem": sorted(existentes), "faltando": faltando}
+
+
+@app.get("/api/faturamento/os-detalhe")
+def faturamento_os_detalhe(serie: int, num: int, ambiente: str = "producao"):
+    """Devolve TODAS as colunas (osm + smm) de uma OS específica — usado pra
+    comparar uma OS lançada pelo desktop (padrão real de preenchimento) com uma
+    lançada pela integração CensoFlow/SOC e achar quais campos a prova de
+    conceito ainda deixa em branco. ambiente=producao|hml. Só leitura."""
+    if ambiente not in ("producao", "hml"):
+        raise HTTPException(400, "ambiente deve ser 'producao' ou 'hml'.")
+    conn = get_conn() if ambiente == "producao" else get_conn_hml()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM osm WHERE osm_serie=? AND osm_num=?", (serie, num))
+    cols = [c[0] for c in cur.description]
+    osm_row = cur.fetchone()
+    osm = dict(zip(cols, osm_row)) if osm_row else None
+    cur.execute("SELECT * FROM smm WHERE SMM_OSM_SERIE=? AND SMM_OSM=?", (serie, num))
+    cols = [c[0] for c in cur.description]
+    smm = [dict(zip(cols, r)) for r in cur.fetchall()]
+    conn.close()
+    if not osm:
+        raise HTTPException(404, f"OS {serie}-{num} não encontrada em {ambiente}.")
+
+    def _conv(v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return v
+
+    osm = {k: _conv(v) for k, v in osm.items()}
+    smm = [{k: _conv(v) for k, v in row.items()} for row in smm]
+    return {"ambiente": ambiente, "osm": osm, "smm": smm}
+
+
+@app.get("/api/faturamento/procedimentos-mais-usados")
+def faturamento_procedimentos_mais_usados(convenio: str, limite: int = 30, dias: int = 365):
+    """Procedimentos mais lançados (por volume real de OS) num convênio — pra achar
+    o código/setor certo sem precisar adivinhar termo de busca por nome. Mostra
+    também o setor de execução mais comum de cada procedimento nesse convênio
+    especificamente (pode variar por convênio/empresa). Lê produção (só leitura)."""
+    # Uma query so (janela ROW_NUMBER pro setor mais comum por codigo) em vez de
+    # N+1 — a primeira versao fazia 1 SELECT por item encontrado (~30 roundtrips,
+    # ~12s); essa faz 1 roundtrip so.
+    convenio = convenio.strip().upper()
+    rows = query(f"""
+        ;WITH setor_rank AS (
+            SELECT smm.SMM_COD AS cod, smm.SMM_STR AS setor,
+                   ROW_NUMBER() OVER (PARTITION BY smm.SMM_COD ORDER BY COUNT(*) DESC) AS rn
+            FROM smm
+            JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+            WHERE RTRIM(osm.osm_cnv) = ? AND osm.osm_dthr >= DATEADD(day, -?, GETDATE())
+            GROUP BY smm.SMM_COD, smm.SMM_STR
+        )
+        SELECT TOP {limite}
+            RTRIM(smm.SMM_TPCOD) AS tipo, RTRIM(smm.SMM_COD) AS codigo,
+            RTRIM(ISNULL(sk.SMK_NOME, '')) AS nome,
+            COUNT(*) AS total_lancamentos,
+            MAX(RTRIM(sr.setor)) AS setor_execucao_usual
+        FROM smm
+        JOIN osm ON osm.osm_serie = smm.SMM_OSM_SERIE AND osm.osm_num = smm.SMM_OSM
+        LEFT JOIN smk sk ON RTRIM(sk.SMK_COD) = RTRIM(smm.SMM_COD)
+        LEFT JOIN setor_rank sr ON sr.cod = smm.SMM_COD AND sr.rn = 1
+        WHERE RTRIM(osm.osm_cnv) = ? AND osm.osm_dthr >= DATEADD(day, -?, GETDATE())
+        GROUP BY smm.SMM_TPCOD, smm.SMM_COD, sk.SMK_NOME
+        ORDER BY COUNT(*) DESC
+    """, (convenio, dias, convenio, dias))
+
+    return {"resultados": rows}
+
+
 @app.get("/api/faturamento/buscar-item-os")
 def faturamento_buscar_item_os(q: str, convenio: str = None, limite: int = 15):
     """Busca no catálogo SMK (sem exigir TUSS, ao contrário de /buscar-procedimento
@@ -12594,6 +14724,11 @@ def faturamento_buscar_item_os(q: str, convenio: str = None, limite: int = 15):
         if cnv_row and cnv_row[0]["tabela"]:
             tabela = cnv_row[0]["tabela"]
 
+    # Busca por código é prioridade: match exato do código vem primeiro, depois
+    # código que começa com o termo, depois TUSS, e só então nome. Assim digitar
+    # o código traz o item certo no topo (antes ordenava só por tamanho do nome,
+    # o que afundava o código exato no meio de parciais por nome).
+    termo_up = termo.upper()
     rows = query(f"""
         SELECT TOP {limite}
             RTRIM(SMK_TIPO)                  AS tipo,
@@ -12601,9 +14736,19 @@ def faturamento_buscar_item_os(q: str, convenio: str = None, limite: int = 15):
             RTRIM(ISNULL(SMK_NOME,''))        AS nome,
             RTRIM(ISNULL(SMK_COD_TUSS,''))    AS tuss
         FROM smk
-        WHERE SMK_STATUS = 'A' AND (SMK_NOME LIKE ? OR RTRIM(SMK_COD) LIKE ?)
-        ORDER BY LEN(SMK_NOME)
-    """, (f"%{termo}%", f"{termo}%"))
+        WHERE SMK_STATUS = 'A'
+          AND (SMK_NOME LIKE ? OR RTRIM(SMK_COD) LIKE ? OR RTRIM(ISNULL(SMK_COD_TUSS,'')) LIKE ?)
+        ORDER BY
+            CASE
+                WHEN RTRIM(SMK_COD) = ?                       THEN 0
+                WHEN RTRIM(SMK_COD) LIKE ?                    THEN 1
+                WHEN RTRIM(ISNULL(SMK_COD_TUSS,'')) = ?       THEN 2
+                WHEN RTRIM(ISNULL(SMK_COD_TUSS,'')) LIKE ?    THEN 3
+                ELSE 4
+            END,
+            LEN(SMK_NOME)
+    """, (f"%{termo}%", f"{termo_up}%", f"{termo_up}%",
+          termo_up, f"{termo_up}%", termo_up, f"{termo_up}%"))
 
     for r in rows:
         preco = None
@@ -12617,6 +14762,116 @@ def faturamento_buscar_item_os(q: str, convenio: str = None, limite: int = 15):
         r["preco"] = preco
 
     return {"total": len(rows), "resultados": rows, "tabela_preco": tabela}
+
+
+class CadastrarPacienteTesteRequest(BaseModel):
+    nome: str
+    nascimento: str | None = None   # "YYYY-MM-DD"
+    sexo: str | None = None          # "M" / "F"
+    cpf: str | None = None
+    telefone: str | None = None
+    convenio: str | None = None      # PAC_CNV (FK cnv) — default PAR (Particular Diag)
+    login: str | None = None
+
+
+@app.post("/api/faturamento/cadastrar-paciente-teste")
+def faturamento_cadastrar_paciente_teste(req: CadastrarPacienteTesteRequest):
+    """Cadastra um paciente novo direto da tela de Lançar OS — grava SOMENTE em
+    smart_hml (homologação), mesma base da OS de teste, pra que a OS lançada em
+    seguida possa referenciar o paciente (osm_pac → pac é FK na mesma base).
+    Colunas mínimas obrigatórias do schema real: PAC_REG (PK, não-identity),
+    PAC_DREG, PAC_NOME, PAC_CNV (FK cnv)."""
+    nome = (req.nome or "").strip()
+    if len(nome) < 3:
+        raise HTTPException(400, "Informe o nome completo do paciente.")
+
+    sexo = (req.sexo or "").strip().upper()
+    if sexo and sexo not in ("M", "F"):
+        raise HTTPException(400, "Sexo inválido — use M ou F.")
+
+    nascimento = None
+    if req.nascimento:
+        try:
+            nascimento = datetime.strptime(req.nascimento.strip(), "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "Data de nascimento inválida — use AAAA-MM-DD.")
+
+    cpf = _re.sub(r"\D", "", req.cpf or "") or None
+    if cpf and len(cpf) != 11:
+        raise HTTPException(400, "CPF inválido — deve ter 11 dígitos.")
+    telefone = (req.telefone or "").strip() or None
+
+    conn = get_conn_hml()
+    cur = conn.cursor()
+    try:
+        convenio = (req.convenio or "PAR").strip().upper()
+        cur.execute("SELECT 1 FROM cnv WHERE RTRIM(cnv_cod)=?", (convenio,))
+        if cur.fetchone() is None:
+            # Fallback pro Particular Diag se o convênio informado não existe em hml.
+            cur.execute("SELECT 1 FROM cnv WHERE RTRIM(cnv_cod)='PAR'")
+            if cur.fetchone() is None:
+                conn.close()
+                raise HTTPException(400, f"Convênio '{convenio}' não existe em smart_hml e não há 'PAR' pra usar como padrão.")
+            convenio = "PAR"
+
+        if cpf:
+            cur.execute("SELECT PAC_REG FROM pac WHERE REPLACE(REPLACE(ISNULL(PAC_NUMCPF,''),'.',''),'-','')=?", (cpf,))
+            ja = cur.fetchone()
+            if ja:
+                conn.close()
+                raise HTTPException(409, f"Já existe paciente com esse CPF em smart_hml (registro {ja[0]}).")
+
+        agora = datetime.now()
+        login = (req.login or "").strip()[:10] or None
+        novo_reg = None
+        for _tentativa in range(5):
+            cur.execute("SELECT ISNULL(MAX(PAC_REG),0)+1 FROM pac")
+            candidato = cur.fetchone()[0]
+            try:
+                cur.execute("""
+                    INSERT INTO pac (PAC_REG, PAC_DREG, PAC_NOME, PAC_CNV, PAC_SEXO,
+                                     PAC_NASC, PAC_NUMCPF, PAC_CELULAR, PAC_USR_LOGIN_CAD)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                """, (candidato, agora, nome[:100], convenio, sexo or None,
+                      nascimento, cpf, telefone, login))
+                novo_reg = candidato
+                break
+            except pyodbc.IntegrityError as e:
+                conn.rollback()
+                # Só re-tenta em colisão de PK (outra inserção pegou o mesmo
+                # MAX+1 nesse instante) — qualquer outra violação não se resolve
+                # tentando de novo.
+                if "PRIMARY KEY" in str(e) or "duplicate key" in str(e).lower():
+                    continue
+                conn.close()
+                raise HTTPException(400, f"Erro ao cadastrar paciente em smart_hml: {e}")
+        if novo_reg is None:
+            conn.close()
+            raise HTTPException(409, "Não foi possível obter um nº de registro livre após 5 tentativas.")
+
+        conn.commit()
+    except pyodbc.Error as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        conn.close()
+        raise HTTPException(400, f"Erro ao cadastrar paciente: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # Mesmo shape de /api/atendimento/buscar-paciente pra o frontend selecionar direto.
+    return {
+        "pac_reg": novo_reg,
+        "nome": nome,
+        "nascimento": nascimento.strftime("%Y-%m-%d") if nascimento else None,
+        "cpf": cpf or "",
+        "convenio": convenio,
+        "ambiente": "smart_hml",
+    }
 
 
 @app.get("/api/debug/scheduler-status")
@@ -13488,6 +15743,261 @@ def faturamento_deletar_guia(guia_id: int):
     return {"ok": True}
 
 # ══════════════════════════════════════════════════════════════════════════════
+# OCUPACIONAL — Gestão de Envio de Prontuários
+# Mesmo padrão do Faturamento/Guias (SQLite próprio, workflow que não existe
+# no Smart). SLA de 24h a partir de dthr_pendencia — "atrasado" calculado em
+# Python (não SQLite puro) pra evitar depender de timezone do SQLite.
+# ══════════════════════════════════════════════════════════════════════════════
+STATUS_PRONTUARIOS_VALIDOS = {"Pendente", "Enviado", "Cancelado"}
+MOTIVOS_PRONTUARIO_VALIDOS = {"Enfermagem", "Cliente", "Inconsistência no ASO"}
+SLA_PRONTUARIO_HORAS = 24
+
+class ProntuarioCreate(BaseModel):
+    paciente: str
+    pac_reg: int | None = None
+    empresa: str | None = None
+    observacao: str | None = None
+    criado_por: str | None = None
+    data_atendimento: str | None = None
+
+class ProntuarioUpdate(BaseModel):
+    status: str | None = None
+    motivo: str | None = None
+    observacao: str | None = None
+    atualizado_por: str | None = None
+
+def _prontuario_com_prazo(row: dict) -> dict:
+    d = dict(row)
+    try:
+        pend = datetime.strptime(d["dthr_pendencia"], "%Y-%m-%d %H:%M:%S")
+        horas_decorridas = (datetime.now() - pend).total_seconds() / 3600
+    except (ValueError, TypeError):
+        horas_decorridas = 0
+    d["horas_decorridas"] = round(horas_decorridas, 2)
+    d["horas_restantes"] = round(SLA_PRONTUARIO_HORAS - horas_decorridas, 2)
+    d["atrasado"] = d["status"] == "Pendente" and horas_decorridas > SLA_PRONTUARIO_HORAS
+    return d
+
+@app.get("/api/ocupacional/prontuarios")
+def ocupacional_listar_prontuarios(status: str = None, q: str = None, data: str = None, motivo: str = None):
+    conn = get_conn_prontuarios()
+    sql = "SELECT * FROM prontuarios_pendentes WHERE 1=1"
+    params = []
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    if q:
+        sql += " AND (paciente LIKE ? OR empresa LIKE ?)"
+        params += [f"%{q}%", f"%{q}%"]
+    if data:
+        sql += " AND data_atendimento = ?"
+        params.append(data)
+    if motivo:
+        sql += " AND motivo = ?"
+        params.append(motivo)
+    sql += " ORDER BY dthr_pendencia DESC"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    itens = [_prontuario_com_prazo(dict(r)) for r in rows]
+    return {"total": len(itens), "prontuarios": itens}
+
+@app.get("/api/ocupacional/prontuarios/resumo")
+def ocupacional_prontuarios_resumo():
+    conn = get_conn_prontuarios()
+    rows = conn.execute("SELECT * FROM prontuarios_pendentes").fetchall()
+    conn.close()
+    itens = [_prontuario_com_prazo(dict(r)) for r in rows]
+    por_status = {s: 0 for s in STATUS_PRONTUARIOS_VALIDOS}
+    atrasados = 0
+    for it in itens:
+        por_status[it["status"]] = por_status.get(it["status"], 0) + 1
+        if it["atrasado"]:
+            atrasados += 1
+    return {"por_status": por_status, "atrasados": atrasados}
+
+@app.post("/api/ocupacional/prontuarios")
+def ocupacional_criar_prontuario(p: ProntuarioCreate):
+    conn = get_conn_prontuarios()
+    data_atend = p.data_atendimento or datetime.now().strftime("%Y-%m-%d")
+    if p.pac_reg:
+        existente = conn.execute(
+            "SELECT id FROM prontuarios_pendentes WHERE pac_reg = ? AND data_atendimento = ?",
+            (p.pac_reg, data_atend),
+        ).fetchone()
+        if existente:
+            conn.close()
+            raise HTTPException(400, f"Já existe uma pendência de {p.paciente} nessa data.")
+    cur = conn.execute("""
+        INSERT INTO prontuarios_pendentes (paciente, pac_reg, empresa, observacao, criado_por, data_atendimento)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (p.paciente, p.pac_reg, p.empresa, p.observacao, p.criado_por, data_atend))
+    conn.commit()
+    novo_id = cur.lastrowid
+    row = conn.execute("SELECT * FROM prontuarios_pendentes WHERE id = ?", (novo_id,)).fetchone()
+    conn.close()
+    return _prontuario_com_prazo(dict(row))
+
+
+@app.post("/api/ocupacional/prontuarios/sincronizar")
+def ocupacional_sincronizar_prontuarios(data: str = None, login: str = None):
+    """
+    Puxa da produção (Smart) todo PACIENTE (não por OS — um paciente pode ter
+    várias OS ocupacionais no mesmo dia, mas só uma pendência) com atendimento
+    ocupacional (ADM/PER/DEM/RTB/MDF/MOC) na data informada (padrão hoje) e
+    cria uma pendência 'Pendente' pra quem ainda não tem uma nesse dia — o
+    índice único (pac_reg, data_atendimento) em prontuarios.db garante que
+    rodar de novo não duplica.
+
+    O prazo de 24h começa a contar do ÚLTIMO REGISTRO do prontuário do
+    paciente naquele dia (RCL_DTHR mais recente), não do momento em que a
+    sincronização roda — pedido em 22/09/2026: só dá pra enviar depois que
+    todo exame/consulta do dia foi lançado, então o relógio deve começar daí,
+    não de quando alguém clicou em sincronizar (que pode ser bem depois).
+    Se por algum motivo não há RCL ainda pro paciente nesse dia (exame aberto
+    mas nada lançado), cai no horário da OS mais recente como aproximação.
+    """
+    data_ref = data or datetime.now().strftime("%Y-%m-%d")
+
+    atendimentos = query("""
+        SELECT osm.osm_pac AS pac_reg,
+               MAX(RTRIM(pac.pac_nome)) AS paciente,
+               MAX(RTRIM(ISNULL(cnv.cnv_nome, osm.osm_cnv))) AS empresa,
+               MAX(osm.osm_dthr) AS ultima_os,
+               (SELECT MAX(RCL_DTHR) FROM RCL
+                WHERE RCL_PAC = osm.osm_pac AND CAST(RCL_DTHR AS DATE) = ?) AS ultimo_registro
+        FROM osm
+        JOIN pac ON pac.pac_reg = osm.osm_pac
+        LEFT JOIN cnv ON RTRIM(cnv.cnv_cod) = RTRIM(osm.osm_cnv)
+        WHERE CAST(osm.osm_dthr AS DATE) = ?
+          AND osm.osm_atend IN ('ADM','PER','DEM','RTB','MDF','MOC')
+        GROUP BY osm.osm_pac
+    """, (data_ref, data_ref))
+
+    conn = get_conn_prontuarios()
+    criados = 0
+    for a in atendimentos:
+        existente = conn.execute(
+            "SELECT id FROM prontuarios_pendentes WHERE pac_reg = ? AND data_atendimento = ?",
+            (a["pac_reg"], data_ref),
+        ).fetchone()
+        if existente:
+            continue
+        inicio_prazo = a["ultimo_registro"] or a["ultima_os"]
+        dthr_pendencia = inicio_prazo.strftime("%Y-%m-%d %H:%M:%S") if inicio_prazo else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("""
+            INSERT INTO prontuarios_pendentes
+                (paciente, pac_reg, empresa, data_atendimento, dthr_pendencia, criado_por)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (a["paciente"], a["pac_reg"], a["empresa"], data_ref, dthr_pendencia, login or "sincronização"))
+        criados += 1
+    conn.commit()
+    conn.close()
+    return {"ok": True, "encontrados": len(atendimentos), "novos": criados}
+
+@app.put("/api/ocupacional/prontuarios/{prontuario_id}")
+def ocupacional_atualizar_prontuario(prontuario_id: int, p: ProntuarioUpdate):
+    conn = get_conn_prontuarios()
+    existente = conn.execute("SELECT * FROM prontuarios_pendentes WHERE id = ?", (prontuario_id,)).fetchone()
+    if not existente:
+        conn.close()
+        raise HTTPException(404, "Registro não encontrado")
+
+    campos = p.model_dump(exclude_unset=True)
+    if "status" in campos and campos["status"] not in STATUS_PRONTUARIOS_VALIDOS:
+        conn.close()
+        raise HTTPException(400, f"Status inválido: {campos['status']}")
+    if campos.get("motivo") and campos["motivo"] not in MOTIVOS_PRONTUARIO_VALIDOS:
+        conn.close()
+        raise HTTPException(400, f"Motivo inválido: {campos['motivo']}")
+
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if campos.get("status") == "Enviado" and not existente["dthr_envio"]:
+        campos["dthr_envio"] = agora
+
+    if not campos:
+        conn.close()
+        return _prontuario_com_prazo(dict(existente))
+
+    campos["atualizado_em"] = agora
+    sets = ", ".join(f"{k} = ?" for k in campos)
+    params = list(campos.values()) + [prontuario_id]
+    conn.execute(f"UPDATE prontuarios_pendentes SET {sets} WHERE id = ?", params)
+    conn.commit()
+    row = conn.execute("SELECT * FROM prontuarios_pendentes WHERE id = ?", (prontuario_id,)).fetchone()
+    conn.close()
+    return _prontuario_com_prazo(dict(row))
+
+@app.delete("/api/ocupacional/prontuarios/{prontuario_id}")
+def ocupacional_deletar_prontuario(prontuario_id: int):
+    conn = get_conn_prontuarios()
+    cur = conn.execute("DELETE FROM prontuarios_pendentes WHERE id = ?", (prontuario_id,))
+    conn.commit()
+    afetado = cur.rowcount
+    conn.close()
+    if not afetado:
+        raise HTTPException(404, "Registro não encontrado")
+    return {"ok": True}
+
+
+class EmpresaContatoUpsert(BaseModel):
+    empresa: str
+    email: str | None = None
+    pasta_nextcloud: str | None = None
+
+
+@app.get("/api/ocupacional/empresas-contato")
+def ocupacional_listar_empresas_contato():
+    conn = get_conn_prontuarios()
+    rows = conn.execute("SELECT * FROM empresa_contatos ORDER BY empresa").fetchall()
+    conn.close()
+    return {"total": len(rows), "empresas": [dict(r) for r in rows]}
+
+
+@app.get("/api/ocupacional/empresas-pendentes")
+def ocupacional_empresas_pendentes():
+    """Empresas distintas que já apareceram em alguma pendência — base pra
+    tela de configuração de e-mail/pasta (não precisa digitar do zero)."""
+    conn = get_conn_prontuarios()
+    rows = conn.execute("""
+        SELECT DISTINCT empresa FROM prontuarios_pendentes
+        WHERE empresa IS NOT NULL AND TRIM(empresa) <> ''
+        ORDER BY empresa
+    """).fetchall()
+    conn.close()
+    return {"empresas": [r["empresa"] for r in rows]}
+
+
+@app.get("/api/ocupacional/nextcloud-pastas")
+def ocupacional_nextcloud_pastas():
+    from nextcloud_sender import listar_pastas
+    return listar_pastas()
+
+
+@app.post("/api/ocupacional/empresas-contato")
+def ocupacional_salvar_empresa_contato(e: EmpresaContatoUpsert):
+    conn = get_conn_prontuarios()
+    conn.execute("""
+        INSERT INTO empresa_contatos (empresa, email, pasta_nextcloud, atualizado_em) VALUES (?, ?, ?, ?)
+        ON CONFLICT(empresa) DO UPDATE SET email = excluded.email, pasta_nextcloud = excluded.pasta_nextcloud,
+            atualizado_em = excluded.atualizado_em
+    """, (e.empresa.strip(), (e.email or "").strip() or None, (e.pasta_nextcloud or "").strip() or None,
+          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    row = conn.execute("SELECT * FROM empresa_contatos WHERE empresa = ?", (e.empresa.strip(),)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+@app.delete("/api/ocupacional/empresas-contato")
+def ocupacional_deletar_empresa_contato(empresa: str):
+    conn = get_conn_prontuarios()
+    conn.execute("DELETE FROM empresa_contatos WHERE empresa = ?", (empresa,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MÓDULO GESTÃO — Organograma
 # Banco próprio (organograma.db, SQLite) — estrutura organizacional não existe
 # no Smart/Pixeon, é dado interno de gestão do Dashboard.
@@ -13901,7 +16411,77 @@ RECEPCOES = {
     "ROC": "Recepção Ocupacional",
     "RCN": "Recepção Consultórios",
     "RCI": "Recepção Censo Imagem",
+    "57": "Recepção CMI",
 }
+
+def _filtro_fle_str_setor(setor: str, alias: str = "fle") -> str:
+    """
+    Filtra fle.FLE_STR_COD pelo setor escolhido no módulo Recepção.
+    Remapeia ROC (Ocupacional) → RPS (Recepção Pró Saúde): a senha de chegada
+    do Ocupacional é gravada com FLE_STR_COD='RPS', não 'ROC' — 'ROC' é só o
+    setor da OS/faturamento. Sem esse de-para, filtrar por "Ocupacional" não
+    casava com quase nenhuma senha. Mesmo de-para já usado no Painel TV
+    (_filtro_osm_str_painel/painel_resumo_hoje).
+    """
+    if not setor:
+        return ""
+    cod = "RPS" if setor == "ROC" else setor
+    return f"AND RTRIM({alias}.FLE_STR_COD) = '{cod}'"
+
+# Quando o setor_cod agrupado vier de fle.FLE_STR_COD, usar junto com
+# _filtro_fle_str_setor pra desfazer o de-para na exibição (RPS -> ROC).
+_SETOR_COD_FLE_DISPLAY = "CASE WHEN RTRIM(fle.FLE_STR_COD) = 'RPS' THEN 'ROC' ELSE RTRIM(fle.FLE_STR_COD) END"
+
+# Resolve quem de fato atendeu a senha, pra atribuir ao recepcionista certo.
+# Normalmente é FLE_USR_LOGIN; quando a senha foi emitida pelo totem
+# (FLE_USR_LOGIN='TOTEM' — caso de 100% das senhas do Ocupacional/RPS), usa
+# quem criou a OS do paciente NO MESMO SETOR da senha (OSM_USR_LOGIN_CAD)
+# em vez de FLE_USR_ATENDIMENTO puro. O filtro por setor na OS (RTRIM(osmc.osm_str)
+# = <setor da senha>) é essencial: sem ele, um paciente que passa por dois
+# setores no mesmo dia (ex.: Ocupacional de manhã, Diagnóstico à tarde) podia
+# ter a OS do setor ERRADO casada por ser "a próxima OS depois da chegada" —
+# aí uma recepcionista que nunca trabalhou no Ocupacional aparecia no ranking
+# dele, só porque criou uma OS de outro setor logo depois (bug real confirmado:
+# JSDIAS, que só atende em outro setor, aparecia creditada no Ocupacional).
+# Exige login existente em `usr` (pra nome e sanity check), mas não filtra por
+# USR_GRP — gente de outros grupos (ADM etc.) pode legitimamente cobrir
+# recepção às vezes, o que importa é se ela de fato chamou a senha/criou a OS
+# NAQUELE setor.
+# Exige também que exista mesmo uma OS do paciente NAQUELE setor NAQUELE dia
+# (EXISTS, sem exigir ordem cronológica com a chegada — testado com dado real:
+# ~90% das OS de recepção são abertas ANTES do horário da própria senha, não
+# depois, então exigir "OS depois da chegada" aqui descartaria a maioria dos
+# atendimentos reais). Sem esse EXISTS, FLE_USR_LOGIN sozinho não é confiável:
+# ele registra quem CRIOU a senha, não necessariamente quem atendeu, e às
+# vezes é gente de outro setor que mexeu na senha sem gerar atendimento de
+# verdade (bug real confirmado: ACLIMA, radiologista, tinha 2 senhas 'ROC' no
+# nome dela sem NENHUMA OS do Ocupacional pro mesmo paciente/dia — provavelmente
+# ação administrativa, não recepção de paciente de verdade).
+_LOGIN_RECEP_OSCAD_APPLY = f"""
+            OUTER APPLY (
+                SELECT TOP 1 osmc.OSM_USR_LOGIN_CAD AS login
+                FROM osm osmc
+                WHERE osmc.osm_pac = fle.FLE_PAC_REG
+                  AND CAST(osmc.osm_dthr AS DATE) = CAST(fle.FLE_DTHR_CHEGADA AS DATE)
+                  AND osmc.osm_dthr >= fle.FLE_DTHR_CHEGADA
+                  AND RTRIM(osmc.osm_str) = {_SETOR_COD_FLE_DISPLAY}
+                ORDER BY osmc.osm_dthr ASC
+            ) oscad"""
+_EXISTE_OS_MESMO_SETOR_DIA = f"""EXISTS (
+                SELECT 1 FROM osm osme
+                WHERE osme.osm_pac = fle.FLE_PAC_REG
+                  AND CAST(osme.osm_dthr AS DATE) = CAST(fle.FLE_DTHR_CHEGADA AS DATE)
+                  AND RTRIM(osme.osm_str) = {_SETOR_COD_FLE_DISPLAY}
+            )"""
+_LOGIN_RECEP_EXPR = "ISNULL(NULLIF(RTRIM(fle.FLE_USR_LOGIN), 'TOTEM'), RTRIM(oscad.login))"
+# USR_GRP: REC (recepção) e ADM (administrativo — confirmado que às vezes cobre
+# recepção de verdade, ex.: JSDIAS) entram. Outros grupos (LAB, RAD, MED, FIN,
+# PCM etc.) são claramente outra função — aparecem como login da senha só
+# porque tocam no atendimento/OS do paciente por outro motivo (coleta de
+# sangue, laudo de imagem, etc.), não porque trabalham na recepção. Confirmado
+# com dado real: BGLIMA (grupo LAB, faz coleta) aparecia como "recepcionista"
+# em RCI/ROC/RDI/RCN/57 — todos os setores, porque coleta passa por todos.
+_JOIN_USR_REC = f"JOIN usr urec ON RTRIM(urec.USR_LOGIN) = {_LOGIN_RECEP_EXPR} AND RTRIM(urec.USR_GRP) IN ('REC','ADM') AND {_EXISTE_OS_MESMO_SETOR_DIA}"
 
 @app.get("/api/recepcao/media-por-horario")
 def recepcao_media_por_horario(periodo: str = "30d", setor: str = ""):
@@ -13913,7 +16493,7 @@ def recepcao_media_por_horario(periodo: str = "30d", setor: str = ""):
     de propósito aqui — o gráfico sempre mostra todas as recepções lado a lado.
     """
     inicio, fim = periodo_datas(periodo)
-    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI"]
+    RECEPCOES_COD = ["RDI", "ROC", "RCN", "RCI", "57"]
 
     dias_row = query(f"""
         SELECT COUNT(DISTINCT CAST(fle.FLE_DTHR_CHEGADA AS DATE)) AS dias
@@ -13931,7 +16511,7 @@ def recepcao_media_por_horario(periodo: str = "30d", setor: str = ""):
         FROM fle
         WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
           AND fle.FLE_PAC_REG > 0
-          AND RTRIM(fle.FLE_STR_COD) IN ('RDI','ROC','RCN','RCI')
+          AND RTRIM(fle.FLE_STR_COD) IN ('RDI','ROC','RCN','RCI','57')
         GROUP BY DATEPART(hour, fle.FLE_DTHR_CHEGADA), RTRIM(fle.FLE_STR_COD)
         ORDER BY hora
     """)
@@ -13967,7 +16547,7 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
       atual já vem de /api/recepcao/ranking
     """
     inicio, fim = periodo_datas(periodo)
-    filtro_setor_fle = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+    filtro_setor_fle = _filtro_fle_str_setor(setor)
 
     # Janela histórica: os 3 meses completos anteriores ao mês atual
     hoje = datetime.now()
@@ -13989,18 +16569,17 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
             WITH chegadas_prod AS (
                 SELECT setor_cod, FLE_PAC_REG, data_cheg
                 FROM (
-                    SELECT RTRIM(fle.FLE_STR_COD) AS setor_cod, fle.FLE_PAC_REG,
+                    SELECT {_SETOR_COD_FLE_DISPLAY} AS setor_cod, fle.FLE_PAC_REG,
                         CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg,
                         ROW_NUMBER() OVER (
                             PARTITION BY fle.FLE_PAC_REG, CAST(fle.FLE_DTHR_CHEGADA AS DATE)
                             ORDER BY fle.FLE_DTHR_CHEGADA ASC
                         ) AS rn
                     FROM fle
+                    {_LOGIN_RECEP_OSCAD_APPLY}
+                    {_JOIN_USR_REC}
                     WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{dt_ini}' AND '{dt_fim} 23:59:59'
                       AND fle.FLE_PAC_REG > 0
-                      AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-                      AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-                      AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
                       {filtro_setor_fle}
                 ) x WHERE rn = 1
             )
@@ -14033,16 +16612,15 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
     # Meta única de tempo de atendimento: média histórica geral (chegada -> abertura da OS)
     hist_tempo = query(f"""
         WITH chegadas AS (
-            SELECT RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login_recep,
-                RTRIM(fle.FLE_STR_COD) AS setor_cod, fle.FLE_PAC_REG, fle.FLE_DTHR_CHEGADA,
+            SELECT RTRIM(urec.USR_LOGIN) AS login_recep,
+                {_SETOR_COD_FLE_DISPLAY} AS setor_cod, fle.FLE_PAC_REG, fle.FLE_DTHR_CHEGADA,
                 fle.FLE_DTHR_ATENDIMENTO,
                 CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg
             FROM fle
+            {_LOGIN_RECEP_OSCAD_APPLY}
+            {_JOIN_USR_REC}
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{hist_inicio}' AND '{hist_fim} 23:59:59'
               AND fle.FLE_PAC_REG > 0
-              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
               {filtro_setor_fle}
         ),
         esperas_agg AS (
@@ -14056,6 +16634,7 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
                          WHERE o.osm_pac = c.FLE_PAC_REG
                            AND CAST(o.osm_dthr AS DATE) = c.data_cheg
                            AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
+                           AND RTRIM(o.osm_str) = c.setor_cod
                          ORDER BY o.osm_dthr ASC))) AS espera_min
             ) e
             GROUP BY c.login_recep, c.setor_cod
@@ -14074,26 +16653,31 @@ def recepcao_metas(periodo: str = "30d", setor: str = ""):
 
 @app.get("/api/recepcao/ranking")
 def recepcao_ranking(periodo: str = "30d", setor: str = ""):
-    """Ranking de recepcionistas: quantidade de pacientes, tempo de espera e produção financeira."""
+    """
+    Ranking de recepcionistas: quantidade de pacientes, tempo de espera e produção financeira.
+    Atribuição da senha a um recepcionista: FLE_USR_LOGIN normalmente já é o
+    login de quem registrou; mas no Ocupacional (RPS) toda senha é emitida
+    pelo totem (FLE_USR_LOGIN='TOTEM') — nesse caso usa FLE_USR_ATENDIMENTO
+    (quem efetivamente chamou/atendeu) em vez de descartar a senha.
+    """
     inicio, fim = periodo_datas(periodo)
-    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+    filtro_setor = _filtro_fle_str_setor(setor)
     vliq = "(smm.SMM_VLR - ISNULL(smm.SMM_VLR_DESCONTO,0) - ISNULL(smm.SMM_VLR_COPARTIC,0) + ISNULL(smm.SMM_AJUSTE_VLR,0))"
 
     rows = query(f"""
         WITH chegadas AS (
             SELECT
-                RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login_recep,
-                RTRIM(fle.FLE_STR_COD)                                     AS setor_cod,
+                RTRIM(urec.USR_LOGIN)                                      AS login_recep,
+                {_SETOR_COD_FLE_DISPLAY}                                   AS setor_cod,
                 fle.FLE_PAC_REG,
                 fle.FLE_DTHR_CHEGADA,
                 fle.FLE_DTHR_ATENDIMENTO,
                 CAST(fle.FLE_DTHR_CHEGADA AS DATE)                         AS data_cheg
             FROM fle
+            {_LOGIN_RECEP_OSCAD_APPLY}
+            {_JOIN_USR_REC}
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
               AND fle.FLE_PAC_REG > 0
-              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
               {filtro_setor}
         ),
         chegadas_prod AS (
@@ -14102,8 +16686,8 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             SELECT login_recep, setor_cod, FLE_PAC_REG, data_cheg
             FROM (
                 SELECT
-                    RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login_recep,
-                    RTRIM(fle.FLE_STR_COD)                                     AS setor_cod,
+                    RTRIM(urec.USR_LOGIN)                                      AS login_recep,
+                    {_SETOR_COD_FLE_DISPLAY}                                   AS setor_cod,
                     fle.FLE_PAC_REG,
                     CAST(fle.FLE_DTHR_CHEGADA AS DATE)                         AS data_cheg,
                     ROW_NUMBER() OVER (
@@ -14111,11 +16695,10 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                         ORDER BY fle.FLE_DTHR_CHEGADA ASC
                     ) AS rn
                 FROM fle
+                {_LOGIN_RECEP_OSCAD_APPLY}
+                {_JOIN_USR_REC}
                 WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
                   AND fle.FLE_PAC_REG > 0
-                  AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-                  AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-                  AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
                   {filtro_setor}
             ) x WHERE rn = 1
         ),
@@ -14125,7 +16708,10 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
             -- e também deixava a query ~40s mais lenta por causa do plano gerado).
             -- Tempo de espera: da senha (FLE_DTHR_CHEGADA) até a chamada real
             -- (FLE_DTHR_ATENDIMENTO, já na própria linha) — só cai pra abertura
-            -- da OS (osm_dthr) quando não há chamada registrada.
+            -- da OS (osm_dthr) quando não há chamada registrada. A OS tem que
+            -- ser do mesmo setor da senha (mesmo motivo do login_recep: sem
+            -- isso, um paciente que visita 2 setores no mesmo dia podia pegar
+            -- emprestado o horário de abertura da OS do setor ERRADO).
             SELECT
                 c.login_recep,
                 c.setor_cod,
@@ -14141,6 +16727,7 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
                          WHERE o.osm_pac = c.FLE_PAC_REG
                            AND CAST(o.osm_dthr AS DATE) = c.data_cheg
                            AND o.osm_dthr >= c.FLE_DTHR_CHEGADA
+                           AND RTRIM(o.osm_str) = c.setor_cod
                          ORDER BY o.osm_dthr ASC))) AS espera_min
             ) e
             GROUP BY c.login_recep, c.setor_cod
@@ -14178,8 +16765,8 @@ def recepcao_ranking(periodo: str = "30d", setor: str = ""):
 def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str = ""):
     """Evolução diária por turno (manhã/tarde) por recepcionista."""
     inicio, fim = periodo_datas(periodo)
-    filtro_setor  = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
-    filtro_recep  = f"AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) = '{recepcionista}'" if recepcionista else ""
+    filtro_setor  = _filtro_fle_str_setor(setor)
+    filtro_recep  = f"AND RTRIM(urec.USR_LOGIN) = '{recepcionista}'" if recepcionista else ""
 
     rows = query(f"""
         SELECT
@@ -14188,25 +16775,21 @@ def recepcao_evolucao(periodo: str = "30d", setor: str = "", recepcionista: str 
                 WHEN DATEPART(hour, fle.FLE_DTHR_CHEGADA) < 13 THEN 'Manhã'
                 ELSE 'Tarde'
             END                                                                AS turno,
-            RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))        AS login_recep,
-            RTRIM(ISNULL(u.USR_NOME,
-                   ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)))       AS nome_recep,
+            RTRIM(urec.USR_LOGIN)                                             AS login_recep,
+            RTRIM(urec.USR_NOME)                                              AS nome_recep,
             COUNT(DISTINCT fle.FLE_PAC_REG)                                    AS total_pacientes
         FROM fle
-        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) =
-                           RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))
+        {_LOGIN_RECEP_OSCAD_APPLY}
+        {_JOIN_USR_REC}
         WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
           AND fle.FLE_PAC_REG > 0
-          AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-          AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-          AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
           {filtro_setor}
           {filtro_recep}
         GROUP BY
             CAST(fle.FLE_DTHR_CHEGADA AS DATE),
             CASE WHEN DATEPART(hour, fle.FLE_DTHR_CHEGADA) < 13 THEN 'Manhã' ELSE 'Tarde' END,
-            RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)),
-            RTRIM(ISNULL(u.USR_NOME, ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)))
+            RTRIM(urec.USR_LOGIN),
+            RTRIM(urec.USR_NOME)
         ORDER BY data, turno
     """)
     for r in rows:
@@ -14223,7 +16806,7 @@ def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
     agrupados por convênio — agregado de todas as recepcionistas.
     """
     inicio, fim = periodo_datas(periodo)
-    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
+    filtro_setor = _filtro_fle_str_setor(setor)
 
     rows = query(f"""
         WITH chegadas AS (
@@ -14231,13 +16814,13 @@ def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
                 fle.FLE_PAC_REG                    AS pac,
                 fle.FLE_DTHR_CHEGADA                AS dthr_cheg,
                 fle.FLE_DTHR_ATENDIMENTO             AS dthr_atend,
-                CAST(fle.FLE_DTHR_CHEGADA AS DATE)  AS data_cheg
+                CAST(fle.FLE_DTHR_CHEGADA AS DATE)  AS data_cheg,
+                {_SETOR_COD_FLE_DISPLAY}             AS setor_cod
             FROM fle
+            {_LOGIN_RECEP_OSCAD_APPLY}
+            {_JOIN_USR_REC}
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
               AND fle.FLE_PAC_REG > 0
-              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
               {filtro_setor}
         ),
         os_do_dia AS (
@@ -14248,6 +16831,7 @@ def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
             JOIN osm o ON o.osm_pac = c.pac
                       AND CAST(o.osm_dthr AS DATE) = c.data_cheg
                       AND o.osm_dthr >= c.dthr_cheg
+                      AND RTRIM(o.osm_str) = c.setor_cod
         ),
         primeira AS (
             -- Tempo de espera: da senha até a chamada real (dthr_atend) quando existe,
@@ -14272,18 +16856,17 @@ def recepcao_por_convenio(periodo: str = "30d", setor: str = ""):
 def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str = ""):
     """Breakdown de convênios por recepcionista: quantidade de OS abertas."""
     inicio, fim = periodo_datas(periodo)
-    filtro_setor = f"AND RTRIM(fle.FLE_STR_COD) = '{setor}'" if setor else ""
-    filtro_recep = f"AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) = '{recepcionista}'" if recepcionista else ""
+    filtro_setor = _filtro_fle_str_setor(setor)
+    filtro_recep = f"AND RTRIM(urec.USR_LOGIN) = '{recepcionista}'" if recepcionista else ""
     rows = query(f"""
         WITH pacientes AS (
             SELECT DISTINCT fle.FLE_PAC_REG,
                             CAST(fle.FLE_DTHR_CHEGADA AS DATE) AS data_cheg
             FROM fle
+            {_LOGIN_RECEP_OSCAD_APPLY}
+            {_JOIN_USR_REC}
             WHERE fle.FLE_DTHR_CHEGADA BETWEEN '{inicio}' AND '{fim} 23:59:59'
               AND fle.FLE_PAC_REG > 0
-              AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-              AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-              AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
               {filtro_setor}
               {filtro_recep}
         ),
@@ -14309,16 +16892,14 @@ def recepcao_convenios(periodo: str = "30d", setor: str = "", recepcionista: str
 @app.get("/api/recepcao/usuarios")
 def recepcao_usuarios():
     """Lista de recepcionistas (login+nome) com atendimento nos últimos 180 dias — pro seletor da tela de Pontualidade."""
-    rows = query("""
+    rows = query(f"""
         SELECT DISTINCT
-            RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) AS login,
-            RTRIM(ISNULL(u.USR_NOME, ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) AS nome
+            RTRIM(urec.USR_LOGIN) AS login,
+            RTRIM(urec.USR_NOME)  AS nome
         FROM fle
-        LEFT JOIN usr u ON RTRIM(u.USR_LOGIN) = RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))
+        {_LOGIN_RECEP_OSCAD_APPLY}
+        {_JOIN_USR_REC}
         WHERE fle.FLE_DTHR_CHEGADA >= DATEADD(day, -180, GETDATE())
-          AND ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO) IS NOT NULL
-          AND RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO)) NOT LIKE 'TOTEM%'
-          AND UPPER(RTRIM(ISNULL(fle.FLE_USR_LOGIN, fle.FLE_USR_ATENDIMENTO))) NOT LIKE '%ESTAGIARIO%'
         ORDER BY nome
     """)
     return rows or []
@@ -14706,6 +17287,89 @@ def clinia_buscar_paciente(
     return {"total": len(rows), "pacientes": rows}
 
 
+_DIAS_SEMANA_PT = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+
+
+def _estimar_disponibilidade_historica(medico, servico, data_ini, data_fim):
+    """
+    Estimativa (NÃO garantia) de janela/intervalo de atendimento futuro,
+    baseada no padrão real de atendimento do médico nos últimos 120 dias,
+    agrupado por dia da semana.
+
+    Criada em 21/09/2026 como alternativa gratuita à falta de fonte confiável
+    de "grade completa": a tabela AGD (grade visual) e a TCE (duração por
+    médico+serviço) foram investigadas a fundo e descartadas por não baterem
+    de forma confiável com a ocupação real (ver docs-interno/INTEGRACAO-CLINIA.md
+    e histórico de investigação — testado com força bruta de alinhamento em
+    5+ médicos, inclusive cruzando por classe/CTF, sem sucesso).
+
+    Retorna só um resumo de janela/intervalo típico por dia da semana, não uma
+    lista de horários "livres" — evita afirmar com falsa certeza que um slot
+    específico está disponível quando na real é só um padrão estatístico.
+    """
+    condicoes = ["agm.agm_med = ?", "RTRIM(agm.agm_stat) IN ('A','E')",
+                 "agm.agm_hini < CAST(GETDATE() AS DATE)",
+                 "agm.agm_hini >= DATEADD(day, -120, CAST(GETDATE() AS DATE))"]
+    params = [medico]
+    if servico:
+        condicoes.append("RTRIM(agm.agm_smk) = ?")
+        params.append(servico.upper())
+    where = " AND ".join(condicoes)
+    historico = query(f"""
+        SELECT agm.agm_hini AS inicio, agm.agm_hfim AS fim
+        FROM agm WHERE {where}
+        ORDER BY agm.agm_hini
+    """, tuple(params))
+
+    por_dia_semana = defaultdict(list)
+    for r in historico:
+        por_dia_semana[r["inicio"].weekday()].append(r)
+
+    dt_ini = datetime.strptime(data_ini, "%Y-%m-%d")
+    dt_fim = datetime.strptime(data_fim, "%Y-%m-%d")
+    dias_no_intervalo = set()
+    cursor_dt = dt_ini
+    while cursor_dt <= dt_fim:
+        dias_no_intervalo.add(cursor_dt.weekday())
+        cursor_dt += timedelta(days=1)
+
+    def _percentil_hora(horas, p):
+        idx = min(len(horas) - 1, max(0, int(len(horas) * p)))
+        return horas[idx]
+
+    estimativas = []
+    for dia_semana in sorted(dias_no_intervalo):
+        registros = por_dia_semana.get(dia_semana, [])
+        datas_distintas = {r["inicio"].date() for r in registros}
+        if len(datas_distintas) < 3:
+            continue  # amostra insuficiente pra estimar com confiança mínima
+
+        horarios_inicio = sorted(r["inicio"].time() for r in registros)
+        horarios_fim = sorted(r["fim"].time() for r in registros)
+
+        por_data = defaultdict(list)
+        for r in registros:
+            por_data[r["inicio"].date()].append(r["inicio"])
+        gaps = []
+        for _data, inicios in por_data.items():
+            inicios.sort()
+            for a, b in zip(inicios, inicios[1:]):
+                gap_min = round((b - a).total_seconds() / 60)
+                if 1 <= gap_min <= 120:
+                    gaps.append(gap_min)
+        intervalo_tipico = Counter(gaps).most_common(1)[0][0] if gaps else None
+
+        estimativas.append({
+            "dia_semana": _DIAS_SEMANA_PT[dia_semana],
+            "horario_inicio_tipico": _percentil_hora(horarios_inicio, 0.05).strftime("%H:%M"),
+            "horario_fim_tipico": _percentil_hora(horarios_fim, 0.95).strftime("%H:%M"),
+            "intervalo_tipico_min": intervalo_tipico,
+            "amostras_dias": len(datas_distintas),
+        })
+
+    return estimativas
+
+
 @app.get("/api/clinia/agenda/disponibilidade")
 def clinia_disponibilidade(
     medico: int = None,
@@ -14716,15 +17380,27 @@ def clinia_disponibilidade(
 ):
     """
     Lista horários disponíveis para agendamento (vagas reabertas por
-    cancelamento — AGM_STAT='C').
+    cancelamento — AGM_STAT='C') + uma estimativa histórica (não garantida)
+    de janela/intervalo de atendimento por dia da semana, quando `medico` é
+    informado.
 
-    LIMITAÇÃO CONHECIDA: a grade completa de horários de cada médico é
-    definida na tabela AGD através de um template codificado em bitmask
-    (campos AGD_MAT/AGD_VESP), que não é decodificado aqui. Esta consulta
-    só enxerga horários que já existiram como linha na AGM e foram
-    cancelados (ficando livres de novo) — não é a grade inteira de
-    disponibilidade em aberto. Suficiente para reaproveitar cancelamentos;
-    para a grade completa seria necessário decodificar o AGD.
+    LIMITAÇÃO CONHECIDA (investigada a fundo em 14/09/2026, ver
+    docs-interno/INTEGRACAO-CLINIA.md): a grade completa de horários de cada
+    médico é definida na tabela AGD através de uma codificação legada de
+    shading de tela (bytes CP437 tipo ▒/█), que NÃO corresponde de forma
+    confiável à ocupação real (testado contra agenda real com folga e o
+    padrão não bateu, inclusive cruzando por classe/CTF) — não decodificado
+    aqui de propósito, pra não informar horário errado. A tabela TCE (duração
+    por médico+serviço) também não ajuda: só tem 25 linhas em todo o banco,
+    não cobre a maioria dos médicos. A lista `horarios` só enxerga horários
+    que já existiram como linha na AGM e foram cancelados (ficando livres de
+    novo), EXCLUINDO os que já foram remarcados por outra pessoa depois do
+    cancelamento (achado real em 14/09/2026: 141 de 186 cancelamentos futuros
+    já tinham uma segunda linha A/E ativa no mesmo médico+horário — sem esse
+    filtro a API ofereceria 76% dos "horários livres" já ocupados de novo).
+    Ainda assim não é a grade inteira de disponibilidade em aberto. O campo
+    `estimativa_historica` complementa isso com um padrão estatístico, sem
+    ser uma garantia de vaga.
     """
     hoje = datetime.now().strftime("%Y-%m-%d")
     if not data_ini:
@@ -14732,7 +17408,18 @@ def clinia_disponibilidade(
     if not data_fim:
         data_fim = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
 
-    condicoes = ["agm.agm_hini >= ?", "agm.agm_hini < DATEADD(day,1,CAST(? AS DATE))", "RTRIM(agm.agm_stat) = 'C'"]
+    condicoes = [
+        "agm.agm_hini >= ?", "agm.agm_hini < DATEADD(day,1,CAST(? AS DATE))", "RTRIM(agm.agm_stat) = 'C'",
+        # uma linha cancelada nao garante vaga livre: se alguem remarcou depois no
+        # mesmo medico+horario, existe uma segunda linha A/E e o C antigo fica
+        # "esquecido" na tabela -- sem isso a API oferece horario ja ocupado de novo
+        # (achado real: 141 de 186 cancelamentos futuros ja tinham sido remarcados)
+        """NOT EXISTS (
+            SELECT 1 FROM agm a2
+            WHERE a2.agm_med = agm.agm_med AND a2.agm_hini = agm.agm_hini
+              AND RTRIM(a2.agm_stat) IN ('A','E')
+        )""",
+    ]
     params = [data_ini, data_fim]
     if medico:
         condicoes.append("agm.agm_med = ?")
@@ -14751,6 +17438,7 @@ def clinia_disponibilidade(
             LTRIM(RTRIM(smk.SMK_NOME))         AS servico_nome,
             agm.agm_hini                       AS inicio,
             agm.agm_hfim                       AS fim,
+            RTRIM(agm.agm_loc)                 AS loc_cod,
             LTRIM(RTRIM(loc.loc_nome))         AS local
         FROM agm
         JOIN psv  ON psv.psv_cod   = agm.agm_med
@@ -14767,7 +17455,129 @@ def clinia_disponibilidade(
         if hasattr(r.get("fim"), "strftime"):
             r["fim"] = r["fim"].strftime("%Y-%m-%d %H:%M")
 
-    return {"total": len(rows), "horarios": rows}
+    estimativa_historica = []
+    if medico:
+        estimativa_historica = _estimar_disponibilidade_historica(medico, servico, data_ini, data_fim)
+
+    return {
+        "total": len(rows),
+        "horarios": rows,
+        "estimativa_historica": estimativa_historica,
+        "aviso_estimativa_historica": (
+            "estimativa_historica é um padrão estatístico calculado a partir do "
+            "histórico de atendimento (últimos 120 dias) do médico naquele dia da "
+            "semana — NÃO é confirmação de vaga livre. Só use 'horarios' (vagas "
+            "reabertas por cancelamento) como disponibilidade garantida."
+        ),
+    }
+
+
+# Login de sistema (já cadastrado no Smart, usado pelos totens de autoatendimento
+# de Diagnóstico) reaproveitado pra identificar agendamentos feitos pela Clinia —
+# decisão de 21/09/2026, ver conversa: evita criar um USR novo em produção.
+_CLINIA_AGM_USR_LOGIN = "TOTEMD"
+
+
+class ClíniaAgendamentoBody(BaseModel):
+    medico: int
+    loc: str
+    horario: str  # "YYYY-MM-DD HH:MM", precisa bater exatamente com um item de "horarios" da disponibilidade
+    paciente: int  # AGM_PAC (pac_reg), obtido via /api/clinia/paciente/buscar
+    convenio: str  # AGM_CNV_COD
+
+
+@app.post("/api/clinia/agenda/agendar")
+def clinia_agendar(body: ClíniaAgendamentoBody, _auth: bool = Depends(verificar_clinia_key)):
+    """
+    Confirma um agendamento reaproveitando um horário genuinamente livre (item
+    da lista `horarios` de /api/clinia/agenda/disponibilidade — uma vaga que
+    foi cancelada e não foi remarcada por ninguém). NÃO aceita horários de
+    `estimativa_historica` (não correspondem a nenhuma linha real na AGM).
+
+    Em vez de fazer UPDATE na linha cancelada, faz INSERT de uma linha nova
+    com AGM_EXT incrementado — replica o padrão que o próprio Smart usa
+    (confirmado investigando dados reais em 21/09/2026: uma linha cancelada e
+    depois remarcada gera uma segunda linha com EXT diferente, não sobrescreve
+    a original). Tipo de serviço/CTF/setor são herdados da linha cancelada
+    (definem o "formato" daquele horário); convênio/paciente vêm do pedido.
+
+    Campos como AGM_REC, AGM_GR_SES_ID, AGM_HON_SEQ, AGM_VALOR ficam em branco
+    — confirmado via FK/schema que não têm integridade referencial obrigatória
+    (não quebram nada), mas podem aparecer vazios em telas do Smart que os
+    exibem; refinar depois se necessário.
+    """
+    try:
+        hini = datetime.strptime(body.horario, "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise HTTPException(400, "horario inválido (use 'YYYY-MM-DD HH:MM')")
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        # trava as linhas desse medico+local+horario ate o fim da transacao --
+        # evita que duas requisicoes simultaneas reservem o mesmo horario
+        cur.execute("""
+            SELECT RTRIM(AGM_STAT), RTRIM(AGM_TPSMK), RTRIM(AGM_SMK), AGM_HFIM,
+                   RTRIM(ISNULL(AGM_CTF,'')), RTRIM(ISNULL(AGM_STR_COD,'')), RTRIM(AGM_EXT)
+            FROM agm WITH (UPDLOCK, HOLDLOCK)
+            WHERE AGM_MED = ? AND AGM_LOC = ? AND AGM_HINI = ?
+        """, (body.medico, body.loc, hini))
+        linhas = cur.fetchall()
+
+        if any(stat in ("A", "E") for stat, *_ in linhas):
+            conn.rollback()
+            raise HTTPException(409, "Horário já foi ocupado por outro agendamento.")
+
+        candidata = next((l for l in linhas if l[0] == "C"), None)
+        if not candidata:
+            conn.rollback()
+            raise HTTPException(404, "Esse horário não corresponde a nenhuma vaga cancelada disponível.")
+
+        _, tpsmk, smk, hfim, ctf, str_cod, _ = candidata
+
+        if not query("SELECT 1 AS ok FROM PAC WHERE PAC_REG = ?", (body.paciente,)):
+            conn.rollback()
+            raise HTTPException(400, "Paciente não encontrado (PAC_REG inválido).")
+        if not query("SELECT 1 AS ok FROM CNV WHERE RTRIM(CNV_COD) = ?", (body.convenio.strip().upper(),)):
+            conn.rollback()
+            raise HTTPException(400, "Convênio não encontrado (CNV_COD inválido).")
+
+        pac_nome_row = query("SELECT RTRIM(PAC_NOME) AS nome FROM PAC WHERE PAC_REG = ?", (body.paciente,))
+        pac_nome = pac_nome_row[0]["nome"] if pac_nome_row else None
+
+        proximo_ext = max((int(l[6]) if l[6] else 0 for l in linhas), default=0) + 1
+
+        cur.execute("""
+            INSERT INTO agm (
+                AGM_MED, AGM_LOC, AGM_HINI, AGM_HFIM, AGM_PAC, AGM_TPSMK, AGM_SMK, AGM_EXT,
+                AGM_CTF, AGM_STR_COD, AGM_DTMRC, AGM_USR_LOGIN, AGM_STAT, AGM_CONFIRM_STAT,
+                AGM_CNV_COD, AGM_PAC_NOME, AGM_MAQUINA
+            ) VALUES (?,?,?,?,?,?,?,?, ?,?, GETDATE(), ?, 'A', 'A', ?,?, 'CLINIA-API')
+        """, (
+            body.medico, body.loc, hini, hfim, body.paciente, tpsmk, smk, str(proximo_ext),
+            ctf or None, str_cod or None, _CLINIA_AGM_USR_LOGIN,
+            body.convenio.strip().upper(), pac_nome,
+        ))
+
+        conn.commit()
+    except pyodbc.Error as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(400, f"Erro ao gravar agendamento: {e}")
+    finally:
+        conn.close()
+
+    return {
+        "ok": True,
+        "medico": body.medico,
+        "loc": body.loc,
+        "horario": body.horario,
+        "paciente": body.paciente,
+        "paciente_nome": pac_nome,
+        "servico": smk,
+    }
 
 
 # ── PAINEL DE SENHAS (TV das recepções) ──────────────────────────────────────
@@ -14788,9 +17598,18 @@ if os.path.exists(_TISS_LOGOS_DIR):
 if os.path.exists(DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
 
+    # index.html referencia o bundle JS/CSS pelo nome com hash do build atual —
+    # cada build novo só mantém o hash mais recente em dist/assets (os antigos
+    # somem). Se o navegador guardar um index.html velho em cache, ele tenta
+    # carregar um arquivo que não existe mais → tela em branco/quebrada até um
+    # hard refresh manual (foi a causa real de "parece que não atualizou" e de
+    # alguns "sem acesso" relatados). index.html nunca pode ser cacheado; os
+    # arquivos dentro de /assets (nome com hash) podem, com segurança.
+    _NO_CACHE_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
     @app.get("/")
     def serve_index():
-        return FileResponse(os.path.join(DIST, "index.html"))
+        return FileResponse(os.path.join(DIST, "index.html"), headers=_NO_CACHE_HEADERS)
 
     @app.get("/{full_path:path}")
 
@@ -14803,7 +17622,7 @@ if os.path.exists(DIST):
         f = os.path.join(DIST, full_path)
         if os.path.exists(f) and not os.path.isdir(f):
             return FileResponse(f)
-        return FileResponse(os.path.join(DIST, "index.html"))
+        return FileResponse(os.path.join(DIST, "index.html"), headers=_NO_CACHE_HEADERS)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

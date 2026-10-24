@@ -5,3 +5,4 @@ python-dotenv==1.0.1
 zeep==4.3.3
 PyMuPDF==1.28.0
 reportlab==5.0.1
+requests==2.34.2
